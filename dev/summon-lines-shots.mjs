@@ -33,17 +33,31 @@ const CREW = [
 const LEAD = '__hero__';
 const SCRIPT = [
   [0, 'agent.tool_call', { agentId: LEAD, name: 'team.dispatch', callId: 'd1' }],
-  [100, 'agent.run.start', { agentId: 'researcher', runId: 'r-res' }],
-  [700, 'agent.run.start', { agentId: 'writer', runId: 'r-wri' }],
-  [1300, 'agent.run.start', { agentId: 'coder', runId: 'r-cod' }],
+  [100, 'agent.run.start', { agentId: 'researcher', runId: 'r-res', trigger: 'directive', model: 'claude-sonnet-4-5' }],
+  [700, 'agent.run.start', { agentId: 'writer', runId: 'r-wri', trigger: 'directive', model: 'claude-sonnet-4-5' }],
+  [1300, 'agent.run.start', { agentId: 'coder', runId: 'r-cod', trigger: 'directive', model: 'gpt-5.1' }],
   [1500, 'agent.tool_result', { agentId: LEAD, callId: 'd1' }],
   [3200, 'agent.tool_call', { agentId: 'researcher', name: 'team.dispatch', callId: 'd2' }],
-  [3300, 'agent.run.start', { agentId: 'scraper', runId: 'r-scr' }],
-  [3900, 'agent.run.start', { agentId: 'analyst', runId: 'r-ana' }],
+  [3300, 'agent.run.start', { agentId: 'scraper', runId: 'r-scr', trigger: 'directive', model: 'claude-haiku-4-5' }],
+  [3900, 'agent.run.start', { agentId: 'analyst', runId: 'r-ana', trigger: 'directive', model: 'claude-sonnet-4-5' }],
   [4100, 'agent.tool_result', { agentId: 'researcher', callId: 'd2' }],
   [4600, 'agent.tool_call', { agentId: 'coder', name: 'team.dispatch', callId: 'd3' }],
-  [4700, 'agent.run.start', { agentId: 'tester', runId: 'r-tes' }],
+  [4700, 'agent.run.start', { agentId: 'tester', runId: 'r-tes', trigger: 'directive', model: 'claude-haiku-4-5' }],
   [4900, 'agent.tool_result', { agentId: 'coder', callId: 'd3' }],
+  // what each run is doing (the ACTIVITY PLATES read these): tool calls with their real argsSummary shape, then costs
+  [5200, 'agent.tool_call', { agentId: 'researcher', runId: 'r-res', callId: 't1', name: 'web_search', argsSummary: '{"query":"saas pricing pages 2026"}' }],
+  [5300, 'agent.tool_call', { agentId: 'writer', runId: 'r-wri', callId: 't2', name: 'fs_read', argsSummary: '{"path":"brand/voice-guide.md"}' }],
+  [5400, 'agent.tool_call', { agentId: 'coder', runId: 'r-cod', callId: 't3', name: 'fs_write', argsSummary: '{"path":"src/pages/pricing.tsx","content":"export default'}],
+  [5500, 'agent.tool_call', { agentId: 'scraper', runId: 'r-scr', callId: 't4', name: 'web_fetch', argsSummary: '{"url":"https://linear.app/pricing"}' }],
+  [5600, 'agent.tool_call', { agentId: 'analyst', runId: 'r-ana', callId: 't5', name: 'fs_read', argsSummary: '{"path":"notes/scrape.md"}' }],
+  [5700, 'agent.tool_call', { agentId: 'tester', runId: 'r-tes', callId: 't6', name: 'browser_open', argsSummary: '{"url":"http://localhost:3000/pricing"}' }],
+  [5800, 'agent.tool_call', { agentId: LEAD, runId: 'r-lead', callId: 't0', name: 'team_status', argsSummary: '{}' }],
+  [6200, 'agent.tool_result', { agentId: 'writer', runId: 'r-wri', callId: 't2', ok: true, isError: false }],
+  [6300, 'cost.estimate', { agentId: 'researcher', runId: 'r-res', usd: 0.031, tokens: 9100 }],
+  [6300, 'cost.estimate', { agentId: 'writer', runId: 'r-wri', usd: 0.018, tokens: 5200 }],
+  [6300, 'cost.estimate', { agentId: 'coder', runId: 'r-cod', usd: 0.044, tokens: 12000 }],
+  [6300, 'cost.estimate', { agentId: 'scraper', runId: 'r-scr', usd: 0.004, tokens: 3100 }],
+  [6300, 'cost.estimate', { agentId: 'tester', runId: 'r-tes', usd: 0.006, tokens: 2400 }],
   [9000, 'agent.run.end', { agentId: 'scraper', runId: 'r-scr', reason: 'done' }],
   [11000, 'agent.run.end', { agentId: 'tester', runId: 'r-tes', reason: 'done' }],
 ];
@@ -80,7 +94,7 @@ async function main() {
         }
         out.push([c.id, ok]);
       }
-      World.focusBody(h.id);
+      if (World.setCinecamIdle) World.setCinecamIdle(false);   // pin the camera: an idle cinecam drifts between shots
       return out;
     })()`);
     console.log('placed', JSON.stringify(placed));

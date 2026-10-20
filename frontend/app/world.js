@@ -159,6 +159,12 @@ const World = (() => {
   // body to the worker body (who started whom), a pulse down it on start, the result riding it home on end.
   // Driven only by the same handoff() calls (team.dispatch window + agent.run.start/end), so it can't outlive a run.
   const summonLinks = [];
+  // ACTIVITY PLATES: what each live run is doing, read off the bus — the tool in flight and its target
+  // (agent.tool_call argsSummary), the model (agent.run.start), the cost the sidecar REPORTED (cost.estimate /
+  // agent.cost; nothing shown until one arrives — an unreported cost is unknown, never $0). One plate per run,
+  // drawn above the body; it carries the run clock, so the separate RUN / ▸ TOOL tags stand down for it.
+  const PLATES_ON = true;
+  const plateByAgent = new Map();
   let delegateLead = null, delegateCall = null;
   // G4 feature 1 — APPROVAL WALK-AND-WAIT. When a HERO run blocks on a permission.prompt the body stops
   // working, stands, and walks to a wait anchor (airlock → mission board → own desk, resolved honestly from
@@ -7046,6 +7052,7 @@ const World = (() => {
     if (overlaysOn) {
     drawRunClocks(now);   // G0.2: the honest elapsed-time tag at every desk with a live run (world-space, over the lightmap)
     drawWorkGlyphs(now);  // stage-ticker STRETCH: the "▸ TOOL" tag at a desk with a real tool in flight (one line below the run clock)
+    if (PLATES_ON) drawActivityPlates(now);   // ACTIVITY PLATES: name · clock / tool · target / model · reported cost, above each working body
     drawAwaitTag(now);    // the existing lead wait anchor
     for (const b of crew) if (crewIsAwaiting(b)) drawAwaitTag(now, b);
     drawRoutingNags(now); // BELT LEGIBILITY: the compiled plan's errors as in-world callouts on the broken piece
@@ -8048,6 +8055,7 @@ const World = (() => {
     for (const [aid, t0] of runStartByAgent) {
       const b = bodyForAgent(aid);
       if (!b || b.unplaced || crewIsAwaiting(b)) continue;
+      if (typeof PLATES_ON !== 'undefined' && PLATES_ON && plateByAgent.has(aid)) continue;   // its ACTIVITY PLATE carries this clock
       // only at a desk that is honestly in the working pose — a talk-only run never grows a clock
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
@@ -8080,6 +8088,80 @@ const World = (() => {
     ctx.restore();   // E1: close the link-stale dim wrapper
   }
 
+  /* ---------- ACTIVITY PLATES — an ASCII readout over each working body. Plain VT323 glyphs only (. - | ' > _ are all
+     in the font; box-drawing and ▸ are fallback faces and would break the monospace frame). Every line is padded to
+     one width so the frame closes. The clock is the RUN clock's own (CrewClock first), so the two can never disagree. */
+  const ACT_PLATE_FONT = "6px 'VT323','Courier New',monospace";
+  const ACT_PLATE_W = 26;   // characters per line, frame included
+  function plateTarget(raw) {
+    const s = String(raw || '');
+    const m = /"(?:url|path|file_path|filePath|file|query|q|command|cmd|pattern|title|name|to|id)"\s*:\s*"([^"]{1,200})/.exec(s);
+    let v = m ? m[1] : '';
+    v = v.replace(/^https?:\/\/(www\.)?/, '').replace(/\\\\/g, '/');
+    if (/[\/]/.test(v) && !/\s/.test(v) && !/^[a-z0-9-]+\.[a-z]{2,}/i.test(v)) v = v.split('/').filter(Boolean).pop() || v;   // a file path → its basename
+    return v.replace(/\s+/g, ' ').trim();
+  }
+  function plateClock(aid, t0, now) {
+    const wallNow = (typeof CrewClock !== 'undefined' && CrewClock && typeof CrewClock.frameNow === 'function') ? CrewClock.frameNow(now) : Date.now();
+    const crewMs = (typeof CrewClock !== 'undefined' && CrewClock && typeof CrewClock.elapsedOf === 'function') ? CrewClock.elapsedOf(aid, wallNow) : null;
+    const sec = Math.max(0, Math.floor((typeof crewMs === 'number' && isFinite(crewMs) ? crewMs : (now - t0)) / 1000));
+    const mm = Math.floor(sec / 60), ss = String(sec % 60).padStart(2, '0');
+    return mm >= 60 ? Math.floor(mm / 60) + ':' + String(mm % 60).padStart(2, '0') + ':' + ss : mm + ':' + ss;
+  }
+  const fitTo = (t, n) => (t.length > n ? t.slice(0, Math.max(0, n)) : t + ' '.repeat(n - t.length));
+  function drawActivityPlates(now) {
+    if (!plateByAgent.size) return;
+    const placed = [];
+    for (const [aid, k] of plateByAgent) {
+      const t0 = runStartByAgent.get(aid);
+      const b = bodyForAgent(aid);
+      if (t0 == null || !b || b.unplaced || crewIsAwaiting(b)) continue;
+      const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
+      if (!working) continue;
+      const inner = ACT_PLATE_W - 4;
+      const clock = plateClock(aid, t0, now);
+      const nm = String(b.name || aid).toUpperCase().slice(0, inner - clock.length - 5);
+      // line 1   .-NAME------- 0:08-.
+      const l1 = '.-' + nm + '-'.repeat(Math.max(1, ACT_PLATE_W - 5 - nm.length - clock.length)) + ' ' + clock + '-.';
+      // line 2   | > WEB.FETCH linear.app |   (live: blinking caret · idle between tools: "." and dimmer · none yet: thinking)
+      const caret = k.live && Math.floor(now / 420) % 2 ? '_' : ' ';
+      const what = k.name ? (k.live ? '> ' : '. ') + tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : '. thinking';
+      const l2 = '| ' + fitTo(what, inner - 1) + caret + ' |';
+      // line 3   '-sonnet 4.5------ $0.02-'
+      const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
+      const model = String(k.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, inner - usd.length - 3);
+      const l3 = "'-" + model + '-'.repeat(Math.max(1, ACT_PLATE_W - 4 - model.length - usd.length - (usd ? 1 : 0))) + (usd ? ' ' + usd : '') + "-'";
+      ctx.save();
+      ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      const cw = ctx.measureText('M').width, w = cw * ACT_PLATE_W, LH = 6;
+      const top = (b.visTopPy != null ? b.visTopPy : bodyPosY(b) - 18) - 3;
+      const H = LH * 3 + 2, hx = bodyPosX(b);
+      // stay on screen and on the station: the visible world span is (−pan .. canvas − pan) / scale
+      const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2;   // inside the view AND the station hull
+      const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
+      const hits = (x, y) => placed.some(p => x < p.x + p.w + 2 && p.x < x + w + 2 && y < p.y + p.h && p.y < y + H);
+      // stay near the owner: straight above, then nudged left / right, then one row up — never a far-off stack
+      let x = clampX(hx - w / 2), y = Math.max(vy0, top - LH * 3);
+      const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H], [-w / 2 - 3, -H], [w / 2 + 3, -H]];
+      let found = false;
+      for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - LH * 3 + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
+      for (let step = 2; !found && step < 8; step++) { const cy = top - LH * 3 - H * step; if (!hits(x, cy)) { y = cy; found = true; } }   // crowded floor: climb straight up, the stem keeps the owner
+      placed.push({ x, y, w, h: H });
+      if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
+      const a0 = ctx.globalAlpha;
+      const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
+      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = '#9adcb0'; ctx.fillRect(sx, y + LH * 3 + 1, 0.6, Math.max(0, top + 2 - (y + LH * 3 + 1)));
+      ctx.globalAlpha = a0 * 0.78; ctx.fillStyle = '#05080a'; ctx.fillRect(x - 1, y - 1, w + 2, LH * 3 + 2);
+      ctx.globalAlpha = a0;
+      const base = y + LH - 1;
+      ctx.shadowBlur = 2;
+      ctx.shadowColor = '#62ff9e'; ctx.fillStyle = '#9adcb0'; ctx.fillText(l1, x, base);
+      ctx.shadowColor = '#ffae3a'; ctx.fillStyle = k.live ? '#ffc978' : 'rgba(255,201,120,.62)'; ctx.fillText(l2, x, base + LH);
+      ctx.shadowColor = '#62ff9e'; ctx.fillStyle = 'rgba(154,220,176,.7)'; ctx.fillText(l3, x, base + LH * 2);
+      ctx.restore();
+    }
+  }
+
   /* ---------- the DESK WORK-GLYPH (stage ticker STRETCH): a tiny "▸ TOOL" tag at a desk while that agent has
      a tool in flight (agent.tool_call → its tool_result, tracked in glyphByAgent). Complements the RUN clock
      (which sits at the crown, y+3) by sitting one line BELOW it (y+13) so the two never collide. World-space,
@@ -8092,6 +8174,7 @@ const World = (() => {
       if (!b || b.unplaced || crewIsAwaiting(b)) continue;
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
+      if (typeof PLATES_ON !== 'undefined' && PLATES_ON && plateByAgent.has(aid)) continue;   // its ACTIVITY PLATE names the tool
       const label = '▸ ' + tickerTool(g && g.name);
       // anchor beside the same desk the run clock uses, but one line lower (RUN clock is at dp.y*T+3).
       let ax, ay;
@@ -10604,7 +10687,7 @@ const World = (() => {
     }
     to.working = true; to.sitting = false; to.dir = 'north'; to.target = null; to.pathPts = null; seizeFromIdle(to);   // re-path straight to its desk if it has one (stepCrew), else stand; drop any leisure latch (J4)
     to.workUntil = now + 3600000; if (!to.wakeAt || now - to.wakeAt > 1500) to.wakeAt = now;
-    sayAt(to, 'on it…');
+    if (!PLATES_ON) sayAt(to, 'on it…');
     gripeNoCompute(to);   // G0.7: a delegated worker in a computeless room complains once too
     const from = bodyForAgent(fromId) || agent;
     if (from && from !== to) {
@@ -10905,6 +10988,12 @@ const World = (() => {
     // ── STRETCH: desk work-glyph state — a tool in flight (tool_call → its tool_result) marks the agent;
     //    the render pass (drawWorkGlyphs) draws a tiny tag at that desk. run.end clears any stale mark. ──
     U.bus.on('agent.tool_call', p => { if (p && p.agentId && p.name) glyphByAgent.set(p.agentId, { name: p.name, callId: p.callId || null }); });
+    U.bus.on('agent.run.start', p => { if (p && p.agentId) plateByAgent.set(p.agentId, { model: String(p.model || ''), name: '', target: '', live: false, callId: null, usd: null, est: null }); });
+    U.bus.on('agent.tool_call', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && p.name) Object.assign(k, { name: p.name, target: plateTarget(p.argsSummary), live: true, callId: p.callId || null }); });
+    U.bus.on('agent.tool_result', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.callId || !k.callId || k.callId === p.callId)) k.live = false; });
+    U.bus.on('cost.estimate', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd) && k.est !== false) { k.usd = +p.usd; k.est = true; } });
+    U.bus.on('agent.cost', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd)) { k.usd = +p.usd; k.est = false; } });
+    U.bus.on('agent.run.end', p => { if (p && p.agentId) plateByAgent.delete(p.agentId); });
     U.bus.on('agent.tool_result', p => {
       if (!p || !p.agentId) return;
       const g = glyphByAgent.get(p.agentId);
