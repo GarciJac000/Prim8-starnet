@@ -66,7 +66,11 @@
   // 'deliverable' forwards too (2026-07-07 escape): a worker's saved image/file was INVISIBLE — no COMMS card,
   // no crate, no notify — because the event died here. The payload already carries the OWNING agentId and its
   // jail-relative path, and the frontend card opens /api/file?agent=<owner>, so forwarding is the whole fix.
-  const FORWARD = { 'agent.run.start': 1, 'agent.run.end': 1, 'agent.run.error': 1, 'agent.cost': 1, 'deliverable': 1 };
+  // agent.tool_call / agent.tool_result forward too (SUMMON LINES, 2026-10-19): the floor's activity plate, the
+  // CREW card's step and the DELEGATED row's live step all read a worker's own tool events BY its agentId/runId,
+  // and none of them ever arrived — a worker read "thinking" for its whole run. The lead's COMMS stays clean
+  // because harness.js hands a tool event to the chat callbacks only when its runId is the LEAD's own run.
+  const FORWARD = { 'agent.run.start': 1, 'agent.run.end': 1, 'agent.run.error': 1, 'agent.cost': 1, 'deliverable': 1, 'agent.tool_call': 1, 'agent.tool_result': 1 };
   // a delegated worker's added kit, on top of the autonomous full office (compute/web/files/memory/studio/jukebox):
   // the WORKBENCH (terminal). Paired with the SHARED lead consent broker, writes follow the lead's APPROVAL posture.
   // Commands do NOT in ASK mode: a worker runs surface:'autonomous', so the run authority withholds shell.exec /
@@ -782,7 +786,7 @@
         }));
         const overflowNote = overflow.length ? ' — ' + overflow.length + ' NOT dispatched (max ' + maxWorkers + ' per call; dispatch the rest in a follow-up call)' : '';
 
-        // forward ONLY lifecycle/cost from children onto the lead's bus (the floor animation reads agent.run.start).
+        // forward lifecycle/cost/tool steps from children onto the lead's bus (see FORWARD; never tokens).
         const childEmit = (name, payload) => { if (FORWARD[name] && ctx && typeof ctx.emit === 'function') { try { ctx.emit(name, payload); } catch (_) {} } };
 
         // validate every target up front: a real, live, OTHER worker (never self, never an unknown agentId).

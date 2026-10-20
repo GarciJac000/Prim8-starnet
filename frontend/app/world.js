@@ -8129,7 +8129,7 @@ const World = (() => {
       const l2 = '| ' + fitTo(what, inner - 1) + caret + ' |';
       // line 3   '-sonnet 4.5------ $0.02-'
       const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
-      const model = String(k.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, inner - usd.length - 3);
+      const model = String(k.model || '').replace(/^[a-z0-9-]+\//i, '').replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, inner - usd.length - 3);
       const l3 = "'-" + model + '-'.repeat(Math.max(1, ACT_PLATE_W - 4 - model.length - usd.length - (usd ? 1 : 0))) + (usd ? ' ' + usd : '') + "-'";
       ctx.save();
       ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
@@ -10992,7 +10992,8 @@ const World = (() => {
     U.bus.on('agent.tool_call', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && p.name) Object.assign(k, { name: p.name, target: plateTarget(p.argsSummary), live: true, callId: p.callId || null }); });
     U.bus.on('agent.tool_result', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.callId || !k.callId || k.callId === p.callId)) k.live = false; });
     U.bus.on('cost.estimate', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd) && k.est !== false) { k.usd = +p.usd; k.est = true; } });
-    U.bus.on('agent.cost', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd)) { k.usd = +p.usd; k.est = false; } });
+    // agent.cost arrives once per model call: the plate shows the run's running SUM (an estimate stands until the first one)
+    U.bus.on('agent.cost', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd)) { k.usd = (k.est === false ? k.usd : 0) + (+p.usd); k.est = false; } });
     U.bus.on('agent.run.end', p => { if (p && p.agentId) plateByAgent.delete(p.agentId); });
     U.bus.on('agent.tool_result', p => {
       if (!p || !p.agentId) return;

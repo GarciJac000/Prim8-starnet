@@ -1181,8 +1181,10 @@ const Harness = (() => {
           // Any prose before a tool call was an in-progress narration segment, not the terminal answer. Keep it
           // visible in the chronological live transcript, but reset every final-output accumulator at this
           // authoritative boundary so returned/persisted/delivered text contains exactly the last assistant turn.
-          case 'agent.tool_call': full = ''; onTerminalReset && onTerminalReset(); onToolCall && onToolCall(payload); break;
-          case 'agent.tool_result': onToolResult && onToolResult(payload); break;
+          // a delegated WORKER's tool steps ride this stream too (orchestration FORWARD) for the floor + CREW + DELEGATED
+          // readers on U.bus above; they are not the lead's steps, so they never reset its answer or render as its rows.
+          case 'agent.tool_call': if (runId && payload.runId && payload.runId !== runId) break; full = ''; onTerminalReset && onTerminalReset(); onToolCall && onToolCall(payload); break;
+          case 'agent.tool_result': if (runId && payload.runId && payload.runId !== runId) break; onToolResult && onToolResult(payload); break;
           case 'deliverable': onDeliverable && onDeliverable(payload); break;
           // the run is PAUSED on the sidecar awaiting this; the UI shows approve/always/full/deny and answers
           // via Harness.consent(). No more events arrive on this stream until the answer is POSTed.
