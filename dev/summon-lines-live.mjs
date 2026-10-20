@@ -120,7 +120,7 @@ async function main() {
       const workers = st.starts.filter(a => a !== 'agent');
       if (workers.length) sawWorker = true;
       const live = st.starts.length - st.ends.length;
-      if (sawWorker && live > 0) { n++; console.log('shot', n, JSON.stringify(st)); await capture(cdp, OUT, 'live-' + String(n).padStart(2, '0')); }
+      if (sawWorker && live > 0) { n++; console.log('shot', n, JSON.stringify(st)); console.log('  bodies', JSON.stringify(await evalJS(cdp, `World.bodies().map(b => [b.name, b.renderTile && b.renderTile.x, b.renderTile && b.renderTile.y, b.seated ? 'seated' : b.moving ? 'walking' : 'standing', b.working ? 'W' : ''])`))); await capture(cdp, OUT, 'live-' + String(n).padStart(2, '0')); }
       if (st.ends.includes('agent') && st.ends.length >= st.starts.length) break;
     }
     await capture(cdp, OUT, '9-end');

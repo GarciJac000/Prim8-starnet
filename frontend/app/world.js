@@ -8140,17 +8140,34 @@ const World = (() => {
       const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2;   // inside the view AND the station hull
       const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
       const hits = (x, y) => placed.some(p => x < p.x + p.w + 2 && p.x < x + w + 2 && y < p.y + p.h && p.y < y + H);
-      // stay near the owner: straight above, then nudged left / right, then one row up — never a far-off stack
-      let x = clampX(hx - w / 2), y = Math.max(vy0, top - LH * 3);
+      // AT A DESK: the plate hangs BESIDE the desk, level with the seat — never over the screen or the seated body
+      // (a plate above the head sat on the monitor and hid a seated worker behind its own readout). Right side first,
+      // then left; a side that leaves the view/hull is skipped. Off-desk (walking, deskless) it rides above the head.
+      const dp = deskPropFor(aid);
+      const atDesk = !!(dp && Math.abs(hx - (dp.x + (dp.w || 1) / 2) * T) < T * 2.5 && Math.abs(bodyPosY(b) - (dp.y + (dp.h || 1)) * T) < T * 2.5);
+      let x = clampX(hx - w / 2), y = Math.max(vy0, top - LH * 3), side = 0, found = false;
+      if (atDesk) {
+        const midY = Math.round((dp.y + (dp.h || 1)) * T - H / 2);   // the desk's front edge = the seated worker's shoulders
+        for (const [sd, sx0] of [[1, (dp.x + (dp.w || 1)) * T + 4], [-1, dp.x * T - w - 4]]) {
+          if (sx0 < vx0 - 0.5 || sx0 > vx1 + 0.5) continue;
+          for (const dy of [0, -H - 1, H + 1]) if (!hits(sx0, midY + dy)) { x = Math.round(sx0); y = midY + dy; side = sd; found = true; break; }
+          if (found) break;
+        }
+      }
       const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H], [-w / 2 - 3, -H], [w / 2 + 3, -H]];
-      let found = false;
-      for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - LH * 3 + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
+      if (!found) for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - LH * 3 + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
       for (let step = 2; !found && step < 8; step++) { const cy = top - LH * 3 - H * step; if (!hits(x, cy)) { y = cy; found = true; } }   // crowded floor: climb straight up, the stem keeps the owner
       placed.push({ x, y, w, h: H });
       if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
       const a0 = ctx.globalAlpha;
-      const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
-      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = '#9adcb0'; ctx.fillRect(sx, y + LH * 3 + 1, 0.6, Math.max(0, top + 2 - (y + LH * 3 + 1)));
+      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = '#9adcb0';
+      if (side) {   // beside a desk: a short tick from the plate's inner edge to the desk
+        const ty = Math.round(y + H / 2), ex = side > 0 ? x - 4 : x + w + 1;
+        ctx.fillRect(ex, ty, 3, 0.6);
+      } else {      // above a body: a stem down to the head
+        const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
+        ctx.fillRect(sx, y + LH * 3 + 1, 0.6, Math.max(0, top + 2 - (y + LH * 3 + 1)));
+      }
       ctx.globalAlpha = a0 * 0.78; ctx.fillStyle = '#05080a'; ctx.fillRect(x - 1, y - 1, w + 2, LH * 3 + 2);
       ctx.globalAlpha = a0;
       const base = y + LH - 1;
