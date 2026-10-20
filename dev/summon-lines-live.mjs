@@ -18,7 +18,8 @@ import { materializeSeedWorkspace, bootSeededSidecar, waitUp, waitDevReady } fro
 const PORT = process.env.SKYNET_SHOT_PORT || '9522';
 const CDP_PORT = Number(process.env.SKYNET_CDP_PORT || 9523);
 const URL = `http://127.0.0.1:${PORT}/`;
-const OUT = process.env.SKYNET_SHOT_OUT || join(process.cwd(), 'dev', '.shots-summon-live');
+const SCEN = (process.argv.find(a => a.startsWith('--scenario=')) || '--scenario=fanout').split('=')[1];
+const OUT = process.env.SKYNET_SHOT_OUT || join(process.cwd(), 'dev', '.shots-summon-live', SCEN);
 const LEAD_MODEL = process.env.SL_LEAD_MODEL || 'anthropic/claude-sonnet-4.6';
 const WORKER_MODEL = process.env.SL_WORKER_MODEL || 'anthropic/claude-haiku-4.5';
 
@@ -31,16 +32,36 @@ function devKey() {
   throw new Error('no SKYNET_OPENROUTER_KEY in dev/.env.dev');
 }
 
-const CREW = [
-  { name: 'Researcher', agentName: 'VEGA', skin: 'astronaut' },
-  { name: 'Writer', agentName: 'QUILL', skin: 'secretagent' },
-  { name: 'Engineer', agentName: 'BOLT', skin: 'robot' },
-];
-const ASK = 'Split this across the crew and run it in parallel with team.dispatch — do not do the parts yourself. '
-  + 'VEGA: search the web for the current monthly price of Linear Standard and Notion Plus and report both with sources. '
-  + 'QUILL: write a 3-line tagline for a SaaS pricing page and save it to notes/tagline.md. '
-  + 'BOLT: write pricing.html, a minimal static page with three plan cards (Free, Pro, Team), and save it in the workspace. '
-  + 'When all three are back, give me a 3-line summary.';
+const VEGA = { name: 'Researcher', agentName: 'VEGA', skin: 'astronaut' };
+const QUILL = { name: 'Writer', agentName: 'QUILL', skin: 'secretagent' };
+const BOLT = { name: 'Engineer', agentName: 'BOLT', skin: 'robot' };
+const ECHO = { name: 'Analyst', agentName: 'ECHO', skin: 'plaguedoctor' };
+const RUNE = { name: 'Tester', agentName: 'RUNE', skin: 'skeleton' };
+// desks spread across the seeded room (18x11 tiles; the lead's desk is at 8,1). Each recruit adopts the next free one.
+const SCENARIOS = {
+  fanout: { crew: [VEGA, QUILL, BOLT], desks: [[2, 5], [14, 5], [8, 8]],
+    ask: 'Split this across the crew and run it in parallel with team.dispatch — do not do the parts yourself. '
+      + 'VEGA: search the web for the current monthly price of Linear Standard and Notion Plus and report both with sources. '
+      + 'QUILL: write a 3-line tagline for a SaaS pricing page and save it to notes/tagline.md. '
+      + 'BOLT: write pricing.html, a minimal static page with three plan cards (Free, Pro, Team), and save it in the workspace. '
+      + 'When all three are back, give me a 3-line summary.' },
+  relay: { crew: [VEGA, QUILL, BOLT], desks: [[2, 4], [14, 4], [8, 8]],
+    ask: 'Run this as a relay with team.dispatch, ONE worker at a time, each one building on the result before it — do not do the parts yourself. '
+      + 'Step 1, VEGA: find the current monthly price of the Raycast Pro plan and two things it includes (search + fetch the page). '
+      + 'Step 2, QUILL: using exactly what VEGA found, write a 4-line product blurb and save it to notes/raycast-blurb.md. '
+      + 'Step 3, BOLT: turn the blurb from QUILL into raycast.html, a one-card static page, and save it. '
+      + 'Dispatch each step only after the previous one returns, passing its result along. Then tell me in 2 lines what each produced.' },
+  crew5: { crew: [VEGA, QUILL, BOLT, ECHO, RUNE], desks: [[2, 4], [14, 4], [2, 8], [8, 8], [11, 8]],
+    ask: 'Big parallel job — split it across all five crew with team.dispatch, all at once, and do not do the parts yourself. '
+      + 'VEGA: search the web for the top 3 open-source vector databases and their GitHub star counts. '
+      + 'QUILL: write a 5-line README intro for a tool called StarNet and save it to notes/readme-intro.md. '
+      + 'BOLT: write tools/wordcount.js, a node script that counts words in a file passed as an argument, and run it on itself with the terminal. '
+      + 'ECHO: fetch https://news.ycombinator.com and list the top 3 story titles. '
+      + 'RUNE: create notes/checklist.md with a 6-item launch checklist, then read it back to confirm it saved. '
+      + 'When everyone is back, give me one line per crew member.' },
+};
+const SC = SCENARIOS[SCEN]; if (!SC) throw new Error('unknown scenario ' + SCEN);
+const CREW = SC.crew, ASK = SC.ask;
 
 async function main() {
   const key = devKey();
@@ -67,6 +88,11 @@ async function main() {
     await sleep(2000);
     mkdirSync(OUT, { recursive: true });
 
+    // spread desks across the room first (unowned, so each recruit adopts one in order), then recruit
+    console.log('desks', JSON.stringify(await evalJS(cdp, `(() => { const st = Build.__test__.station(); return ${JSON.stringify(SC.desks)}.map(([x, y]) => {
+      for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const r = st.addProp({ t: 'desk', x: x + dx, y: y + dy, w: 2, h: 1 }); if (r && r.ok) return [x + dx, y + dy]; }
+      return [x, y, 'FAILED']; }); })()`)));
+    await sleep(800);
     // recruit the crew through the real path, give them full approval (as the dossier's ASK/FULL toggle would)
     const recruited = await evalJS(cdp, `(() => {
       const out = [];
@@ -88,8 +114,8 @@ async function main() {
     // one real COMMS message, through the real composer
     await evalJS(cdp, `(() => { const t = document.getElementById('chat-input'); t.value = ${JSON.stringify(ASK)}; t.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('chat-send').click(); return true; })()`);
     const t0 = Date.now(); let n = 0, sawWorker = false;
-    while (Date.now() - t0 < 240000) {
-      await sleep(3000);
+    while (Date.now() - t0 < 360000) {
+      await sleep(2500);
       const st = await evalJS(cdp, `(() => { const L = window.__sl || []; return { starts: L.filter(e => e[1] === 'agent.run.start').map(e => e[2]), ends: L.filter(e => e[1] === 'agent.run.end').map(e => e[2]), tools: L.filter(e => e[1] === 'agent.tool_call').length }; })()`);
       const workers = st.starts.filter(a => a !== 'agent');
       if (workers.length) sawWorker = true;
