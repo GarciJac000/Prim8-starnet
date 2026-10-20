@@ -155,6 +155,10 @@ const World = (() => {
   // body when the lead delegates. delegateLead/delegateCall track the open team.dispatch window (tool_call→result)
   // so a worker run that starts inside it animates; both are driven purely by existing agent.* bus events.
   const handoffBoxes = [];
+  // SUMMON LINES: a delegation stays visible for as long as the worker's run lives — a floor link from the lead
+  // body to the worker body (who started whom), a pulse down it on start, the result riding it home on end.
+  // Driven only by the same handoff() calls (team.dispatch window + agent.run.start/end), so it can't outlive a run.
+  const summonLinks = [];
   let delegateLead = null, delegateCall = null;
   // G4 feature 1 — APPROVAL WALK-AND-WAIT. When a HERO run blocks on a permission.prompt the body stops
   // working, stands, and walks to a wait anchor (airlock → mission board → own desk, resolved honestly from
@@ -6992,6 +6996,7 @@ const World = (() => {
       ghost.draw(ctx, now, T, capPx, plates.length ? (bx, paint) => { if (onPlate(bx)) return false; paint(); return true; } : null, (bx, n) => captionInStation(bx, n, plates));
     }
     if (liveWork) {
+    drawSummonLinks(now);    // SUMMON LINES: lead→worker floor links for as long as each delegated run lives
     drawHandoffBoxes(now);   // Stage 2: lead→worker delegation boxes fly over the entities
     drawSendCrates();        // SEND TO: a line's product crate flies from its OUTBOX to the next line's INBOX
     drawQueueJam(now);   // the live backlog as a physical jam of waiting crates at the INTAKE (world-space, under the lightmap)
@@ -10591,14 +10596,76 @@ const World = (() => {
     const to = bodyForAgent(toId);
     if (!to || to === agent) return;
     const now = (typeof performance !== 'undefined') ? performance.now() : fnow;
-    if (phase === 'done') { to.working = false; to.workUntil = 0; to.dir = 'south'; return; }
+    if (phase === 'done') {
+      to.working = false; to.workUntil = 0; to.dir = 'south';
+      const L = summonLinks.find(k => k.toId === toId && !k.tEnd);
+      if (L) L.tEnd = now;
+      return;
+    }
     to.working = true; to.sitting = false; to.dir = 'north'; to.target = null; to.pathPts = null; seizeFromIdle(to);   // re-path straight to its desk if it has one (stepCrew), else stand; drop any leisure latch (J4)
     to.workUntil = now + 3600000; if (!to.wakeAt || now - to.wakeAt > 1500) to.wakeAt = now;
     sayAt(to, 'on it…');
     gripeNoCompute(to);   // G0.7: a delegated worker in a computeless room complains once too
     const from = bodyForAgent(fromId) || agent;
-    if (from && from !== to) handoffBoxes.push({ fromX: from.px, fromY: from.py - 6, toX: to.px, toY: to.py - 6, t0: now, color: to.color || '#5ad0ff' });
+    if (from && from !== to) {
+      handoffBoxes.push({ fromX: from.px, fromY: from.py - 6, toX: to.px, toY: to.py - 6, t0: now, color: to.color || '#5ad0ff' });
+      for (let i = summonLinks.length - 1; i >= 0; i--) if (summonLinks[i].toId === toId) summonLinks.splice(i, 1);
+      summonLinks.push({ fromId: fromId, toId, t0: now, tEnd: 0 });
+    }
     summonGlance(to, now);   // C-Beat1: a delegated worker just started — OTHER idle in-sight bodies 50% glance at it (AFTER its seize, K3)
+  }
+  // SUMMON LINES — the floor link lead→worker (an elbow: down from the lead's feet, across to the worker's).
+  // It grows in (GROW), carries a summon pulse while the worker is on its way, idles as a slow dashed flow while
+  // the run lives, then on run end carries the result HOME and fades (BACK + FADE). Bodies are re-read every
+  // frame, so the link follows a walking worker to its desk.
+  function summonLinkPts(a, b) {
+    const ax = bodyPosX(a), ay = bodyPosY(a), bx = bodyPosX(b), by = bodyPosY(b);
+    return [{ x: ax, y: ay }, { x: ax, y: by }, { x: bx, y: by }];
+  }
+  function polyAt(pts, f) {
+    let L = 0; for (let i = 1; i < pts.length; i++) L += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    let d = L * Math.max(0, Math.min(1, f));
+    for (let i = 1; i < pts.length; i++) {
+      const s = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      if (d <= s || i === pts.length - 1) { const k = s ? Math.min(1, d / s) : 1; return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * k, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * k }; }
+      d -= s;
+    }
+    return pts[pts.length - 1];
+  }
+  function strokePartial(pts, f) {
+    let L = 0; for (let i = 1; i < pts.length; i++) L += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    let left = L * f; ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length && left > 0; i++) {
+      const s = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      const k = s ? Math.min(1, left / s) : 1;
+      ctx.lineTo(pts[i - 1].x + (pts[i].x - pts[i - 1].x) * k, pts[i - 1].y + (pts[i].y - pts[i - 1].y) * k);
+      left -= s;
+    }
+    ctx.stroke();
+  }
+  function drawSummonLinks(now) {
+    if (!summonLinks.length) return;
+    const GROW = 450, PULSE = 900, BACK = 900, FADE = 700;
+    for (let i = summonLinks.length - 1; i >= 0; i--) {
+      const k = summonLinks[i];
+      const from = k.fromId ? (bodyForAgent(k.fromId) || agent) : agent, to = bodyForAgent(k.toId);
+      const age = now - k.t0, endAge = k.tEnd ? now - k.tEnd : 0;
+      if (!from || !to || (k.tEnd && endAge > BACK + FADE)) { summonLinks.splice(i, 1); continue; }
+      const pts = summonLinkPts(from, to);
+      const col = to.color || '#5ad0ff';
+      const alpha = k.tEnd && endAge > BACK ? 1 - (endAge - BACK) / FADE : 1;
+      ctx.save();
+      ctx.lineCap = 'square'; ctx.lineJoin = 'miter';
+      ctx.globalAlpha = 0.5 * alpha; ctx.strokeStyle = '#000'; ctx.lineWidth = 2.2; strokePartial(pts, Math.min(1, age / GROW));   // the floor channel
+      ctx.globalAlpha = 0.85 * alpha; ctx.strokeStyle = k.tEnd ? '#7fd6a4' : col; ctx.lineWidth = 0.8;
+      ctx.setLineDash([2, 2]); ctx.lineDashOffset = -now / 160; strokePartial(pts, Math.min(1, age / GROW)); ctx.setLineDash([]);
+      // the summon pulse: lead → worker, right after the link lands
+      const pt = (age - GROW * 0.5) / PULSE;
+      if (pt > 0 && pt < 1) { const p = polyAt(pts, pt); ctx.globalAlpha = alpha; ctx.fillStyle = '#e8f2ff'; ctx.fillRect(Math.round(p.x) - 1.5, Math.round(p.y) - 1.5, 3, 3); ctx.strokeStyle = col; ctx.lineWidth = 0.6; ctx.strokeRect(Math.round(p.x) - 2.5, Math.round(p.y) - 2.5, 5, 5); }
+      // the result riding home: worker → lead
+      if (k.tEnd && endAge < BACK) { const p = polyAt(pts, 1 - endAge / BACK); ctx.globalAlpha = 1; ctx.fillStyle = '#7fd6a4'; ctx.fillRect(Math.round(p.x) - 2, Math.round(p.y) - 2, 4, 4); ctx.fillStyle = U.shade('#7fd6a4', 0.45); ctx.fillRect(Math.round(p.x) - 2, Math.round(p.y) - 2, 4, 1); }
+      ctx.restore();
+    }
   }
   // draw the in-flight handoff boxes (world space, over the entities). A small arced lerp that self-expires.
   function drawHandoffBoxes(now) {
