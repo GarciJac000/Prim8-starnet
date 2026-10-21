@@ -42,9 +42,12 @@ function boot(opts) {
     },
     Delegated: { repaint: () => page.repainted++ },
     Chat: { deliverTurns: (ws, turns) => page.delivered.push({ id: ws.id, turns }), load: ws => page.loaded.push(ws.id), canFocusSession: opts.canFocusSession || (() => true) },
-    U: { bus: { on: () => {} } },
+    U: opts.U || { bus: { on: () => {} } },
     VoiceLive: opts.voiceLive,
     fetch: async (url, init) => {
+      if (opts.reads) opts.reads.push({ url: String(url), deadline: !!(init && init.signal) });
+      // opts.hang(url): a read the sidecar accepts and never answers — only its signal (if it has one) ends it
+      if (opts.hang && opts.hang(String(url))) return new Promise((_res, rej) => { if (init && init.signal) init.signal.addEventListener('abort', () => rej(init.signal.reason || new Error('aborted'))); });
       if (String(url).indexOf('/api/runs') === 0) return { ok: true, json: async () => ({ runs: opts.runs || [] }) };
       if (String(url).indexOf('/api/transcript') === 0) return { ok: opts.transcriptUnavailable !== true, json: async () => ({ turns: opts.deliveryTurns || [] }) };
       page.acks.push(JSON.parse(init.body)); return { ok: true };
@@ -687,6 +690,51 @@ for (const text of ['', 'Older partial work.']) {
       A.ok(verbs.indexOf(verb) >= 0, file + ' asks for ' + verb + ', and the page can answer it');
     }
   }
+}
+
+/* fix round 4 (2026-10-20): A RECONCILE READ THE SIDECAR NEVER ANSWERS ENDS AT ITS DEADLINE. reconcile() is memoized on
+   the pass in flight, and its /api/runs and /api/transcript reads had no deadline: one the sidecar accepted and never
+   answered held that pass — and every later reconcile, which joined it — for good (the overseer's ledger beat awaited it
+   too, so /api/overseer was never asked again). Each read now carries U.timeoutSignal(15 s): the REAL util.js, on a fake
+   timer queue (its AbortController fallback, as on older macOS WebKit). */
+{
+  const timers = [];
+  const uctx = vm.createContext({ AbortController, DOMException, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; } });
+  const realU = vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'frontend', 'js', 'util.js'), 'utf8') + '\n;U;', uctx);
+  const U = { bus: { on: () => {} }, timeoutSignal: ms => realU.timeoutSignal(ms) };
+  const settled = p => Promise.race([p, new Promise(r => setTimeout(() => r('still hung'), 300))]);
+  const fire = ms => { const due = timers.filter(t => t.ms === ms && !t.fired); due.forEach(t => { t.fired = true; t.fn(); }); return due.length; };
+
+  // the run index read hangs
+  let reads = [], hangRuns = true;
+  let env = boot({ U, reads, hang: url => hangRuns && url.indexOf('/api/runs') === 0 });
+  const first = env.S.reconcile(), joined = env.S.reconcile();
+  A.eq(reads.length, 1, 'fixture: a second reconcile while the first is out joins it');
+  A.eq(reads[0].deadline, true, 'the /api/runs read carries a deadline (it had none)');
+  A.eq(fire(15000), 1, '…of 15 s');
+  A.eq(await settled(first), -1, 'a run index read the sidecar never answers ends at its deadline: the pass settles, folding nothing and saying the list was never read (-1, so the overseer retries)');
+  A.eq(await settled(joined), -1, '…and so does every reconcile that joined it');
+  hangRuns = false;
+  await settled(env.S.reconcile());
+  A.eq(reads.length, 2, 'the next reconcile reads again, no longer held by the hung pass');
+
+  // the run index answers; the full-delivery read behind it hangs
+  const full = JSON.stringify({ answer: 'y'.repeat(30000) + 'COMPLETE_TAIL' });
+  const textSha256 = require('node:crypto').createHash('sha256').update(full).digest('hex');
+  const row = { runId: 'hung-run', streamId: 'hung-worker', sessionTitle: 'Hung worker', reason: 'done',
+    dispatchDelivery: { state: 'final', text: full.slice(0, 24000), textLength: full.length, textSha256, reason: 'done' } };
+  reads = []; let hangTranscript = true;
+  env = boot({ U, reads, runs: [row], hang: url => hangTranscript && url.indexOf('/api/transcript') === 0,
+    deliveryTurns: [{ role: 'assistant', dispatchState: 'final', sourceRunId: row.runId, streamId: row.streamId, content: full, textLength: full.length, textSha256 }] });
+  const w = env.W.adopt({ id: row.streamId, title: row.sessionTitle, worker: true, parentStreamId: env.W.generalId() });
+  const pass = env.S.reconcile(w.id);
+  for (let n = 0; n < 20; n++) await Promise.resolve();
+  A.ok(reads.some(r => r.url.indexOf('/api/transcript') === 0 && r.deadline), 'the full-delivery read carries a deadline too');
+  fire(15000);
+  A.eq(await settled(pass), 0, 'a full-delivery read the sidecar never answers ends at its deadline: nothing half-folded');
+  A.eq(w.history.length, 0, '…and the session holds no truncated answer');
+  hangTranscript = false;
+  A.eq(await settled(env.S.reconcile(w.id)), 1, 'the next reconcile recovers the complete answer');
 }
 
 A.report('station-commands.test');

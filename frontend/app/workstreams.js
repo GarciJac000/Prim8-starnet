@@ -501,7 +501,7 @@
   function noteRunEnd(id, runId, ok, reason) {
     const w = find(id); if (!w || !runId) return false;
     if (!w.runIds.length || w.runIds[w.runIds.length - 1] !== runId) return false;
-    w.lastRunOk = ok === true;
+    w.lastRunOk = ok === true ? true : (ok === null ? null : false);   // null: a deliberate Stop — no verdict, its reason recorded
     if (typeof reason === 'string' && reason.trim()) w.lastRunReason = clamp(reason.trim(), 80);
     return true;
   }

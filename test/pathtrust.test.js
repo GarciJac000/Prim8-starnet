@@ -273,6 +273,31 @@ function scriptPrompt(decision) {
     A.eq(p2.calls.length, 1, '"once" left no standing grant → the next reference DID re-prompt');
   }
 
+  /* ---- 4a. "session" is a legal consent word, never a silent deny (sweep/safecell 2026-10-20) ----
+     POST /api/consent accepts once|session|always|full, and two real surfaces send "session" to a folder card: ACP's
+     "Allow for the rest of this session" and a paired phone's "for this session". The guard knew only always/full/once,
+     so "session" fell through to `access … was denied` while the answering surface was told it was applied. It now
+     approves the access AND remembers the root for the rest of THIS run (the caller's sessionRoots) — never standing. */
+  {
+    const h = harness();
+    const sessionRoots = new Set();
+    const p = scriptPrompt('session');
+    const r = await h.pt.guard(fileAbs, { scope: 'read', surface: 'interactive', prompt: p, sessionRoots });
+    A.ok(r && r.abs, '"session" allows the access (it is not a silent deny)');
+    A.eq(h.blessed.length, 0, '"session" records no standing grant');
+    A.eq(sessionRoots.size, 1, '"session" remembers the root for this run');
+    const quiet = scriptPrompt('deny');
+    const again = await h.pt.guard(path.join(proj, 'README.md'), { scope: 'read', surface: 'interactive', prompt: quiet, sessionRoots });
+    A.ok(again && again.abs, 'a second file under the same root in the same run flows');
+    A.eq(quiet.calls.length, 0, 'and is not asked again in that run');
+    const nextRun = scriptPrompt('deny');
+    await rejects(h.pt.guard(fileAbs, { scope: 'read', surface: 'interactive', prompt: nextRun, sessionRoots: new Set() }),
+      'a new run (a new session) is asked again');
+    A.eq(nextRun.calls.length, 1, 'the session grant did not outlive its run');
+    await rejects(h.pt.guard(path.join(proj, '.env'), { scope: 'read', surface: 'interactive', prompt: quiet, sessionRoots }),
+      'a session root never reaches past the protected-file floor');
+  }
+
   /* ---- 4b. "full" is AT LEAST as strong as "always": it records the standing root and never re-prompts ----
      Regression for the live-caught 2026-07-27 loop: "full" fell through to the "once" branch, so a Commander
      clicking the card's STRONGEST button ("Full access") bought nothing and was asked again on the very next

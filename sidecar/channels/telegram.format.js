@@ -40,6 +40,44 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  /* LINEAR-TIME HEADINGS AND FENCES (perf lane, 2026-10-20). The heading rule used to be the single regex
+       /^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm
+     and its trailer has two adjacent [ \t]* runs: on a heading line holding a long run of spaces before more text,
+     every lazy step of the body re-split that run every possible way. 2,000 spaces on one line took 6 s, and the
+     stream edit re-runs the conversion every 1.5 s, so one reply could pin a core. The fence opener
+     ```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n had the same two-run split (quadratic on a fence + spaces).
+     Same output, without the backtracking:
+       · HEADING_LINE matches the identical line HEAD (that part never backtracked) and takes the rest of the line;
+         headingBody() then returns the body the old lazy rule chose: the SHORTEST non-empty prefix of the rest
+         whose remainder is spaces/tabs, then '#'s, then spaces/tabs. Those remainders stay valid when their first
+         character is dropped, so that prefix ends where the LONGEST such suffix (one backward scan) begins.
+         A line that is head + spaces only keeps its old reading: two or more spaces leave the last one as the
+         body, a single space never matched.
+       · FENCE_BLOCK / FENCE_BODY accept the same opener with one space run before the optional language word.
+     test/channels.telegram.linear.test.js diffs both against the old regexes on random and adversarial input. */
+  const HEADING_LINE = /^[ \t]{0,3}#{1,6}[ \t]+.*$/gm;
+  const isSpTab = ch => ch === ' ' || ch === '\t';
+  function headingBody(line) {
+    const n = line.length;
+    let i = 0;
+    while (i < n && isSpTab(line[i])) i++;
+    while (i < n && line[i] === '#') i++;
+    const afterHashes = i;
+    while (i < n && isSpTab(line[i])) i++;
+    if (i === n) return (i - afterHashes >= 2) ? line[n - 1] : null;   // head + spaces only
+    let j = n;
+    while (j > i && isSpTab(line[j - 1])) j--;
+    while (j > i && line[j - 1] === '#') j--;
+    while (j > i && isSpTab(line[j - 1])) j--;
+    return line.slice(i, Math.max(i + 1, j));
+  }
+  // wrap(body) -> the replacement for a heading line; a line the old rule never matched comes back unchanged
+  function replaceHeadings(s, wrap) {
+    return s.replace(HEADING_LINE, line => { const body = headingBody(line); return body == null ? line : wrap(body); });
+  }
+  const FENCE_BLOCK = /```[ \t]*(?:([A-Za-z0-9_+-]+)[ \t]*)?\r?\n([\s\S]*?)```/g;
+  const FENCE_BODY = /```[ \t]*(?:[A-Za-z0-9_+-]+[ \t]*)?\r?\n([\s\S]*?)```/g;
+
   function toTelegramHtml(text) {
     const src = String(text == null ? '' : text).replace(/[\u0001\u0002]/g, '');
     if (!src) return { html: '', converted: false };
@@ -50,7 +88,7 @@
 
     // 1. FENCED BLOCKS FIRST — their interior must never be scanned for other markup. An unpaired trailing
     //    fence (a chunk boundary landed inside a block) is left alone and ends up escaped as literal text.
-    s = s.replace(/```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n([\s\S]*?)```/g, (m, lang, body) =>
+    s = s.replace(FENCE_BLOCK, (m, lang, body) =>
       hold('<pre>' + esc(body.replace(/\s+$/, '')) + '</pre>'));
     //    a single-line ```code``` with no newline
     s = s.replace(/```([^`\n]+)```/g, (m, body) => hold('<pre>' + esc(body) + '</pre>'));
@@ -72,7 +110,7 @@
 
     // 6. Markdown headings become bold lines — Telegram has no heading entity, and leaving the '#' visible is
     //    exactly the raw-syntax leak this module exists to stop.
-    s = s.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, (m, body) => '<b>' + body + '</b>');
+    s = replaceHeadings(s, body => '<b>' + body + '</b>');
 
     // 7. Blockquote markers: the '>' is already escaped to '&gt;' — render it as a quote glyph instead of
     //    leaving markdown punctuation on screen.
@@ -92,12 +130,12 @@
      reads clean prose rather than the raw syntax that started all this. Never throws. */
   function toPlainText(text) {
     let s = String(text == null ? '' : text);
-    s = s.replace(/```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n([\s\S]*?)```/g, (m, body) => body.replace(/\s+$/, ''));
+    s = s.replace(FENCE_BODY, (m, body) => body.replace(/\s+$/, ''));
     s = s.replace(/```([^`\n]+)```/g, '$1');
     s = s.replace(/`([^`\n]+)`/g, '$1');
     s = s.replace(/\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]{1,2000})\)/g, '$1 ($2)');
     s = s.replace(/\*\*(?!\s)([^*\n]{1,400}?)\*\*/g, '$1');
-    s = s.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, '$1');
+    s = replaceHeadings(s, body => body);
     s = s.replace(/^([ \t]{0,8})[*-][ \t]+(?=\S)/gm, (m, indent) => indent + '• ');
     return s;
   }
@@ -109,5 +147,5 @@
       .test(String(description == null ? '' : description));
   }
 
-  return { toTelegramHtml, toPlainText, isParseError, esc };
+  return { toTelegramHtml, toPlainText, isParseError, esc, _internals: { replaceHeadings, headingBody, FENCE_BLOCK, FENCE_BODY } };
 });

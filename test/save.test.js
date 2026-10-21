@@ -186,6 +186,25 @@ const envelope = (over) => Object.assign({ schema: 'starnet.save', version: 3, u
   A.eq(s.load('agent').agent.name, 'NOVA', 'the fresh save loads cleanly');
 }
 
+// ---- J2. quarantine across a RESTART never destroys an earlier quarantined copy (sweep/sessions 2026-10-20) ----
+// The quarantined file is the only remaining copy of a lost save, and the recovery notice names it. The quarantine
+// counter restarts in every process, so a second incident after a restart picked the SAME `.corrupt-1` name and
+// unlinked the first copy before renaming over it.
+{
+  const fs = memFs();
+  const file = pathMod.join(ROOT, 'agent.save.json');
+  fs.files.set(file, '{"doc":{"workstreams":[{"id":"FIRST-INCIDENT"');
+  mk(fs).load('agent');                        // boot 1: quarantined, no .bak to recover from
+  fs.files.set(file, '{"doc":{"workstreams":[{"id":"SECOND-INCIDENT"');
+  const s2 = mk(fs);                           // boot 2: a fresh store (a restarted sidecar)
+  s2.load('agent');
+  const kept = [...fs.files.keys()].filter(k => /\.corrupt-\d+$/.test(k)).map(k => fs.files.get(k));
+  A.ok(kept.some(b => b.includes('FIRST-INCIDENT')), 'the first incident\'s quarantined copy survives a later quarantine');
+  A.ok(kept.some(b => b.includes('SECOND-INCIDENT')), 'the second incident is quarantined too');
+  const n = s2.recoveryNotice('agent');
+  A.ok(n && String(fs.files.get(n.quarantinedTo) || '').includes('SECOND-INCIDENT'), 'the notice names the copy that holds the latest incident');
+}
+
 // ---- K. corrupt main but a CLEAN .bak: recover from .bak AND quarantine the corrupt main ----
 {
   const fs = memFs();

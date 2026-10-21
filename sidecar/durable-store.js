@@ -37,7 +37,7 @@
    readJsonResilient({ fs }, file) -> { value, status }     status: 'ok'|'recovered'|'absent'|'corrupt'|'unreadable'
    writeJsonResilient({ fs, path, writeDurable? }, file, value) -> void   (throws on a real write failure)
    makeDurableJsonStore({ fs, path, fileFor, writeDurable?, mutex?, onRecover?, onCorrupt? }) ->
-       { get(key), set(key,value), update(key,mutator)->Promise, readKey(key), mutex } */
+       { get(key), set(key,value), update(key,mutator)->Promise, readKey(key), signature(key)->string|null, mutex } */
 'use strict';
 
 const { writeFileDurable } = require('./durable-write.js');
@@ -74,7 +74,7 @@ function makeKeyedMutex() {
      'corrupt'   — main is present-but-bad and there is no usable .bak (caller must surface loudly).
      'unreadable'— main EXISTS but a non-ENOENT errno blocked the read (locked/EBUSY/EACCES). NOT empty, NOT
                    recovered from .bak (that would roll back live data): surface loudly, fail writes safely. */
-function readOne(fs, file) {
+function readOne(fs, file, keepRaw) {
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); }
   catch (e) {
@@ -86,7 +86,7 @@ function readOne(fs, file) {
     return { kind: 'unreadable', err: e };
   }
   if (raw == null || String(raw).length === 0) return { kind: 'empty' };   // zero-length = torn write
-  try { return { kind: 'ok', value: JSON.parse(raw) }; }
+  try { const value = JSON.parse(raw); return keepRaw ? { kind: 'ok', value: value, raw: raw } : { kind: 'ok', value: value }; }
   catch (_) { return { kind: 'corrupt' }; }
 }
 
@@ -109,9 +109,36 @@ function readJsonResilient(deps, file) {
 }
 
 /* ---- durable write with a last-known-good snapshot ----
-   Before overwriting main, copy the CURRENT good main to <file>.bak (durably) so the prior committed
-   value survives a torn replace. A current main that is itself corrupt is NOT copied (never clobber a
-   possibly-good .bak with garbage). Then write the new value to main durably (fsync-before-rename). */
+   Before overwriting main, keep the CURRENT good main as <file>.bak so the prior committed value survives a torn
+   replace. A current main that is itself corrupt is NOT kept (never clobber a possibly-good .bak with garbage). Then
+   write the new value to main durably (fsync-before-rename).
+
+   HOW the .bak is made (perf review 10-19: a notebook useCount bump paid two fsync'd rewrites plus three reads and
+   parses of the same file). The good main is HARD-LINKED as the .bak: the .bak becomes a second name for the very
+   bytes that were made durable when they were written as the main — two metadata operations instead of a second
+   temp + write + fsync + rename. The main is never absent (the link adds a name; the main's own replace below is
+   the same atomic tmp+rename), and the shared inode ends the moment that rename lands, because a store write never
+   modifies a file in place. A filesystem without hard links (FAT/exFAT), an fs facade without linkSync, or a refused
+   link falls back to the old durable COPY — and a failure there still refuses before the main is touched. The main
+   is read and parsed ONCE (it used to be read twice and parsed twice). */
+function unreadableError(message, cause) {
+  const error = new Error(message);
+  error.code = 'ESTORE_UNREADABLE'; error.cause = cause;
+  return error;
+}
+function linkAsBackup(fs, file) {
+  if (typeof fs.linkSync !== 'function' || typeof fs.unlinkSync !== 'function') return false;
+  const bak = file + '.bak';
+  try {
+    try { fs.unlinkSync(bak); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+    fs.linkSync(file, bak);
+    return true;
+  } catch (e) {
+    // the main is untouched either way; the copy path below makes the .bak instead
+    if (!e || (e.code !== 'EPERM' && e.code !== 'ENOTSUP' && e.code !== 'EXDEV' && e.code !== 'ENOSYS')) failNote('durable-store.bak.link', e);
+    return false;
+  }
+}
 function writeJsonResilient(deps, file, value) {
   const fs = deps.fs;
   const pathMod = deps.path;
@@ -119,25 +146,14 @@ function writeJsonResilient(deps, file, value) {
   const data = JSON.stringify(value);
   // Every writer, including full-state set/save callers, must preserve inaccessible authority.
   // A missing/torn main does not authorize replacement of an unreadable sole backup.
-  const prior = readJsonResilient({ fs }, file);
-  if (prior.status === 'unreadable') {
-    const error = new Error('durable-store: refusing to replace unreadable state');
-    error.code = 'ESTORE_UNREADABLE'; error.cause = prior.err;
-    throw error;
+  const main = readOne(fs, file, true);
+  if (main.kind === 'unreadable') throw unreadableError('durable-store: refusing to replace unreadable state', main.err);
+  if (main.kind !== 'ok') {
+    const b = readOne(fs, file + '.bak');
+    if (b.kind === 'unreadable') throw unreadableError('durable-store: refusing to replace unreadable state', b.err);
   }
-  let cur;
-  try {
-    cur = fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (!error || error.code !== 'ENOENT') {
-      const failure = new Error('durable-store: current state became unreadable before write');
-      failure.code = 'ESTORE_UNREADABLE'; failure.cause = error; throw failure;
-    }
-  }
-  let valid = false;
-  if (cur && String(cur).length) { try { JSON.parse(cur); valid = true; } catch (_) {} }
   // A backup write failure is not a parse failure. Refuse before replacing the committed main.
-  if (valid) wd({ fs: fs, path: pathMod }, file + '.bak', cur);
+  if (main.kind === 'ok' && !linkAsBackup(fs, file)) wd({ fs: fs, path: pathMod }, file + '.bak', main.raw);
   wd({ fs: fs, path: pathMod }, file, data);
 }
 
@@ -183,7 +199,34 @@ function makeDurableJsonStore(deps) {
   function set(key, value) {
     const file = fileFor(key);
     try { if (pathMod && pathMod.dirname && fs.mkdirSync) fs.mkdirSync(pathMod.dirname(file), { recursive: true }); } catch (_) {}
-    writeJsonResilient({ fs: fs, path: pathMod, writeDurable: wd }, file, value);
+    try { writeJsonResilient({ fs: fs, path: pathMod, writeDurable: wd }, file, value); }
+    finally { const k = String(key); if (writeGen.has(k)) writeGen.set(k, writeGen.get(k) + 1); }   // even a throw mid-write invalidates
+  }
+  /* signature(key) — ADDITIVE + OPT-IN (2026-10-19, idle-CPU pass): a cheap token that changes whenever this key's
+     committed main file may have changed, so a caller can keep its last parsed read and skip the read+parse+normalize
+     while the token holds. It is the bigint stat of the main file (dev, ino, size, mtimeNs, ctimeNs — a tmp+rename
+     write changes the ino, an in-place same-size rewrite changes mtimeNs/ctimeNs only ACROSS a filesystem timestamp
+     tick: ~1 ms on NTFS, 2 s on FAT) plus an in-process write generation bumped by every set(), so a write this
+     process made can never hide inside one tick. An outside writer rewriting in place twice within one tick could
+     (racy-clean); the single-writer contract above forbids that writer, so no racy guard is kept here.
+     bigint is required: inodes on this class of box exceed 2^53, where a plain number collides.
+     null means "do not cache": no statSync (the in-memory test fakes), a stat without bigint fields, a missing main
+     (absent/recovered states keep their uncached, loud path), or any stat error (noted, never silent).
+     The generation is LAZY — tracked only for keys someone has asked a signature of — so the stores that never
+     call this pay nothing. Reads only: update() still re-reads disk under the mutex, a cache never feeds a mutator. */
+  const writeGen = new Map();   // key -> set() count since the key's first signature() (in-process, never persisted)
+  function signature(key) {
+    if (typeof fs.statSync !== 'function') return null;
+    const k = String(key);
+    let st;
+    try { st = fs.statSync(fileFor(key), { bigint: true }); }
+    catch (e) {
+      if (!e || e.code !== 'ENOENT') failNote('durable-store.signature', e);
+      return null;
+    }
+    if (!st || typeof st.ino !== 'bigint' || typeof st.mtimeNs !== 'bigint' || typeof st.ctimeNs !== 'bigint') return null;
+    if (!writeGen.has(k)) writeGen.set(k, 0);
+    return writeGen.get(k) + ':' + st.dev + ':' + st.ino + ':' + st.size + ':' + st.mtimeNs + ':' + st.ctimeNs;
   }
   function update(key, mutator) {
     return mutex.run(key, async function () {
@@ -205,7 +248,7 @@ function makeDurableJsonStore(deps) {
       return next;
     });
   }
-  return { get: get, set: set, update: update, readKey: readKey, mutex: mutex };
+  return { get: get, set: set, update: update, readKey: readKey, signature: signature, mutex: mutex };
 }
 
 /* ---- verifiable durable write (read-back proof + retry-once) ----

@@ -391,9 +391,17 @@ const mk = (over) => { const d = deps(over); return { S: makeSlashActions(d), ca
     const broken = await makeSlashActions({ budget: { snapshot: async () => { throw new Error('ledger unreadable'); } } }).run('usage', '', {});
     A.eq(broken.ok, false, 'an unreadable ledger is a refusal, never a fabricated zero');
     A.ok(/ledger unreadable/.test(broken.text), 'the real error reaches the user');
+    // the host's own refusal already ends in a period (live 2026-10-20: "…See SETTINGS › SPENDING LIMITS.." on Telegram and COMMS)
+    const unsettled = await makeSlashActions({ budget: { snapshot: async () => ({ ok: false, error: 'Spend history is unavailable or not durably saved. See SETTINGS › SPENDING LIMITS.' }) } }).run('usage', '', {});
+    A.ok(/SPENDING LIMITS\.$/.test(unsettled.text) && !/\.\.$/.test(unsettled.text), 'a refusal that ends in a period is not doubled: ' + unsettled.text);
     const none = await makeSlashActions({}).run('usage', '', {});
     A.eq(none.ok, false, 'usage with no ledger dep refuses instead of reporting zero spend');
+    // UNPRICED + SUBSCRIPTION runs are counted in "N runs" but carry no proven dollars: say so, never imply $0 (sweep/providers)
+    const mixed = await makeSlashActions({ budget: { snapshot: async () => Object.assign({}, SNAP, { unpricedRuns: 2, unmeteredRuns: 3 }) } }).run('usage', '', {});
+    A.ok(mixed.lines.some(l => /2 runs? .*no published price/.test(l) && /3 .*subscription/.test(l) && /not in these dollars/.test(l)), 'unpriced and subscription runs are named as outside the dollar figures (' + mixed.lines.join(' | ') + ')');
+    A.ok(!r0usageHasCaveat(await makeSlashActions({ budget: { snapshot: async () => SNAP } }).run('usage', '', {})), 'a fully priced ledger carries no caveat line');
   }
+  function r0usageHasCaveat(res) { return res.lines.some(l => /no published price|subscription/.test(l)); }
 
   /* ---------------- contract ---------------- */
   {

@@ -8,6 +8,8 @@
 
      makeSaveStore({ fs, pathMod, root, clock }) -> {
        load(agentId)        -> doc | undefined        // the stored save envelope; undefined if none/corrupt
+       stamp(agentId)       -> string                 // one stat: moves on every save/outside edit; '' = unknown
+       loadStamped(agentId) -> { doc, stamp }         // load()'s doc + the pre-read stamp ('' unless a clean read)
        save(agentId, doc, {compareRevision?}) -> { ok, conflict?, revision?, updatedAt }
      }
 
@@ -47,7 +49,9 @@
     if (!clock || typeof clock.now !== 'function') throw new Error('makeSaveStore: an injected clock is required');
 
     let tmpSeq = 0;   // deterministic process-unique tmp suffix (a single host; no pid/rng needed)
+    let writes = 0;   // main-file saves made by this process: part of stamp(), so an in-process save always moves it
     const recoveredMissing = new Set();
+    const lastWritten = new Map();   // file -> { stamp, updatedAt, revision, replayAt } of this process's own last write (see save())
 
     /* Rejected-save snapshots are recoveries, not history: every stale client (a reopened tab, a flaky beacon)
        used to add one forever (audit 2026-09-25 #18). Keep the newest CONFLICT_KEEP per agent — the file just
@@ -78,6 +82,16 @@
       if (!AID_RE.test(String(agentId))) throw new Error('bad save agentId: ' + agentId);
       return pathMod.join(rootDir, agentId + '.save.json');
     }
+    // see stamp() in the API below
+    function stamp(agentId) {
+      const file = saveFile(agentId);
+      if (typeof fs.statSync !== 'function') return '';
+      try {
+        const s = fs.statSync(file, { bigint: true });
+        if (!s || s.mtimeNs == null || s.size == null) return '';
+        return writes + ':' + s.mtimeNs + ':' + s.size + ':' + s.ino;
+      } catch (_) { return ''; }
+    }
     // reads + parses a save file path, returning a TAGGED result so callers can tell a genuinely-absent file
     // from one that EXISTS but couldn't be READ (locked/EBUSY/EACCES on Windows) versus one that read but has
     // GARBAGE bytes. The distinction is load-bearing for the anti-clobber gate. The agentId grammar is validated
@@ -88,7 +102,7 @@
     //                                     are probably FINE, freshness UNKNOWN — do NOT clobber (conservative)
     //   { status: 'corrupt', err }     — present + read but the bytes don't parse: unrecoverable garbage, safe to
     //                                     overwrite (a corrupt save is already lost — preserves prior product behavior)
-    function readTaggedRaw(file) {
+    function readTaggedRaw(file, keepRaw) {
       let raw;
       try { raw = fs.readFileSync(file, 'utf8'); }
       catch (e) {
@@ -98,16 +112,23 @@
       // a zero-length main is a TORN write (crash between temp-open and rename, or an interrupted legacy write):
       // treat it like corrupt so the .bak recovery path below kicks in rather than loading empty.
       if (raw == null || String(raw).length === 0) return { status: 'corrupt', err: new Error('zero-length save file') };
-      try { return { status: 'ok', wrapper: JSON.parse(raw) }; }
+      try { const wrapper = JSON.parse(raw); return keepRaw ? { status: 'ok', wrapper: wrapper, raw: raw } : { status: 'ok', wrapper: wrapper }; }
       catch (e) { return { status: 'corrupt', err: e }; }   // present + read but garbage — recoverable-over
     }
     // quarantine a corrupt main aside (rename to <file>.corrupt-<seq>) so it's preserved for forensics but no
     // longer blocks the store, then recover from <file>.bak if it holds a clean prior save. Best-effort + loud.
     // Returns the quarantine destination path (null if the move failed) so the recovery marker can disclose it.
+    // A quarantined copy may be the ONLY remaining bytes of a lost save, and the recovery notice names it. tmpSeq
+    // restarts in every process, so `.corrupt-<seq>` repeats across restarts: never replace an existing copy (the old
+    // unlink-then-rename destroyed the first incident's bytes on the second) — step to the first free name instead.
+    function taken(p) {
+      if (typeof fs.existsSync === 'function') return fs.existsSync(p);
+      try { fs.readFileSync(p); return true; } catch (e) { return !(e && e.code === 'ENOENT'); }
+    }
     function quarantine(file, why) {
       try {
-        const dead = file + '.corrupt-' + (++tmpSeq);
-        try { if (typeof fs.unlinkSync === 'function') fs.unlinkSync(dead); } catch (_) {}   // clear any stale target (Windows rename-onto fails)
+        let dead = file + '.corrupt-' + (++tmpSeq);
+        while (taken(dead)) dead = file + '.corrupt-' + (++tmpSeq);
         fs.renameSync(file, dead);
         try { console.warn('[savestore] quarantined corrupt save ' + file + ' -> ' + dead + ' (' + why + ')'); } catch (_) {}
         return dead;
@@ -130,8 +151,8 @@
     // RESILIENT tagged read: main first; on a corrupt/torn main, quarantine it and recover from <file>.bak. An
     // 'unreadable' main is NOT quarantined (bytes are fine, just locked) — surfaced as-is so the caller stays
     // conservative. Adds status 'recovered' (main was bad, .bak was clean -> the .bak value is authoritative).
-    function readTagged(file) {
-      const m = readTaggedRaw(file);
+    function readTagged(file, keepRaw) {
+      const m = readTaggedRaw(file, keepRaw);
       if (m.status === 'ok') { recoveredMissing.delete(file); return m; }
       if (m.status === 'unreadable') return m;   // locked/EBUSY: don't roll back to a possibly-stale .bak
       // main is absent OR corrupt/torn — try the last-known-good .bak.
@@ -198,16 +219,43 @@
       }
       fs.renameSync(tmp, file);   // atomic replace
     }
-    function writeAtomic(file, value) {
-      ensureRoot();
-      // LAST-KNOWN-GOOD snapshot: before overwriting main, copy the CURRENT clean main to <file>.bak (durably)
-      // so a torn replace of main can be recovered from the prior committed save. A main that is itself corrupt/
-      // torn is NOT copied (never clobber a possibly-good .bak with garbage). Best-effort — a .bak failure must
-      // never block the real save.
+    /* linkBackup — the good main becomes <file>.bak as a HARD LINK: a second name for the bytes that were made durable
+       when they were written as the main (two metadata ops instead of a second temp + write + fsync + rename of the
+       whole save). The main never goes missing, and the shared inode ends when the main's own tmp+rename lands (this
+       store never writes a file in place). false = no link (FAT/exFAT, an fs facade without linkSync, a refusal):
+       the caller copies instead. Same discipline as durable-store.js. */
+    function linkBackup(file) {
+      if (typeof fs.linkSync !== 'function' || typeof fs.unlinkSync !== 'function') return false;
       try {
-        const cur = fs.readFileSync(file, 'utf8');
-        if (cur && String(cur).length) { try { JSON.parse(cur); writeDurable(file + '.bak', cur); } catch (_) {} }
-      } catch (_) { /* no current main (first write) — nothing to back up */ }
+        try { fs.unlinkSync(file + '.bak'); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+        fs.linkSync(file, file + '.bak');
+        return true;
+      } catch (e) {
+        if (!e || (e.code !== 'EPERM' && e.code !== 'ENOTSUP' && e.code !== 'EXDEV' && e.code !== 'ENOSYS')) failNote('savestore.bak.link', e);
+        return false;
+      }
+    }
+    // prior (optional): what the caller already knows about THIS file's current main — { status, raw? } from its own
+    // read moments ago (save() reads it for the anti-clobber gate), so the main is not read and parsed a second time.
+    function writeAtomic(file, value, prior) {
+      ensureRoot();
+      // LAST-KNOWN-GOOD snapshot: before overwriting main, keep the CURRENT clean main as <file>.bak so a torn
+      // replace of main can be recovered from the prior committed save. A main that is itself corrupt/torn is NOT
+      // kept (never clobber a possibly-good .bak with garbage). Best-effort — a .bak failure must never block the
+      // real save.
+      if (prior) {
+        if (prior.status === 'ok' && !linkBackup(file)) {
+          try {
+            const cur = prior.raw != null ? prior.raw : fs.readFileSync(file, 'utf8');
+            if (cur && String(cur).length) writeDurable(file + '.bak', cur);
+          } catch (e) { failNote('savestore.bak', e); }
+        }
+      } else {
+        try {
+          const cur = fs.readFileSync(file, 'utf8');
+          if (cur && String(cur).length) { try { JSON.parse(cur); writeDurable(file + '.bak', cur); } catch (_) {} }
+        } catch (_) { /* no current main (first write) — nothing to back up */ }
+      }
       writeDurable(file, JSON.stringify(value));   // atomic + durable replace of main
     }
 
@@ -226,6 +274,23 @@
         return (w && typeof w === 'object' && w.doc && typeof w.doc === 'object') ? w.doc : undefined;
       },
 
+      /* A SAVE STAMP, so a reader can tell "the save has not changed since I projected it" without parsing it again
+         (idle-cpu piece 2, 2026-10-19: GET /api/overseer re-parsed the whole 3.8 MB save on every 2.5 s poll per page).
+         stamp() = this process's save count + the file's mtime (ns) + size + file id, from one stat (~0.2 ms). Every save
+         here is a temp+rename, so it moves the file id and mtime; an outside edit moves mtime (and on NTFS the id). '' when
+         there is no file or no stat: '' never matches, so a caller then reads afresh, exactly as without a stamp.
+         loadStamped() = load()'s exact doc plus the stamp taken BEFORE the read, and only for a clean ('ok') read: an
+         absent, locked, corrupt or .bak-recovered read stamps '' and is never memoized by anyone. The parsed doc itself is
+         never cached here: it is ~4x the file in heap and ~15 load() callers would share one mutable object. */
+      stamp,
+      loadStamped(agentId) {
+        const file = saveFile(agentId);
+        const before = stamp(agentId);
+        const r = readTagged(file);
+        const w = (r.status === 'ok' || r.status === 'recovered') ? r.wrapper : undefined;
+        return { doc: (w && typeof w === 'object' && w.doc && typeof w.doc === 'object') ? w.doc : undefined, stamp: r.status === 'ok' ? before : '' };
+      },
+
       // persist the save envelope durably. Wrapped with the server receive time + the doc's own updatedAt so
       // a later read can compare freshness without parsing the frontend schema. ANTI-CLOBBER: if the incoming
       // doc is OLDER than what's on disk (updatedAt regressed), the write is refused — a stale background tab
@@ -234,7 +299,17 @@
       save(agentId, doc, options = {}) {
         if (!doc || typeof doc !== 'object') throw new Error('save: a doc object is required');
         const file = saveFile(agentId);   // validates the id (throws on traversal)
-        const prevRead = readTagged(file);
+        /* THE MAIN THIS PROCESS JUST WROTE (perf review 10-19: ~3 parses, 3 stringifies and 2 fsyncs of the whole
+           envelope per debounced persist, 121-161 ms at 5.8 MiB). When stamp() still equals the stamp taken right after
+           this process's own last write of this file, the main IS that write — no other save and no outside edit moved
+           it — so the anti-clobber facts it needs (updatedAt, the revision, the stored request's updatedAt) are known
+           without reading and parsing the save again. Only an exact REPLAY can need the stored doc itself (the
+           idempotency compare below), and a replay must carry the stored request's updatedAt: such a request, and any
+           moved stamp, takes the full read exactly as before. */
+        const memo = lastWritten.get(file);
+        const known = (memo && memo.stamp && memo.stamp === stamp(agentId)
+          && !(options.compareRevision && JSON.stringify(doc.updatedAt) === JSON.stringify(memo.replayAt))) ? memo : null;
+        const prevRead = known ? { status: 'ok' } : readTagged(file, true);
         // CONSERVATIVE anti-clobber on an UNREADABLE prior: the file EXISTS but a non-ENOENT errno blocked the
         // read (locked/EBUSY/EACCES), so the bytes are probably a perfectly good — possibly NEWER — save we just
         // couldn't read this instant. We cannot prove this incoming write isn't a lower-progress overwrite, so we
@@ -247,15 +322,19 @@
         }
         // a prior read cleanly ('ok') OR recovered from .bak ('recovered') is an authoritative prior for the
         // anti-clobber freshness gate — a torn main whose .bak we restored must still not be regressed.
-        const prev = (prevRead.status === 'ok' || prevRead.status === 'recovered') ? prevRead.wrapper : undefined;
-        const prevUpdated = prev && typeof prev === 'object' ? num(prev.updatedAt) : 0;
+        const prev = known ? undefined : ((prevRead.status === 'ok' || prevRead.status === 'recovered') ? prevRead.wrapper : undefined);
+        const prevUpdated = known ? known.updatedAt : (prev && typeof prev === 'object' ? num(prev.updatedAt) : 0);
         const requestUpdatedAt = num(doc.updatedAt);
         let incomingUpdated = requestUpdatedAt;
         if (options.compareRevision) {
-          const revision = num(prev && prev.doc && prev.doc._saveRevision);
+          const revision = known ? known.revision : num(prev && prev.doc && prev.doc._saveRevision);
           const expected = num(doc._saveRevision);
-          // A replay of an acknowledged request (including a beacon racing fetch) is idempotent.
-          const same = prev && JSON.stringify(Object.assign({}, prev.doc, { updatedAt: prev.requestUpdatedAt == null ? prevUpdated : prev.requestUpdatedAt, _saveRevision: expected, _saveDirty: false })) === JSON.stringify(Object.assign({}, doc, { _saveDirty: false }));
+          // A replay of an acknowledged request (including a beacon racing fetch) is idempotent. The two JSON texts
+          // can only be equal when the request's updatedAt is the stored request's (that key is in both), so that one
+          // scalar is compared first and the two whole-envelope stringifies run only for a real replay candidate.
+          const replayAt = prev ? (prev.requestUpdatedAt == null ? prevUpdated : prev.requestUpdatedAt) : undefined;
+          const same = !known && prev && JSON.stringify(doc.updatedAt) === JSON.stringify(replayAt)
+            && JSON.stringify(Object.assign({}, prev.doc, { updatedAt: replayAt, _saveRevision: expected, _saveDirty: false })) === JSON.stringify(Object.assign({}, doc, { _saveDirty: false }));
           if (same) return { ok: true, updatedAt: prevUpdated, revision };
           if (expected !== revision) {
             // Keep the rejected snapshot durably as well as the current station. Never silently
@@ -270,8 +349,14 @@
           doc = Object.assign({}, doc, { updatedAt: incomingUpdated, _saveRevision: revision + 1, _saveDirty: false });
         }
 
-        if (!options.compareRevision && prev && incomingUpdated < prevUpdated) return { ok: false, stale: true, updatedAt: prevUpdated };
-        writeAtomic(file, { version: 1, agentId: String(agentId), updatedAt: incomingUpdated, savedAt: clock.now(), ...(options.compareRevision ? { requestUpdatedAt } : {}), doc: doc });
+        if (!options.compareRevision && (known || prev) && incomingUpdated < prevUpdated) return { ok: false, stale: true, updatedAt: prevUpdated };
+        lastWritten.delete(file);
+        writeAtomic(file, { version: 1, agentId: String(agentId), updatedAt: incomingUpdated, savedAt: clock.now(), ...(options.compareRevision ? { requestUpdatedAt } : {}), doc: doc },
+          { status: prevRead.status, raw: prevRead.raw });
+        writes++;
+        recoveredMissing.delete(file);   // the main exists again and is this write
+        const after = stamp(agentId);
+        if (after) lastWritten.set(file, { stamp: after, updatedAt: incomingUpdated, revision: num(doc._saveRevision), replayAt: options.compareRevision ? requestUpdatedAt : incomingUpdated });
         return { ok: true, updatedAt: incomingUpdated, ...(options.compareRevision ? { revision: doc._saveRevision } : {}) };
       },
 

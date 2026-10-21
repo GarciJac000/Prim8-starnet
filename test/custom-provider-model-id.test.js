@@ -58,13 +58,14 @@ function sidecarValidate(endpointFetch) {
 // The REAL browser key check (validateAndSetKey + postKeyCheck + keyCheckFailure) over a localStorage-shaped store.
 function browserHarness(store, validate, sent) {
   const kcSrc = /function keyCheckFailure\(status, j, text\) \{[\s\S]*?\n  \}/.exec(harness)[0];
-  const H = new Function('normalizeProviderId', 'getProv', 'getModel', 'getBaseUrl', 'setKey', 'fetch',
+  const H = new Function('normalizeProviderId', 'getProv', 'getModel', 'getBaseUrl', 'setKey', 'fetch', 'hasStoredCredential',
     "const cleanKey = k => String(k == null ? '' : k).replace(/[\\s\\u200b-\\u200d\\u2060\\ufeff]+/g, '');\n"
-    + kcSrc + '\n' + A.fnBody(harness, 'async function postKeyCheck(') + '\n' + A.fnBody(harness, 'async function validateAndSetKey(')
+    + kcSrc + '\n' + A.fnBody(harness, 'function keyCheckLine(') + '\n' + A.fnBody(harness, 'async function postKeyCheck(') + '\n' + A.fnBody(harness, 'async function validateAndSetKey(')
     + '\nreturn { validateAndSetKey };')(
     p => registry.normalizeProviderId(p, 'openrouter'), () => store.prov, () => store.model, p => store.baseUrl[p] || '',
     async (k, p) => { store.keys[p] = k; return {}; },
-    async (route, init) => { const body = JSON.parse(init.body); sent.push(body); const out = await validate(body); return { ok: true, status: 200, text: async () => JSON.stringify(out) }; });
+    async (route, init) => { const body = JSON.parse(init.body); sent.push(body); const out = await validate(body); return { ok: true, status: 200, text: async () => JSON.stringify(out) }; },
+    p => !!store.keys[p]);
   return Object.assign(H, {
     configured: () => true, hasStoredCredential: () => false, setTotals: () => {},
     getModel: () => store.model, setModel: m => { store.model = m; },

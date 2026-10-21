@@ -1,0 +1,91 @@
+/* node test/save-persist-cost.test.js — a debounced station persist (POST /api/save -> saveStore.save) no longer re-reads,
+   re-parses and re-stringifies the whole save, and makes ONE durable write — with every anti-clobber rule intact.
+
+   The bug (perf review 10-19, index.js POST /api/save): each persist read + parsed the current main (anti-clobber),
+   stringified BOTH envelopes in full to test for an idempotent replay, read + parsed the main AGAIN to copy it to .bak
+   through a second fsync'd write, then stringified + fsync'd the new main: ~3 parses, 3 stringifies and 2 fsyncs of the
+   whole envelope, 121-161 ms at 5.8 MiB.
+
+   Proves through the REAL savestore over the real fs (the store index.js's handler calls), compareRevision like the
+   HTTP route:
+     (1) a run of normal persists: zero reads of the main, one stringify, one durable write each;
+     (2) the .bak is the previous committed save after every persist;
+     (3) an exact replay of an acknowledged request is still idempotent (no write, same answer);
+     (4) a stale revision still conflicts and keeps the rejected snapshot; an older updatedAt (legacy caller) is still
+         refused;
+     (5) a save replaced or torn behind the store is read in full again (the gates use what is really on disk). */
+'use strict';
+const A = require('./_assert.js');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { makeSaveStore } = require('../sidecar/savestore.js');
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-save-cost-'));
+try {
+  const file = path.join(root, 'agent.save.json');
+  const c = { reads: 0, fsyncs: 0, bigStringify: 0 };
+  const cfs = new Proxy(fs, { get(t, p) {
+    if (p === 'readFileSync') return function (f) { if (String(f) === file) c.reads++; return t.readFileSync.apply(t, arguments); };
+    if (p === 'fsyncSync') return function (fd) { c.fsyncs++; return t.fsyncSync(fd); };
+    const v = t[p]; return typeof v === 'function' ? v.bind(t) : v;
+  } });
+  const realStringify = JSON.stringify;
+  JSON.stringify = function (v) { const out = realStringify.apply(JSON, arguments); if (typeof out === 'string' && out.length > 100000) c.bigStringify++; return out; };
+  let T = 1000;
+  const store = makeSaveStore({ fs: cfs, pathMod: path, root, clock: { now: () => ++T } });
+  const workstreams = Array.from({ length: 120 }, (_, i) => ({ id: 'ws' + i, title: 'session ' + i, history: [{ role: 'user', content: 'y'.repeat(1500) }] }));
+  const envelope = (updatedAt, rev, tag) => ({ schema: 'skynet.save', version: 9, updatedAt, _saveRevision: rev, _saveClient: 'tab1', agent: { id: 'agent', name: tag }, workstreams });
+
+  let r = store.save('agent', envelope(100, 0, 'v0'), { compareRevision: true });
+  A.ok(r.ok && r.revision === 1, 'first persist accepted (revision 1)');
+
+  // ---- (1) + (2) ----
+  let rev = r.revision;
+  for (let i = 1; i <= 5; i++) {
+    c.reads = 0; c.fsyncs = 0; c.bigStringify = 0;
+    r = store.save('agent', envelope(100 + i * 10, rev, 'v' + i), { compareRevision: true });
+    A.ok(r.ok && r.revision === rev + 1, 'persist ' + i + ' accepted');
+    A.eq(c.reads, 0, 'persist ' + i + ' read the main 0 times (was 2 reads + 2 parses)');
+    A.eq(c.bigStringify, 1, 'persist ' + i + ' stringified the envelope once (was 3 times)');
+    A.eq(c.fsyncs, 1, 'persist ' + i + ' made one durable write (was two: the .bak copy + the main)');
+    const bak = JSON.parse(fs.readFileSync(file + '.bak', 'utf8'));
+    A.eq(bak.doc.agent.name, 'v' + (i - 1), '.bak holds the previous committed save after persist ' + i);
+    rev = r.revision;
+  }
+  A.eq(store.load('agent').agent.name, 'v5', 'the main holds the last persist');
+
+  // ---- (3) an exact replay of the last acknowledged request ----
+  const replay = envelope(150, rev - 1, 'v5');
+  const before = fs.readFileSync(file, 'utf8');
+  r = store.save('agent', replay, { compareRevision: true });
+  A.ok(r.ok && r.revision === rev, 'a replay of the acknowledged request answers ok with the same revision');
+  A.eq(fs.readFileSync(file, 'utf8'), before, 'and writes nothing');
+
+  // ---- (4) ----
+  r = store.save('agent', envelope(999, rev - 2, 'stale-tab'), { compareRevision: true });
+  A.ok(!r.ok && r.conflict && r.stale, 'a stale revision still conflicts');
+  A.ok(fs.existsSync(path.join(root, r.recovery)), 'and the rejected snapshot is kept durably');
+  A.eq(store.load('agent').agent.name, 'v5', 'the station is untouched by the stale tab');
+  const legacy = store.save('agent', envelope(1, 0, 'old'), {});
+  A.ok(!legacy.ok && legacy.stale, 'a legacy write with an older updatedAt is still refused on the fast path');
+
+  // ---- (5) ----
+  const outside = JSON.parse(fs.readFileSync(file, 'utf8'));
+  outside.doc._saveRevision = rev + 5; outside.doc.agent.name = 'outside';
+  fs.writeFileSync(file + '.ext', realStringify(outside)); fs.renameSync(file + '.ext', file);
+  c.reads = 0;
+  r = store.save('agent', envelope(400, rev, 'mine'), { compareRevision: true });
+  A.ok(c.reads >= 1, 'a save replaced behind the store is read in full again');
+  A.ok(!r.ok && r.conflict, 'and its newer revision wins the anti-clobber gate (conflict, not a clobber)');
+  A.eq(store.load('agent').agent.name, 'outside', 'the outside save is intact');
+  const bakRev = JSON.parse(fs.readFileSync(file + '.bak', 'utf8')).doc._saveRevision;
+  fs.writeFileSync(file, '{ torn');
+  r = store.save('agent', envelope(500, bakRev, 'after-tear'), { compareRevision: true });
+  A.ok(r.ok, 'a torn main recovers from .bak and the next persist lands');
+  A.eq(store.load('agent').agent.name, 'after-tear', 'with the new content');
+  JSON.stringify = realStringify;
+} finally {
+  try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {}
+}
+A.report('save-persist-cost.test');

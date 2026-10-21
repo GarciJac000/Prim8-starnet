@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
+const { makeSigner } = require('./minisign-test-signer.js');
 const script = path.join(ROOT, 'scripts', 't5-public-distribution.mjs');
 const lint = path.join(ROOT, 'scripts', 'lint-evidence-secrets.mjs');
 const TAURI_CONF = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
@@ -24,6 +25,7 @@ function cleanEnv(extra) {
   delete env.STARNET_T5_DISTRIBUTION_EVIDENCE;
   delete env.STARNET_T5_MANIFEST;
   delete env.STARNET_T5_INSTALLER_EXE;
+  delete env.STARNET_T5_PUBKEY;
   Object.assign(env, extra || {});
   return env;
 }
@@ -82,7 +84,11 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 't5-public-distribution-'));
 try {
   const installer = path.join(tmp, 'StarNet_' + APP_VERSION + '_x64-setup.exe');
   fs.writeFileSync(installer, 'fake installer');
-  fs.writeFileSync(installer + '.sig', 'fake-updater-signature');
+  // REAL minisign over the fixture bytes with a test key; T5 verifies against STARNET_T5_PUBKEY (test-only override
+  // of the tauri.conf.json key). A placeholder string used to reach publicDistributionReady=true (26af4a9a remainder).
+  const signer = makeSigner();
+  const realSig = signer.sign(fs.readFileSync(installer), { fileName: path.basename(installer) }).sigFileContent;
+  fs.writeFileSync(installer + '.sig', realSig);
   const hash = hashFile(installer);
   const bytes = fs.statSync(installer).size;
   const manifest = path.join(tmp, 'latest.json');
@@ -92,7 +98,7 @@ try {
     pub_date: '2026-06-28T00:00:00.000Z',
     platforms: {
       'windows-x86_64': {
-        signature: 'fake-updater-signature',
+        signature: realSig,
         url: INSTALLER_URL
       }
     }
@@ -117,7 +123,8 @@ try {
     STARNET_T5_T1_STATUS: t1,
     STARNET_T5_T2_STATUS: t2,
     STARNET_T5_T3_STATUS: t3,
-    STARNET_T5_T4_STATUS: t4
+    STARNET_T5_T4_STATUS: t4,
+    STARNET_T5_PUBKEY: signer.pubkeyB64
   };
 
   {
@@ -205,6 +212,30 @@ try {
     const lintRes = spawnSync(process.execPath, [lint, latest], { cwd: ROOT, encoding: 'utf8', env: cleanEnv() });
     assert.equal(lintRes.status, 0, lintRes.stderr || lintRes.stdout);
   }
+  {
+    /* T5.2 is the last gate before publishing, and it claims "Signed updater artifacts ... are valid". A .sig and a
+       manifest that merely AGREE TEXTUALLY prove nothing: here both carry a signature over DIFFERENT bytes (the shape
+       of an asset swapped or re-built after signing). Every installed app would refuse this update; so must T5. */
+    const forged = signer.sign(Buffer.from('some other installer'), { fileName: path.basename(installer) }).sigFileContent;
+    fs.writeFileSync(installer + '.sig', forged);
+    const forgedManifest = path.join(tmp, 'forged-latest.json');
+    writeJson(forgedManifest, { version: APP_VERSION, notes: 'test', pub_date: '2026-06-28T00:00:00.000Z',
+      platforms: { 'windows-x86_64': { signature: forged, url: INSTALLER_URL } } });
+    const out = path.join(tmp, 'forged-sig-out');
+    const res = run(['--distribution-evidence', path.join(tmp, 'good-proof.json')], Object.assign({}, baseEnv, {
+      STARNET_T5_MANIFEST: forgedManifest,
+      STARNET_T5_PUBLIC_DISTRIBUTION_DIR: out,
+      STARNET_T5_PUBLIC_DISTRIBUTION_LATEST_DIR: path.join(tmp, 'forged-sig-latest')
+    }));
+    fs.writeFileSync(installer + '.sig', realSig);
+    fs.utimesSync(installer + '.sig', new Date('2026-06-29T00:01:00.000Z'), new Date('2026-06-29T00:01:00.000Z'));
+    assert.equal(res.status, 1, 'a .sig that does not sign the installer must turn T5 red: ' + (res.stderr || res.stdout));
+    const got = JSON.parse(fs.readFileSync(path.join(out, 't5-public-distribution-status.json'), 'utf8'));
+    const artifacts = got.results.find(r => r.id === 't5.2-signed-updater-artifacts');
+    assert.equal(artifacts.status, 'fail');
+    assert.match(artifacts.reason, /does not verify against the updater public key/);
+    assert.equal(got.publicDistributionReady, false);
+  }
   /* ---- T5.1 MUST BIND ITS PREREQ VERDICTS TO THIS INSTALLER ---------------------------------------
      checkPrereqs read only verdict/ready booleans, and copyLatest() unconditionally re-stamps the `-latest`
      dirs on every run of every rung, so those verdicts persist across rebuilds indefinitely. Build installer
@@ -291,4 +322,4 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('t5-public-distribution.test: OK (35 assertions)');
+console.log('t5-public-distribution.test: OK (39 assertions)');

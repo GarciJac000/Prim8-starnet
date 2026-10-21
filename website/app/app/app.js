@@ -559,12 +559,24 @@ const App = (() => {
   // the only post-create path was the /yolo slash command; a creation-time control with no live equivalent is
   // the same escape class as the genesis-only codex sign-in). No dedicated endpoint exists or is needed:
   // approvalMode rides pushRoster (the sidecar roster persists it and runOnce reads it per run) + persist.
-  function setAgentApproval(agentId, mode) {
+  function setAgentApproval(agentId, mode, opts) {
     const a = agents.get(String(agentId || '')) || (agent && agent.id === agentId ? agent : null);
     if (!a) return false;
-    a.approvalMode = mode === 'full' ? 'full' : 'ask';
-    pushRoster();
+    const before = a.approvalMode === 'full' ? 'full' : 'ask', next = mode === 'full' ? 'full' : 'ask';
+    a.approvalMode = next;
+    const pushed = pushRoster();
     persist();
+    /* THE POSTURE ON SCREEN IS THE ONE THE STATION RECORDED (sweep/safecell 2026-10-20). A refused roster push (the
+       sidecar unreachable, or its durable write failing) left this row saying "asks first" while the roster the runs
+       read still said full — and the next run went ahead unasked. Put back what the station still enforces, repaint,
+       and say so. `recorded`: the station already persisted this posture itself (the permission card's FULL ACCESS). */
+    if (!(opts && opts.recorded) && before !== next) Promise.resolve(pushed).then(ok => {
+      if (ok || a.approvalMode !== next) return;
+      a.approvalMode = before; persist();
+      if (typeof StationUI === 'undefined') return;
+      if (StationUI.setRoster) StationUI.setRoster(liveAgents());
+      if (StationUI.notify) StationUI.notify('The station did not record that change — ' + (a.name || a.id) + (before === 'full' ? ' still has FULL POWER' : ' still asks first') + '. Try again once the station is reachable.', 'bad');
+    });
     return true;
   }
 
@@ -1618,7 +1630,10 @@ const App = (() => {
     // froze BOTH copies at the first failure, so every restart reverted the station.
     const envelope = Save.envelope ? Save.envelope(saveState) : saveState;
     const doc = Save.write(envelope);
-    if (typeof CloudSave !== 'undefined') CloudSave.push(doc || envelope, { cacheFailed: !doc, cacheError: doc ? null : (Save.writeError ? Save.writeError() : null) });   // durable write-through to the sidecar (debounced, best-effort)
+    // raw: the exact string Save.write just produced for this envelope, so CloudSave clones it with one parse instead of a
+    // second whole-save stringify (idle CPU piece 3, 2026-10-20)
+    const raw = Save.takeWriteRaw ? Save.takeWriteRaw() : null;
+    if (typeof CloudSave !== 'undefined') CloudSave.push(doc || envelope, { cacheFailed: !doc, cacheError: doc ? null : (Save.writeError ? Save.writeError() : null), raw });   // durable write-through to the sidecar (debounced, best-effort)
     if (rosterPushFailed) pushRoster();   // a prior roster POST failed — retry it opportunistically on this persist
     if (!doc) {
       // #121: the cache refused this save (the browser's per-site cap). It was queued for the station file above; the save
@@ -4497,8 +4512,10 @@ const App = (() => {
       if (card && !card.hidden && li.getAttribute('aria-describedby') === 'station-tip' && card.textContent !== tip) card.textContent = tip;
     });
   }
-  function armRailTicker() { if (!railTicker) railTicker = setInterval(updateRailLive, 1000); }
-  function stopRailTicker() { if (railTicker) { clearInterval(railTicker); railTicker = 0; } }
+  // through PollGate (idle CPU piece 3, 2026-10-20): 1 s while the rail can be seen, a 30 s floor while the Commander is
+  // away, one beat at once on return (the visibilitychange renderRail below also snaps every row back to truth)
+  function armRailTicker() { if (!railTicker) railTicker = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(updateRailLive, { ms: 1000, immediate: false }) : setInterval(updateRailLive, 1000); }
+  function stopRailTicker() { if (railTicker) { if (railTicker.stop) railTicker.stop(); else clearInterval(railTicker); railTicker = 0; } }
   // A backgrounded tab FREEZES/intensively-throttles its timers, so the live clock stalls while you're away. The
   // instant the station is visible again, snap every row back to truth (and re-arm the heartbeat) so the elapsed
   // and "last worked" stamps are never caught stale — they jump straight to correct, not after the next tick.

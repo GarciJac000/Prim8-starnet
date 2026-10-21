@@ -109,10 +109,13 @@ function withCandidates(n, spec) {
   A.eq(plan.commits.map(c => c.sha), ['aaaa005', 'aaaa004', 'aaaa003'], 'each entry carries its own sha');
   A.ok(plan.commits.every(c => c.n >= 3), 'nothing below the rejected iteration is ever touched');
 
-  // an APPROVED iteration above n is not stacked-discarded, so it must not be reverted either.
+  // approvals are FIFO (sweep/autonomy 2026-10-20): #5 was built on unreviewed #1..#4, so approving it first is
+  // refused by the store — otherwise rejecting #3 later could not reach it and approved work built on a rejected pass
+  // would survive. The undo plan still never reverts an approval a pre-FIFO record already holds above n.
   let L2 = withCandidates(5, { queueCap: 9 });
-  L2 = S.recordVerdict(L2, 'l1', 5, 'approved', { now: T0 + MIN * 100 });
-  A.eq(G.undoPlan(one(L2), 3).commits.map(c => c.n), [4, 3], 'an approved iteration above the rejected one survives');
+  A.eq(one(S.recordVerdict(L2, 'l1', 5, 'approved', { now: T0 + MIN * 100 })).iterations.find(it => it.n === 5).verdict, null, 'approving #5 over unreviewed #1..#4 is a no-op');
+  L2 = L2.map(l => Object.assign({}, l, { iterations: l.iterations.map(it => (it.n === 5 ? Object.assign({}, it, { verdict: 'approved' }) : it)) }));
+  A.eq(G.undoPlan(one(L2), 3).commits.map(c => c.n), [4, 3], 'an approved iteration above the rejected one (a pre-FIFO record) is not reverted');
 
   // rejecting the newest candidate undoes exactly one commit
   A.eq(G.undoPlan(one(withCandidates(3, { queueCap: 9 })), 3).commits.map(c => c.n), [3], 'the top of the stack undoes only itself');

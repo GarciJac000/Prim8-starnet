@@ -66,6 +66,13 @@ async function startTelegram() {
       if (/multipart\/form-data/i.test(ct)) call = Object.assign(call, parseMultipart(raw, ct));
       else { try { call.fields = JSON.parse(raw.toString() || '{}'); } catch (_) {} }
       if (method !== 'getUpdates' && method !== 'getMe') calls.push(call);
+      // the Bot API's own ceiling: a message longer than 4096 characters (after entity parsing) is refused outright
+      const rendered = String((call.fields && call.fields.text) || '').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+      if (method === 'sendMessage' && Array.from(rendered).length > 4096) {
+        call.refused = true;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message is too long' }));
+      }
       const result = method === 'getMe' ? { id: 42, is_bot: true, username: 'routine_media_bot', first_name: 'Routine Media' }
         : method === 'getUpdates' ? []
         : /^send/.test(method) ? { message_id: nextId++, chat: { id: Number(call.fields.chat_id) || 0 } }
@@ -114,6 +121,7 @@ async function startModel() {
       const toolDone = (body.messages || []).some(m => m && m.role === 'tool');
       if (blob.includes('ROUTINE_ATTACH')) return sse(res, [{ content: "Here is today's chart.\nATTACH: charts/today.png" }]);
       if (blob.includes('ROUTINE_MISSING')) return sse(res, [{ content: 'Chart attached.\nATTACH: charts/missing.png' }]);
+      if (blob.includes('ROUTINE_LONG')) return sse(res, [{ content: 'LONG_START\n' + Array.from({ length: 220 }, (_, i) => 'finding ' + i + ': the overnight digest line with details').join('\n') + '\nLONG_END' }]);
       if (blob.includes('ROUTINE_RENDER')) {
         if (!toolDone) return sse(res, [{ tool_calls: [{ index: 0, id: 'render', type: 'function', function: { name: 'image_generate', arguments: JSON.stringify({ prompt: 'a red sunrise over the station' }) } }] }], 'tool_calls');
         return sse(res, [{ content: 'Fresh render for today.' }]);
@@ -206,6 +214,22 @@ async function waitFor(pred, ms, label) {
     const note = await waitFor(() => telegram.calls.slice(mark).find(c => c.method === 'sendMessage' && /could not be attached/.test(String(c.fields.text || ''))), 10000, 'the missing-file note');
     A.ok(/charts\/missing\.png/.test(String(note.fields.text)), 'the note names the file that did not come');
     A.ok(!telegram.calls.slice(mark).some(c => c.method === 'sendPhoto' || c.method === 'sendDocument'), 'nothing was uploaded for an unreadable path');
+
+    /* ---- 5. a LONG report reaches the chat whole, split under the platform's limit (live-caught 2026-10-20) ----
+       The delivery sent the routine's reply as ONE message: a digest past 4096 characters was refused by the Bot API
+       ("message is too long") on the fire and on every retry, so the chat never saw it at all. */
+    const longJob = await routine('Overnight digest', 'ROUTINE_LONG write the overnight digest');
+    mark = telegram.calls.length;
+    await runNow(longJob);
+    await waitFor(() => telegram.calls.slice(mark).some(c => c.method === 'sendMessage' && (c.refused || String(c.fields.text || '').indexOf('LONG_END') >= 0)), 10000, 'the long digest delivery attempt');
+    await sleep(300);
+    const longParts = telegram.calls.slice(mark).filter(c => c.method === 'sendMessage');
+    A.ok(longParts.every(c => !c.refused), 'no part of the digest was refused as too long (' + longParts.filter(c => c.refused).length + ' refused)');
+    A.ok(longParts.length >= 3, 'the digest went out in several messages (' + longParts.length + ')');
+    const longText = longParts.filter(c => !c.refused).map(c => String(c.fields.text || '')).join('\n');
+    A.ok(longText.indexOf('LONG_START') >= 0 && longText.indexOf('finding 219:') >= 0 && longText.indexOf('LONG_END') > longText.indexOf('LONG_START'), 'every line of the digest arrived, in order');
+    const longState = (await sidecar.json('GET', '/api/cron')).body.jobs.find(j => j.id === longJob.id);
+    A.eq(longState && longState.lastDeliveryOk, true, 'and the routine records the delivery as landed: ' + (longState && longState.lastDeliveryError));
 
     /* ---- 4. a routine that stays on the station is not told about chat attachments ---- */
     const localJob = await routine('Local note', 'ROUTINE_LOCAL a quiet check', { deliver: 'local', origin: undefined });

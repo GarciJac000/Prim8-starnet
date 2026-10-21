@@ -88,8 +88,11 @@
         return run.then(function (res) {
           const verdict = interpret(res);
           const body = redact(res.out || '(no output)');
+          // the bounded capture (output-capture.js) dropped the middle of a huge output: say so, never imply the saved copy is whole
+          const elided = Number(res.fullOutElided) > 0 ? Number(res.fullOutElided) : 0;
           const content = (verdict.passed ? '✓ PASSED' : '✗ FAILED') + ' — `' + cmd + '`\n' + body
-            + '\n[exit ' + res.exitCode + (res.truncated ? ', output truncated' : '') + (res.timedOut ? ', TIMED OUT' : '') + ']';
+            + '\n[exit ' + res.exitCode + (res.truncated ? ', output truncated' : '') + (elided ? ', ' + elided + ' characters from the middle of the output were not kept' : '')
+            + (res.timedOut ? ', TIMED OUT' : '') + ']';
           const fullContent = res.truncated && typeof res.fullOut === 'string'
             ? (verdict.passed ? '✓ PASSED' : '✗ FAILED') + ' — `' + cmd + '`\n' + redact(res.fullOut || '(no output)')
               + '\n[exit ' + res.exitCode + (res.timedOut ? ', TIMED OUT' : '') + ']'
@@ -100,7 +103,9 @@
               passed: verdict.passed, added: 0, removed: 0, summary: redact(verdict.summary)
             });
           } catch (_) {}
-          return { content: content, fullContent: fullContent, summary: (verdict.passed ? 'verify passed' : 'verify FAILED') + ' (' + res.ms + 'ms)' };
+          const done = { content: content, fullContent: fullContent, summary: (verdict.passed ? 'verify passed' : 'verify FAILED') + ' (' + res.ms + 'ms)' };
+          if (elided) done.fullContentElided = elided;
+          return done;
         });
       }
     };

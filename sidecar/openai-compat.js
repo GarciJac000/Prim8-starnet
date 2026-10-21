@@ -189,7 +189,8 @@ function deriveSessionId(system, firstUser) {
      now()                -> number Date.now
      readBody(req, max)   -> Promise<string>
      redact(s)            -> string
-     logBoot(line)                  one-line boot log (enabled/disabled) */
+     logBoot(line)                  one-line boot log (enabled/disabled)
+     setTimeout(fn, ms)   -> timer  (optional) arms the /v1/runs retention sweep; defaults to the global */
 function makeOpenAiCompat(deps) {
   const d = deps || {};
   if (typeof d.runOnce !== 'function') throw new Error('makeOpenAiCompat: runOnce is required');
@@ -209,11 +210,13 @@ function makeOpenAiCompat(deps) {
   const now = d.now;
   const readBody = typeof d.readBody === 'function' ? d.readBody : null;
   const redact = typeof d.redact === 'function' ? d.redact : (s) => s;
+  const setTimer = typeof d.setTimeout === 'function' ? d.setTimeout : setTimeout;   // the /v1/runs retention sweep
 
   // shared in-flight counter across chat/completions (sync+stream) AND /v1/runs. 429 when it would exceed the cap.
   let inFlight = 0;
   // /v1/runs lifecycle store: runId -> { status, created, updated, sessionId, model, output, usage, error,
-  //   events:[], subs:Set, closed, abort, finishedAt }. Bounded by a lazy TTL sweep on each new run.
+  //   events:[], subs:Set, closed, abort, finishedAt }. Bounded by a TTL sweep on each new run and a timer armed
+  //   when a run finishes (scheduleRunSweep).
   const runs = new Map();
 
   function enabled() { return keyUsable(apiKeyFn()); }
@@ -428,6 +431,11 @@ function makeOpenAiCompat(deps) {
     }
 
     // sync JSON
+    // A vanished client interrupts a sync run too. An OpenAI SDK that times out RETRIES the same request, so a run
+    // that outlived its caller became up to three identical concurrent runs. A keyed request's capture has no
+    // socket (its on() is a no-op): one waiter leaving never aborts the shared run.
+    let syncDone = false;
+    if (typeof res.on === 'function') res.on('close', () => { if (!syncDone) ac.abort(); });
     inFlight++;
     let acc;
     try { acc = await startRun({ runId: id, agentId, model: runModel, provider, system, messages, signal: ac.signal }); }
@@ -445,6 +453,7 @@ function makeOpenAiCompat(deps) {
         else { acc.reason='error'; acc.errMsg='Structured output validation failed after one output-only repair: '+(repaired.errors.join('; ') || repair.errMsg || repair.reason); }
       }
     }
+    syncDone = true;
     persistTurns(agentId, parsed.lastUser, acc.buf);
     if (!acc.buf && ['failed', 'interrupted'].includes(runOutcome(acc.reason, false).status)) {
       // no text produced AND an error — hard fail with an OpenAI-style server_error (like the reference harness agent_incomplete).
@@ -486,7 +495,11 @@ function makeOpenAiCompat(deps) {
             const chunk=String(value); chunks.push(chunk);
             // Only nonterminal chat deltas are provisional. Commit final usage/status
             // and DONE together after saving the exact complete response.
-            if(chunk.startsWith('data: {')) {const frame=JSON.parse(chunk.slice(6));if(frame.choices && frame.choices[0].finish_reason==null)emitProgress({headers:this.headers,chunk});}
+            // A waiting heartbeat (an SSE comment) is progress too: the waiter's tail is body.slice(sent), so a
+            // comment kept out of `sent` shifted that offset back into frames it already had (duplicate deltas,
+            // a torn junk line before the final chunk).
+            if(chunk.startsWith(': ')) emitProgress({headers:this.headers,chunk});
+            else if(chunk.startsWith('data: {')) {const frame=JSON.parse(chunk.slice(6));if(frame.choices && frame.choices[0].finish_reason==null)emitProgress({headers:this.headers,chunk});}
             return true;
           }, end(value){if(value)chunks.push(String(value));}};
         await handleChatCompletions(req,capture,body,runId);
@@ -509,6 +522,18 @@ function makeOpenAiCompat(deps) {
   function sweepRuns() {
     const cutoff = now() - RUN_TTL_MS;
     for (const [rid, r] of runs) { if (r.closed && r.finishedAt && r.finishedAt < cutoff && (!r.subs || r.subs.size === 0)) runs.delete(rid); }
+  }
+  /* A finished run's record (one event per token delta) is swept an hour after it ends EVEN IF no new run arrives:
+     the sweep used to run only inside POST /v1/runs, so the last runs of a session stayed in memory for the life of
+     the station. One unref'd timer, armed for the earliest expiry; it re-arms while finished records remain. */
+  let runSweepTimer = null;
+  function scheduleRunSweep() {
+    if (runSweepTimer) return;
+    let next = Infinity;
+    for (const r of runs.values()) if (r.closed && r.finishedAt) next = Math.min(next, r.finishedAt + RUN_TTL_MS);
+    if (next === Infinity) return;
+    runSweepTimer = setTimer(() => { runSweepTimer = null; sweepRuns(); scheduleRunSweep(); }, Math.max(60000, next - now() + 1000));
+    if (runSweepTimer && typeof runSweepTimer.unref === 'function') runSweepTimer.unref();
   }
   function pushRunEvent(rid, ev) {
     const r = runs.get(rid); if (!r) return;
@@ -593,6 +618,7 @@ function makeOpenAiCompat(deps) {
       rec.closed = true; rec.finishedAt = now();
       // wake any live SSE subscribers so they close.
       for (const w of rec.subs) { try { w(null); } catch (_) {} }
+      scheduleRunSweep();
     });
 
     return json(res, 202, { run_id: runId, status: 'started' });

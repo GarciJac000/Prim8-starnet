@@ -566,6 +566,9 @@
     return mapLoop(loops, id, (loop) => {
       const target = (loop.iterations || []).find(it => it && it.n === num);
       if (!target || target.outcome !== 'candidate' || target.verdict) return loop;   // nothing to rule on
+      // FIFO approvals (the STACKING LAW): #num was built on every unreviewed candidate below it, so keeping it while
+      // one of those can still be rejected would let it survive a rejection the cascade can no longer reach.
+      if (v === 'approved' && LJ.pendingReviews(loop).some(it => it.n < num)) return loop;
 
       const its = (loop.iterations || []).map(it => {
         if (it.n === num) {

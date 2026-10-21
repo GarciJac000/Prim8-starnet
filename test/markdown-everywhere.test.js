@@ -35,7 +35,7 @@ function extract(name) {
 // eslint-disable-next-line no-new-func
 const renderMarkdown = new Function(
   /const HTML_ESC = \{[^}]*\};/.exec(chatSrc)[0] + '\n' + /  const REL_PATH = [^\n]*;/.exec(chatSrc)[0] + '\n' +
-  ['escapeHtml', 'linkify', 'mdInline', 'hostOf', 'linkHostNote', 'fileRefLink', 'fileRefImage', 'reportInline', 'renderFence', 'renderMarkdown'].map(extract).join('\n') +
+  ['escapeHtml', 'linkify', 'mdInline', 'hostOf', 'linkHostNote', 'appFileRef', 'fileRefLink', 'fileRefImage', 'reportInline', 'renderFence', 'renderMarkdown'].map(extract).join('\n') +
   '\nreturn renderMarkdown;')();
 // eslint-disable-next-line no-new-func
 const renderProse = new Function('renderMarkdown', 'hydrateFileRefs', /const MD_MARKERS = [^;]+;/.exec(chatSrc)[0] + '\n' + extract('renderProse') + '\nreturn renderProse;')(renderMarkdown, () => {});
@@ -139,7 +139,25 @@ A.eq(cascadeWhiteSpace(['cmsg', 'body']).value, 'pre-wrap', 'cascade sanity: COM
   const rp = el();
   renderProse(rp, 'see [report](out/report.md)', { files: novaRefs });
   A.ok(rp.__fileRefs === novaRefs && /class="md-file"/.test(rp.innerHTML), 'renderProse keeps the refs on the body it hydrates (bodyEl.__fileRefs)');
-  A.ok(/const refs = bodyEl\.__fileRefs \|\| /.test(extract('hydrateFileRefs')), 'hydrateFileRefs resolves through the refs the body carries');
+  A.ok(/const bodyRefs = bodyEl\.__fileRefs \|\| /.test(extract('hydrateFileRefs')), 'hydrateFileRefs resolves through the refs the body carries');
+
+  /* THE APP'S OWN FILE ADDRESS (user report 10-20): image_generate hands the agent '/api/file?agent=&path=', the agent pasted it
+     into ![…](…), and the reply showed a bare label — no picture, asked twice. The address reads back into the same seam. */
+  const own = renderMarkdown('![Floral moose — four-stage comparison](/api/file?agent=custom-etsy-designer-androo&path=previews%2Fv3-floral-moose-four-way.jpg)');
+  A.ok(/<span class="md-img" data-md-path="previews\/v3-floral-moose-four-way\.jpg" data-md-alt="Floral moose — four-stage comparison" data-md-agent="custom-etsy-designer-androo">/.test(own),
+    'an image at the app’s own /api/file address becomes the picture, for the agent and path it names');
+  A.ok(/data-md-project="C:\\Proj"/.test(renderMarkdown('![b](/api/file?agent=nova&amp;path=out%2Fb.png&amp;project=C%3A%5CProj)')), 'its project rides along (an &amp;-escaped address too)');
+  A.ok(/<a class="md-file" href="#" data-md-path="out\/r\.html" data-md-agent="nova">report<\/a>/.test(renderMarkdown('[report](/api/file?agent=nova&path=out%2Fr.html)')), 'a link to it opens the file');
+  // a LINK to a picture is the picture too (second report 10-20: the agent linked its slide JPGs, the user saw only links)
+  A.ok(/<span class="md-img" data-md-path="slides\/slide-1\.jpg" data-md-alt="Slide 1">/.test(renderMarkdown('- [Slide 1](slides/slide-1.jpg)')), 'a relative link to a .jpg shows the picture');
+  A.ok(/<span class="md-img" data-md-path="previews\/b\.webp" data-md-alt="Board" data-md-agent="nova">/.test(renderMarkdown('[Board](/api/file?agent=nova&path=previews%2Fb.webp)')), 'an app-address link to an image shows the picture');
+  A.ok(/<a class="md-file" href="#" data-md-path="out\/notes\.md">/.test(renderMarkdown('[notes](out/notes.md)')) && /<a href="https:\/\/x\.com\/a\.png"/.test(renderMarkdown('[web](https://x.com/a.png)')),
+    'a non-image file stays a file link; a web image stays a web link');
+  // …and the agent is told how: every typed COMMS turn says ![caption](path) shows the picture (a spoken turn keeps the voice rules alone)
+  A.ok(/\+ \(willSpeak \? '' : ' To show the Commander an image file[^']*!\[short caption\]\(path\)/.test(chatSrc), 'a typed COMMS turn tells the agent how to show an image');
+  for (const bad of ['/api/file?agent=nova&path=..%2F..%2Fsecret.png', '/api/file?agent=nova&path=%2Fetc%2Fx.png', '/api/file?agent=a%22b&path=x.png', '/api/file?path=x.png', '/api/files?agent=nova&path=x.png'])
+    A.ok(!/md-img/.test(renderMarkdown('![x](' + bad + ')')), 'an escaping, absolute, agentless or foreign address stays a label: ' + bad);
+  A.ok(/data-md-agent/.test(extract('hydrateFileRefs')) && /workspaceFileRefs\(n\.getAttribute\('data-md-agent'\)/.test(extract('hydrateFileRefs')), 'hydrateFileRefs resolves such a ref in the agent it names');
   // the run's root comes off its own run row (/api/runs — the record ReturnStore.openWork reads), read beside the transcript
   const gets = [];
   const runRecord = vm.runInContext(A.fnBody(ob, '  function runRecord(rw)') + '\nrunRecord;', vm.createContext({ Promise, encodeURIComponent,

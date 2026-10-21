@@ -20,6 +20,11 @@
 
   const JSONRPC = '2.0';
   const LOCAL_ERROR = Symbol.for('starnet.mcp.localTransportError');   // read by client.js safeRpcError
+  // the longest one unfinished SSE event may grow before the stream is closed (the stdio transport's line cap)
+  const MAX_EVENT_CHARS = 64 * 1024 * 1024;
+  // what each kept line or chunk piece of an open event is charged on top of its characters: about what V8 spends
+  // on one short string plus its array slot, so a flood of tiny lines cannot hold far more memory than the cap
+  const PIECE_COST = 48;
 
   // Node's fetch rejects with a bare "fetch failed"; the reason (DNS miss, refused, TLS) lives on e.cause.
   // Only the error CODE and our own wording are kept — never response text — so this stays transport-authored.
@@ -103,6 +108,7 @@
     const extraHeaders = deps.headers || {};
     const timeoutMs = deps.timeoutMs || 30000;
     const onError = typeof deps.onError === 'function' ? deps.onError : function () {};
+    const maxEventChars = (typeof deps.maxEventChars === 'number' && deps.maxEventChars > 0) ? deps.maxEventChars : MAX_EVENT_CHARS;
     let onMsg = null, sessionId = deps.sessionId || null, protocolVersion = deps.protocolVersion || null, closed = false;
 
     function headers() {
@@ -164,20 +170,54 @@
         for (const m of parseSse(body)) deliver(m);
         return;
       }
-      let answered = false, buf = '';
+      let answered = false;
       const route = (m) => {
         if (id != null && m && m.id != null && String(m.id) === String(id) && (('result' in m) || ('error' in m))) answered = true;
         deliver(m);
       };
-      const drainComplete = () => {       // deliver every COMPLETE (blank-line-terminated) event in the buffer
+      /* Events are found INCREMENTALLY, line by line: only the NEW chunk is searched for '\n'; the open line is
+         kept as its chunks and the open event as its finished lines. A blank line (CR stripped) ends an event —
+         exactly where /\r?\n\r?\n/ matched before. That regex ran over the whole open buffer from index 0 on
+         every chunk, so one 20 MB event cost over a second of CPU (quadratic in the event's size).
+         THE OPEN EVENT IS CAPPED (openChars counts every character not yet handed on). With the rescan gone, a
+         server sending one endless event filled memory at full read speed and crashed the whole sidecar out of
+         memory well inside the request timeout. Past maxEventChars the event is dropped, the stream cancelled,
+         the call fails with that reason and the manager is told the connection died — as the stdio line cap does.
+         THE CAP BOUNDS MEMORY, NOT JUST CHARACTERS (review 2026-10-21): every kept line and every kept piece of
+         the open line is charged PIECE_COST on top of its length. Counting characters alone, an endless event of
+         2-character lines held 32M strings under a 64 MiB cap — about 1.7 GB for one call, and a few calls at once
+         ran the sidecar out of memory anyway. */
+      let evLines = [], lineParts = [], openChars = 0, overflowed = false;
+      const takeText = (s) => {           // deliver every COMPLETE (blank-line-terminated) event this text finishes
+        let from = 0;
         for (;;) {
-          const b = buf.match(/\r?\n\r?\n/);
-          if (!b) return;
-          const ev = buf.slice(0, b.index);
-          buf = buf.slice(b.index + b[0].length);
+          const nl = s.indexOf('\n', from);
+          if (nl < 0) break;
+          const len = nl - from;
+          if (openChars + len > maxEventChars) { overflowed = true; break; }
+          let line = s.slice(from, nl);
+          if (lineParts.length) { lineParts.push(line); line = lineParts.join(''); lineParts = []; }
+          if (line.charCodeAt(line.length - 1) === 13) line = line.slice(0, -1);
+          from = nl + 1;
+          if (line) {
+            openChars += len + PIECE_COST;
+            if (openChars > maxEventChars) { overflowed = true; break; }
+            evLines.push(line); continue;
+          }
+          openChars = 0;
+          if (!evLines.length) continue;
+          const ev = evLines.join('\n');
+          evLines = [];
           for (const m of parseSse(ev + '\n\n')) route(m);
         }
+        if (!overflowed && from < s.length) {
+          openChars += s.length - from + PIECE_COST;
+          if (openChars > maxEventChars) overflowed = true;
+          else lineParts.push(from ? s.slice(from) : s);
+        }
+        if (overflowed) { evLines = []; lineParts = []; openChars = 0; }
       };
+      const openText = () => evLines.join('\n') + (evLines.length && lineParts.length ? '\n' : '') + lineParts.join('');
       // best-effort cancel: a cancel failure only means the already-answered (or already-dead) stream keeps
       // draining until the server drops it; the failure is handed back as a value for any caller that cares.
       const tryCancel = () => { try { return reader.cancel(); } catch (e) { return e; } };
@@ -191,12 +231,19 @@
           let step;
           try { step = await reader.read(); } catch (e) { break; }     // cancelled / network drop -> treat as end
           if (step.done) break;
-          buf += dec.decode(step.value, { stream: true });
-          drainComplete();
-          if (answered) { tryCancel(); break; }                        // reply routed — the rest is keepalive
+          takeText(dec.decode(step.value, { stream: true }));
+          if (answered || overflowed) { tryCancel(); break; }          // reply routed — the rest is keepalive
         }
-        if (!answered && buf.trim()) { for (const m of parseSse(buf)) route(m); buf = ''; }   // unterminated final event
+        if (!answered && !overflowed) { const rest = openText(); evLines = []; lineParts = []; if (rest.trim()) for (const m of parseSse(rest)) route(m); }   // unterminated final event
       } finally { clearTimeout(t); }
+      if (overflowed && !answered) {
+        const cap = maxEventChars >= 1048576 ? Math.round(maxEventChars / 1048576) + ' MiB' : maxEventChars + ' characters';
+        // the accounting, not "the event was over 64 MiB": a flood of short lines is cut long before its characters are
+        const msg = 'connector kept an SSE event open past the ' + cap + ' limit (each line or chunk held counts its characters plus ' + PIECE_COST + '): stream closed';
+        failTo(id, msg);
+        if (id != null) onError(new Error(msg));   // failTo already told onError when there is no id
+        return;
+      }
       if (id != null && !answered) failTo(id, 'connector response stream ended without a reply');
     }
 
@@ -210,5 +257,5 @@
     return { send, onMessage, close };
   }
 
-  return { makeHttpTransport, _internals: { parseSse, assertUrl, isLoopback, safeErrorDetail } };
+  return { makeHttpTransport, _internals: { parseSse, assertUrl, isLoopback, safeErrorDetail, MAX_EVENT_CHARS, PIECE_COST } };
 });

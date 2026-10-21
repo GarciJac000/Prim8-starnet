@@ -137,7 +137,7 @@ const SYNC_BASELINE = {
   'channels/sse.js': 2,
   'channels/store.js': 2,   // AUDITED — 2 left: ensureRoot mkdir, onRecover observer
   'channels/telegram.transport.js': 4,
-  'checkpoint-store.js': 10,   // AUDITED — GC failures now report; the sync size walk is gone (async repoBytes counts unreadable entries); remaining realpath/stat/readdir defaults, .bak staging and dw loader fallback
+  'checkpoint-store.js': 9,    // AUDITED — GC failures now report; the sync size walk is gone (async repoBytes counts unreadable entries; measure() sizes from git ls-tree, no per-file stat swallow); remaining realpath/stat/readdir defaults, .bak staging and dw loader fallback
   'configexport.js': 0,
   'consentwait.js': 1,
   'credits-link.js': 2,
@@ -146,7 +146,7 @@ const SYNC_BASELINE = {
   'cron-lock.js': 4,   // AUDITED — 4 left: fd close / unlink / release teardown
   'deliverable-store.js': 3,   // AUDITED — 3 left: journal absent on first load, fd close in finally, stat size default
   'domain-store.js': 1,
-  'durable-store.js': 3,   // AUDITED — corrupt-primary parse probe / mkdir before a write that fails loudly itself (x2); backup failures now propagate
+  'durable-store.js': 2,   // AUDITED — mkdir before a write that fails loudly itself (x2); backup failures now propagate; the main is parsed once (readOne) so the separate corrupt-primary probe is gone
   'durable-write.js': 3,
   'edgetts.js': 3,
   'environment.js': 15,
@@ -177,14 +177,11 @@ const SYNC_BASELINE = {
   'output-artifacts.js': 2,
   'pathtrust.js': 2,
   'plugins.js': 1,
-  'providers/anthropic.js': 1,
   'providers/codex-auth.js': 2,
   'providers/codex-token-store.js': 1,
-  'providers/codex.js': 3,
-  'providers/gemini.js': 1,
+  'providers/codex.js': 2,
   'providers/liveprices.js': 3,
   'providers/oauth-device.js': 2,
-  'providers/openrouter.js': 1,
   'providers/prices.js': 1,
   'providers/provider.js': 5,
   'providers/ratelimits.js': 1,   // AUDITED — 1 left: headers.get fall-through
@@ -192,7 +189,7 @@ const SYNC_BASELINE = {
   'routing/chain.js': 1,
   'run-journal.js': 7,
   'runroute.js': 2,
-  'savestore.js': 7,   // AUDITED — 7 left: ensureRoot, stale .corrupt target unlink, fd close in finally, .bak staging (x2), warn wrappers (x2)
+  'savestore.js': 6,   // AUDITED — 6 left: ensureRoot, fd close in finally, .bak staging (x2), warn wrappers (x2) (the stale .corrupt unlink is gone: a quarantine never replaces an earlier copy)
   'servicekeys.js': 1,
   'shellbg.js': 1,   // h2 2026-09-22 — 1 left: child.unref() on a fresh spawn (kill/ledger/pin paths now failNote)
   'shellhooks.js': 4,
@@ -202,7 +199,7 @@ const SYNC_BASELINE = {
   'skills/package.js': 3,
   'skills/prefs.js': 2,
   'skills/registry.js': 1,
-  'skillstore.js': 3,   // AUDITED — 3 left: corrupt log -> empty library (documented), digest stamp, history view projection
+  'skillstore.js': 2,   // AUDITED — 2 left: digest stamp, history view projection (a failed load is now reported + refuses writes)
   'slash-actions.js': 1,
   'station-bridge.js': 2,
   'station-recovery.js': 3,
@@ -226,7 +223,7 @@ const SYNC_BASELINE = {
   'tools/builtin/webreader.js': 3,
   'tools/builtin/win32desktop.js': 1,
   'tools/registry.js': 3,   // AUDITED — 3 left: abort-listener attach/detach, abort() in timeout
-  'transcript-history.js': 6,
+  'transcript-history.js': 4,
   'transcriptstore.js': 2,   // AUDITED — 2 left: frozen message marker, tool_calls JSON value default
   'update-preparation.js': 4,
   'workspace-lease.js': 2,

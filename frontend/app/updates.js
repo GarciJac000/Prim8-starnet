@@ -56,6 +56,19 @@ const Updates = (() => {
     const text = (e && (e.message || e.toString && e.toString())) || String(e || 'unknown error');
     return text.replace(/^Error:\s*/, '').trim();
   }
+  // A refused or interrupted native install must read as what it is: nothing changed. The updater rejects with bare
+  // minisign / reqwest / plugin Display text; keep it as the trailing detail for support, never as the whole message.
+  function installFailureText(e) {
+    const raw = cleanError(e);
+    const kept = ' Nothing was installed; your current StarNet is unchanged.';
+    if (/signature|different key|minisign|base64|invalid symbol/i.test(raw)) {
+      return 'Update refused: the download did not match the signed StarNet release.' + kept + ' (' + raw + ')';
+    }
+    if (/download|request|response body|connect|timed? ?out|network|status: \d{3}/i.test(raw)) {
+      return 'The update download did not finish.' + kept + ' Check the connection, then press INSTALL UPDATE again. (' + raw + ')';
+    }
+    return raw;
+  }
   function fmtTime(ts) {
     if (!ts) return 'never';
     try { return new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); }
@@ -378,7 +391,7 @@ const Updates = (() => {
       catch (cancelError) { thawError = cleanError(cancelError); }
       if (!thawError) state.preparationReceipt = null;
       state.phase = 'available';
-      state.error = cleanError(e) + (thawError ? '; writes may still be paused - ' + thawError : '');
+      state.error = installFailureText(e) + (thawError ? '; writes may still be paused - ' + thawError : '');
       notify('Update install failed - ' + state.error, 'warn');
     } finally {
       busy = false;

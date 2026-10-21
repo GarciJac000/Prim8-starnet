@@ -409,6 +409,14 @@
     const enabled = !(opts && opts.enabled === false);
     // mode: 'prose' | 'call' (inside one call) | 'next' (a call or <function_calls> just passed: another call, or the end?)
     let buf = '', mode = 'prose', kind = '', named = false, scan = 0, calls = 0, stopped = false;
+    /* A CALL'S SEARCHED BODY IS PARKED (2026-10-20). `scan` already kept the close-tag search from re-reading a call's
+       body, but each push appended to buf and then searched it, and searching a freshly appended string makes V8 copy
+       the WHOLE string flat first: a 512 KB fs_write cost 1-4 s of sidecar CPU, quadratic in the file. The part before
+       `scan` has been searched and no later search reads it, so it moves to `parts` and buf keeps only the unsearched
+       tail. A <tool_call>'s head stays whole until its name is settled (announcedName reads its first NAME_SCAN chars). */
+    let parts = [];
+    function park() { if (scan > 0 && (kind !== 'json' || named !== false)) { parts.push(buf.slice(0, scan)); buf = buf.slice(scan); scan = 0; } }
+    function held() { const h = parts.length ? parts.join('') : ''; parts = []; return h; }
     /* CODE IS NOT A CALL (sweep 2026-10-03): a reply that SHOWS the call format in a code fence or inline code ran it — a
        fenced example fs_delete deleted the file, and `<invoke name="shell">` in a sentence swallowed the rest of the
        reply as a call. The prose that has gone out is tracked for an open ``` fence or ` span; a call tag inside one is
@@ -431,7 +439,7 @@
     }
     const couldOpen = tail => tail.length <= HOLD && tail.indexOf('>') < 0;
     // out.rest = what the model wrote past the block in this same delta (dropped here; the persistent child keeps it)
-    function stop(out, rest) { stopped = true; out.stop = true; out.rest = String(rest || ''); buf = ''; return out; }
+    function stop(out, rest) { stopped = true; out.stop = true; out.rest = String(rest || ''); buf = ''; parts = []; return out; }
     function drain(out) {
       for (;;) {
         if (stopped) { buf = ''; return out; }
@@ -459,14 +467,15 @@
         if (mode === 'call') {
           // the close-tag search resumes where the last one stopped: a file-sized call is scanned once, not per delta
           if (kind === 'json') {
-            if (!named) {
+            // named === null is final (the head past NAME_SCAN can no longer change), so only `false` looks again
+            if (named === false) {
               const name = announcedName(buf);
               if (name) { named = true; out.items.push({ start: name }); }
               else if (buf.length > NAME_SCAN) named = null;   // no name up front: the block is judged when it closes
             }
             const end = buf.indexOf(CALL_CLOSE, scan);
-            if (end < 0) { scan = Math.max(0, buf.length - (CALL_CLOSE.length - 1)); return out; }
-            out.items.push({ body: buf.slice(0, end), kind, closed: true });
+            if (end < 0) { scan = Math.max(0, buf.length - (CALL_CLOSE.length - 1)); park(); return out; }
+            out.items.push({ body: held() + buf.slice(0, end), kind, closed: true });
             buf = buf.slice(end + CALL_CLOSE.length);
           } else {
             INVOKE_CLOSE_RE.lastIndex = scan;
@@ -475,11 +484,11 @@
               if (!inBlock) { close = c; break; }
               // inside <function_calls> the call ends at the </invoke> that another call or the block's close follows
               const after = buf.slice(c.index + c[0].length).replace(/^\s+/, '');
-              if (!after || (after[0] === '<' && couldOpen(after) && !BLOCK_NEXT_RE.test(after))) { scan = c.index; return out; }   // still arriving
+              if (!after || (after[0] === '<' && couldOpen(after) && !BLOCK_NEXT_RE.test(after))) { scan = c.index; park(); return out; }   // still arriving
               if (BLOCK_NEXT_RE.test(after)) { close = c; break; }
             }
-            if (!close) { scan = Math.max(scan, buf.length - HOLD); return out; }
-            out.items.push({ body: buf.slice(0, close.index), kind, closed: true });
+            if (!close) { scan = Math.max(scan, buf.length - HOLD); park(); return out; }
+            out.items.push({ body: held() + buf.slice(0, close.index), kind, closed: true });
             buf = buf.slice(close.index + close[0].length);
           }
           calls++; mode = 'next'; continue;
@@ -507,6 +516,7 @@
         const out = { text: '', items: [], stop: false };
         if (!stopped) {
           if (mode === 'call') {
+            buf = held() + buf;   // the parked body rejoins: the cut-off verdicts below read the whole call
             // a block whose stream ended before </function_calls>: its call ends at the LAST </invoke> written
             const lastClose = kind === 'invoke' && inBlock ? buf.lastIndexOf('</invoke>') : -1;
             if (lastClose >= 0) out.items.push({ body: buf.slice(0, lastClose), kind, closed: true });
@@ -514,7 +524,7 @@
             else addText(out, CALL_OPEN + buf);
           } else if (mode === 'prose') addText(out, buf);
         }
-        buf = ''; mode = 'prose'; named = false; scan = 0;
+        buf = ''; parts = []; mode = 'prose'; named = false; scan = 0;
         return out;
       }
     };

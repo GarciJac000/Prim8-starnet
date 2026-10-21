@@ -75,4 +75,16 @@ A.ok(I.isSkipAnswer('  N/A  '), 'isSkipAnswer normalizes whitespace and punctuat
 A.eq(I.beliefFromAnswer(q0, 'skip the standup prep').weight, 'stated', 'a real answer CONTAINING "skip" still lands');
 A.ok(!I.isSkipAnswer('none of the dashboards refresh'), 'a substring is not a skip');
 
+/* ---------- an answer with NO words is not an answer (sweep/onboarding 2026-10-20) ----------
+   Live on a fresh station: typing only emoji at the awakening's goal beat stored "🚀🔥💯🙏" as the Commander's
+   STATED goal (and prefilled it as the first task); the intake's pain beat stored "😤😤😤" the same way. A reply
+   with no letter or digit in any script carries nothing to extract — it is a non-answer, exactly like a typed skip. */
+A.ok(I.isSkipAnswer('🚀🔥💯🙏'), 'an emoji-only reply is a non-answer');
+A.ok(I.isSkipAnswer('😤 😤 😤'), 'emoji separated by spaces is still a non-answer');
+A.ok(I.isSkipAnswer('?!…'), 'punctuation-only is a non-answer');
+A.eq(I.beliefFromAnswer(q0, '🚀🔥💯🙏'), null, 'an emoji-only reply yields no belief');
+A.eq(I.beliefFromAnswer(q0, 'ship 🚀 the shop').weight, 'stated', 'words WITH emoji still land');
+A.eq(I.beliefFromAnswer(q0, '私は学生です').weight, 'stated', 'a non-Latin answer is a real answer');
+A.eq(I.beliefFromAnswer(q0, '42').weight, 'stated', 'a number is a real answer');
+
 A.report('interview.test');

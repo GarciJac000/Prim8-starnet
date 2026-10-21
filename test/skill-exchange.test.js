@@ -99,6 +99,89 @@ function store(io) { return makeSkillStore({ io, clock: { now: () => 9000 }, gua
   try { await fetcher('https://public.example/SKILL.md'); } catch (e) { redirectError = e.message; }
   A.ok(/private host/.test(redirectError), 'every redirect target is revalidated');
 
+  // The request deadline covers the BODY (memory lane 2026-10-20): the timer was cleared when headers arrived, so a
+  // source that answered its headers and then stalled its body held the fetch open forever.
+  {
+    const stalled = makeSkillDocumentFetcher({
+      timeoutMs: 80,
+      fetchImpl: async () => ({ status: 200, ok: true, headers: { get: () => null },
+        body: { async *[Symbol.asyncIterator]() { yield Buffer.from('# Partial'); await new Promise(() => {}); } } })
+    });
+    const t0 = Date.now();
+    const outcome = await Promise.race([
+      stalled('https://slow.example/SKILL.md').then(() => 'resolved', e => e.message),
+      new Promise(r => setTimeout(() => r('still waiting after 3 s'), 3000))
+    ]);
+    A.eq(outcome, 'skill source timed out', 'a body that stalls after its headers times out');
+    A.ok(Date.now() - t0 < 2000, 'at the request deadline, not never (' + (Date.now() - t0) + ' ms)');
+  }
+  // …but SILENCE ends a body, not the request timer (review 2026-10-21): ending every body at the 12 s request timer
+  // failed a community map picture (3.99 MB) that was slow but steady, which used to arrive within maps' own 45 s.
+  {
+    const steady = (gapMs, chunks) => async () => ({ status: 200, ok: true, headers: { get: () => null },
+      body: { async *[Symbol.asyncIterator]() { for (let i = 0; i < chunks; i++) { await new Promise(r => setTimeout(r, gapMs)); yield Buffer.alloc(1000, 65); } } } });
+    const slow = makeSkillDocumentFetcher({ timeoutMs: 80, fetchImpl: steady(30, 12) });
+    const t0 = Date.now();
+    const got = await slow('https://maps.example/still.png', { maxBytes: 3990000, label: 'the map picture' }).then(r => r.bytes.length, e => e.message);
+    A.eq(got, 12000, 'a steady body that takes longer than the request timeout (' + (Date.now() - t0) + ' ms vs 80 ms) still arrives whole');
+    // a caller with a budget of its own (the package fetcher's timeoutMs: left) still caps the whole read at it
+    const capped = makeSkillDocumentFetcher({ timeoutMs: 80, fetchImpl: steady(30, 1000) });
+    const t1 = Date.now();
+    const trickle = await Promise.race([
+      capped('https://slow.example/SKILL.md', { timeoutMs: 200 }).then(() => 'resolved', e => e.message),
+      new Promise(r => setTimeout(r, 3000, 'still waiting after 3 s'))
+    ]);
+    A.eq(trickle, 'skill source timed out', 'a trickle is ended at the caller\'s own budget');
+    A.ok(Date.now() - t1 < 1500, 'at that budget (' + (Date.now() - t1) + ' ms)');
+    // …and a caller WITHOUT one (community maps, the market catalog, an import) still has an overall deadline (review
+    // 2026-10-21): a trickle that beats every silence window held the read, and its socket, open for as long as it liked.
+    const unbudgeted = makeSkillDocumentFetcher({ timeoutMs: 80, bodyDeadlineMs: 300, fetchImpl: steady(30, 1000) });
+    const t2 = Date.now();
+    const endless = await Promise.race([
+      unbudgeted('https://maps.example/still.png', { maxBytes: 3990000, label: 'the map picture' }).then(() => 'resolved', e => e.message),
+      new Promise(r => setTimeout(r, 3000, 'still waiting after 3 s'))
+    ]);
+    A.eq(endless, 'skill source timed out', 'a trickle with no caller budget is ended at the fetcher\'s own deadline');
+    A.ok(Date.now() - t2 < 1500, 'at that deadline (' + (Date.now() - t2) + ' ms)');
+    // that deadline is 60 s unless a test scales it: one whole read of a quick source arms exactly that timer
+    const delays = [], realSetTimeout = global.setTimeout;
+    global.setTimeout = function (fn, ms, ...rest) { delays.push(ms); return realSetTimeout(fn, ms, ...rest); };
+    let quick;
+    try { quick = await makeSkillDocumentFetcher({ fetchImpl: steady(0, 1) })('https://maps.example/still.png', { maxBytes: 3990000, label: 'the map picture' }).then(r => r.bytes.length, e => e.message); }
+    finally { global.setTimeout = realSetTimeout; }
+    A.eq(quick, 1000, 'a quick source still arrives');
+    A.ok(delays.includes(60000), 'and its read was capped at 60 s (timers armed: ' + JSON.stringify(delays) + ')');
+  }
+  // …and that deadline is ONE deadline across every redirect hop (polish 2026-10-21): it was re-armed per hop, so a
+  // source bouncing the read through 4 slow redirects held it for up to 5 times the deadline. Each hop here answers
+  // its headers in 150 ms (inside the 200 ms silence window and the 300 ms deadline); the five hops take ~750 ms.
+  {
+    const hopsSeen = [];
+    const slowHops = async (url, init) => {
+      hopsSeen.push(url);
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(resolve, 150);
+        init.signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('This operation was aborted')); }, { once: true });
+      });
+      const n = Number(url.slice(-1));
+      if (n < 4) return { status: 302, ok: false, headers: { get: (h) => h === 'location' ? 'https://hops.example/r' + (n + 1) : null } };
+      return { status: 200, ok: true, headers: { get: () => null }, body: { async *[Symbol.asyncIterator]() { yield Buffer.from('# Landed'); } } };
+    };
+    const roomy = await makeSkillDocumentFetcher({ timeoutMs: 200, bodyDeadlineMs: 3000, fetchImpl: slowHops })('https://hops.example/r0').then(r => r.text, e => e.message);
+    A.eq(roomy, '# Landed', 'the five-hop chain itself lands when the deadline has room for it');
+    for (const [name, opts, deps] of [
+      ['a read with no budget of its own', {}, { bodyDeadlineMs: 300 }],
+      ['a read with the caller\'s own budget', { timeoutMs: 300 }, {}]
+    ]) {
+      hopsSeen.length = 0;
+      const t0 = Date.now();
+      const out = await makeSkillDocumentFetcher(Object.assign({ timeoutMs: 200, fetchImpl: slowHops }, deps))('https://hops.example/r0', opts).then(r => 'resolved: ' + r.text, e => e.message);
+      const took = Date.now() - t0;
+      A.eq(out, 'skill source timed out', name + ' that keeps redirecting is ended at its one deadline (it resolved after every hop restarted the cap before)');
+      A.ok(took < 600 && hopsSeen.length <= 3, 'at ~300 ms, partway through the chain (' + took + ' ms, ' + hopsSeen.length + ' hops)');
+    }
+  }
+
   const fetchedUrls = [];
   const genericPackage = makeSkillPackageFetcher({ now: () => 0, fetchDocument: async url => {
     fetchedUrls.push(url);

@@ -45,6 +45,7 @@
   // (so completion rides G1a's celebration for free). Sanitized so a hand-edited save or a weird reason can't
   // inject a broken id.
   const clean = s => String(s == null ? '' : s).replace(/[^A-Za-z0-9_.\-:]/g, '_').slice(0, 64);
+  const cut = (s, n) => String(s == null ? '' : s).slice(0, n).replace(/[\uD800-\uDBFF]$/, '');   // a label cap never ends on half an emoji (a lone surrogate)
   function causeId(cause) { return 'mq:' + clean(cause); }
 
   // defensively rebuild a persisted slice: every entry re-validated, junk dropped (never a crash on a bad save).
@@ -65,8 +66,8 @@
       const dis = r.dismissedAt == null ? NaN : Number(r.dismissedAt);
       s.quests[id] = {
         cause,
-        title: String(r.title || '').slice(0, 80),
-        fix: String(r.fix || '').slice(0, 320),
+        title: cut(r.title || '', 80),
+        fix: cut(r.fix || '', 320),
         hits: Math.max(0, Number(r.hits) | 0),
         firstSeenAt: first,
         completedAt: Number.isFinite(comp) ? comp : null,
@@ -95,8 +96,8 @@
     if (existing && existing.dismissedAt != null) return null;   // dismissed = stop forever
     const hits = Math.max(0, Number(d.hits) | 0);
     if (existing) {
-      if (d.title) existing.title = String(d.title).slice(0, 80);
-      if (d.fix) existing.fix = String(d.fix).slice(0, 320);   // 160 cut the errored-run fix mid-word ("…and repo")
+      if (d.title) existing.title = cut(d.title, 80);
+      if (d.fix) existing.fix = cut(d.fix, 320);   // 160 cut the errored-run fix mid-word ("…and repo")
       if (hits) existing.hits = hits;
       if (existing.completedAt != null) {           // a cleared cause bit again → re-open it (a new recurrence)
         existing.completedAt = null;
@@ -106,8 +107,8 @@
     }
     state.quests[id] = {
       cause,
-      title: String(d.title || '').slice(0, 80),
-      fix: String(d.fix || '').slice(0, 320),
+      title: cut(d.title || '', 80),
+      fix: cut(d.fix || '', 320),
       hits: hits,
       firstSeenAt: now,
       completedAt: null,

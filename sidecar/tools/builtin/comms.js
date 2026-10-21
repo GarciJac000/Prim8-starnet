@@ -214,7 +214,7 @@
            Each file is reported truthfully in the result: the model must be able to tell "sent with 2 files"
            from "sent, and the files did not go". */
         const wanted = Array.isArray(args && args.files) ? args.files.filter(x => typeof x === 'string' && x.trim()) : [];
-        const fileNotes = [], attached = [];
+        const fileNotes = [], attached = [], unreadable = [];
         if (wanted.length && !error) {
           if (wanted.length > MAX_FILES) {
             fileNotes.push(wanted.length + ' files requested (limit ' + MAX_FILES + ') — only the first ' + MAX_FILES + ' were attempted');
@@ -225,6 +225,7 @@
             try { got = await readFile(String((ctx && ctx.agentId) || ''), rel); }
             catch (e) { got = { ok: false, error: (e && e.message) || 'read threw' }; }
             if (!got || got.ok === false || !got.buffer || !got.buffer.length) {
+              unreadable.push(rel);
               fileNotes.push('"' + rel + '" could not be read from your workspace (' + ((got && got.error) || 'not found') + ') — nothing was attached');
               continue;
             }
@@ -236,11 +237,16 @@
           }
           // Say so IN THE CHAT, not just in the tool result: the human is the one who wanted the file, and a
           // silent omission would leave them waiting for an attachment that is never coming.
-          const missed = wanted.slice(0, MAX_FILES).filter(f => attached.indexOf(f) === -1);
-          if (missed.length) {
-            const note = 'Note: ' + (missed.length === 1 ? 'this file' : 'these files') + ' could not be attached here — '
-              + missed.map(f => '"' + f + '"').join(', ') + '. ' + (missed.length === 1 ? 'It is' : 'They are') + ' saved in the workspace on the station.';
-            try { await sendTo(t.target, note); } catch (_) { /* the note is a courtesy; never fail the send over it */ }
+          // Only a file that was READ and then failed to upload is on the station. One that could not be read (missing,
+          // empty, or a refused path like "../../channels/secrets.json") was claimed "saved in the workspace" too (2026-10-20).
+          const missed = wanted.slice(0, MAX_FILES).filter(f => attached.indexOf(f) === -1 && unreadable.indexOf(f) === -1);
+          const lines = [];
+          if (missed.length) lines.push((missed.length === 1 ? 'this file' : 'these files') + ' could not be attached here — '
+            + missed.map(f => '"' + f + '"').join(', ') + '. ' + (missed.length === 1 ? 'It is' : 'They are') + ' saved in the workspace on the station.');
+          if (unreadable.length) lines.push((unreadable.length === 1 ? 'this file' : 'these files') + ' could not be found in the workspace, so nothing was attached — '
+            + unreadable.map(f => '"' + f + '"').join(', ') + '.');
+          if (lines.length) {
+            try { await sendTo(t.target, 'Note: ' + lines.join('\nNote: ')); } catch (_) { /* the note is a courtesy; never fail the send over it */ }
           }
         }
 

@@ -318,6 +318,8 @@ function makeSkillExchange(deps) {
     const agentId = str(input && input.agentId) || 'agent';
     const current = skillStore && skillStore.view(agentId, str(input && input.id), { includeArchived: true, bump: false });
     if (!current) throw new Error('no such installed skill');
+    // A rollback replaces content, so the pin applies (as for an update): only an explicit force overrides it.
+    if (current.pinned && !(input && input.force === true)) throw new Error('"' + current.name + '" is pinned - unpin it first (pinned skills are protected from rollback)');
     if (!packageStore || typeof packageStore.readGeneration !== 'function') throw new Error('offline generations are unavailable');
     if (typeof packageStore.snapshot === 'function') packageStore.snapshot(current);
     const pkg = packageStore.readGeneration(current, str(input && input.digest));

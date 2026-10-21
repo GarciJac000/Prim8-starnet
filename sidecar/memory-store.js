@@ -46,11 +46,38 @@ function makeMemoryStore(deps) {
   });
   const warn = typeof deps.warn === 'function' ? deps.warn : function () {};
 
+  /* getShared(key) — a READ-ONLY, signature-checked view (perf review 10-19). Every run reads every OTHER agent's
+     notebook for the station-wide taste + standing blocks, and those rarely change between runs: re-reading and
+     re-parsing all of them per run (it was twice per run) is pure waste. A hit needs durable.signature(key) — the
+     main file's bigint stat plus this process's own write generation — to match the read it came from, so a write
+     here or a replaced file always re-reads; only a cleanly parsed main ('ok') is ever kept (a .bak-recovered,
+     corrupt or unreadable key keeps its loud uncached path). The value is FROZEN (the array and each record) and
+     shared between callers: never mutate it — get()/update() are the editable paths. */
+  const shared = new Map();   // key -> { sig, value }
+  function freezeList(v) {
+    if (Array.isArray(v)) { for (const r of v) if (r && typeof r === 'object') Object.freeze(r); }
+    return Object.freeze(v);
+  }
+  function getShared(key) {
+    const k = String(key);
+    const sig = durable.signature(k);
+    const hit = shared.get(k);
+    if (sig && hit && hit.sig === sig) return hit.value;
+    let r;
+    try { r = durable.readKey(k); }
+    catch (e) { shared.delete(k); return undefined; }
+    const value = (r.status === 'ok' || r.status === 'recovered') ? r.value : undefined;
+    if (sig && r.status === 'ok' && value && typeof value === 'object') { shared.set(k, { sig: sig, value: freezeList(value) }); return value; }
+    shared.delete(k);
+    return value;
+  }
+
   return {
     get(key) {
       try { return durable.get(key); }
       catch (e) { return undefined; }
     },
+    getShared: getShared,
     set(key, value) {
       try { durable.set(key, value); }
       catch (e) { warn('[memory] persist failed:', (e && e.message) || e); }

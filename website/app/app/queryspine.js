@@ -17,6 +17,17 @@ const QuerySpine = (() => {
   let now = () => Date.now();
   let armInterval = (fn, ms) => setInterval(fn, ms);
   let disarmInterval = id => clearInterval(id);
+  /* AWAY, THE POLL SLOWS (idle CPU piece 3, 2026-10-20). While the Commander is away (PollGate: hidden with no input for
+     10 s) a resource's beat skips its read until the last-good value is AWAY_MS old, so journey's 4 s poll becomes one read
+     per ~30 s and cron's 60 s poll is unchanged; it never stops. The moment they are back, PollGate's wake re-reads every
+     subscribed resource whose value is older than its own poll cadence. Freshness is never stretched across the away
+     stretch: a value past its TTL is stale (age >= ttlMs, as on trunk) until that catch-up read lands. */
+  const AWAY_MS = (typeof PollGate !== 'undefined' && PollGate.AWAY_MS) || 30000;
+  let isAway = () => !!(typeof PollGate !== 'undefined' && PollGate.away && PollGate.away());
+  const touchedAt = r => Math.max(r.updatedAt || 0, r.errorAt || 0);
+  // how long ago the wire last answered. The stamps are wall-clock (snapshots show them), so a backward step makes the age
+  // negative: that is unknown, never "fresh" — the beat reads rather than waiting for the wall clock to catch up
+  const ageOf = r => { const a = now() - touchedAt(r); return a >= 0 ? a : Infinity; };
 
   function positiveMs(v) { return Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0; }
   function define(key, spec) {
@@ -164,9 +175,18 @@ const QuerySpine = (() => {
     if (!r.pollMs || !r.listeners.size || r.timer != null) return;
     r.timer = armInterval(() => {
       if (!r.listeners.size) return;
+      if (isAway() && ageOf(r) < AWAY_MS) return; // away: one read per AWAY_MS, never none
       refresh(r.key).catch(() => {}); // subscribers receive the error-bearing snapshot
     }, r.pollMs);
   }
+  // back on screen: every polled resource someone still watches catches up if its value is older than its own cadence
+  function wake() {
+    for (const r of resources.values()) {
+      if (!r.pollMs || !r.listeners.size) continue;
+      if (ageOf(r) >= r.pollMs) refresh(r.key).catch(() => {});
+    }
+  }
+  if (typeof PollGate !== 'undefined' && PollGate.onWake) PollGate.onWake(wake);
   function stopTimer(r) {
     if (r.timer == null) return;
     disarmInterval(r.timer);
@@ -220,6 +240,8 @@ const QuerySpine = (() => {
     _setGetForTest(fn) { getJson = fn; },
     _setClockForTest(fn) { now = fn; },
     _setTimersForTest(setFn, clearFn) { armInterval = setFn; disarmInterval = clearFn; },
+    _setAwayForTest(fn) { isAway = fn; },
+    _wakeForTest() { wake(); },
     _debug(key) { const r = resource(key); return { listeners: r.listeners.size, timer: r.timer, inFlight: !!r.inFlight }; }
   };
 })();

@@ -1638,7 +1638,11 @@ const Marketplace = (() => {
     // the shared declined read gates the INPUT (see readyShelfHTML): a declined recipe never enters the rank,
     // and the ranker's own spread/top-up keeps the row at three from the recipes that remain — the FOR YOU
     // shelf-sink law (a negative term must never EMPTY the shelf) holds because this excludes, never down-ranks.
-    const pool = Recipes.list().filter(r => !shelfDeclined(r && r.name));
+    let pool = Recipes.list().filter(r => !shelfDeclined(r && r.name));
+    // …and the floor under that law: a Commander who has ✕'d EVERY recipe used to lose the row entirely (live, sweep/
+    // onboarding 2026-10-20: 45 declines → no FOR YOU shelf at all). Show the library again, saying exactly that.
+    const exhausted = !pool.length && Recipes.list().length > 0;
+    if (exhausted) pool = Recipes.list();
     const ranked = Recipes.rankRecipesExplained
       ? Recipes.rankRecipesExplained(pool, rankOpts)
       : { items: Recipes.rankRecipes(pool, rankOpts), personalized: false };
@@ -1671,8 +1675,10 @@ const Marketplace = (() => {
         : noticedHead(scored === 1
           ? 'one pick from your real work, plus starting points'
           : scored + ' picks from your real work, plus starting points');
+    // the declined-everything floor says so instead of any personalized claim (sweep/onboarding 2026-10-20)
+    const shownHead = exhausted ? coldHead('STARTING POINTS — you passed on every recipe, so here is the library again') : head;
     items.forEach((r, i) => trackRecommendation('recipe', r, reasonFor(r), i + 1));
-    return '<div class="mkt-sect-h mkt-foryou-sect">' + head + '</div><div class="mkt-rec-rail">' +
+    return '<div class="mkt-sect-h mkt-foryou-sect">' + shownHead + '</div><div class="mkt-rec-rail">' +
       items.map(r => forYouCardHTML(r, reasonFor(r))).join('') + '</div>';
   }
 

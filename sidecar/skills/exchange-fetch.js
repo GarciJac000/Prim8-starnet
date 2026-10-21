@@ -11,6 +11,7 @@ const MAX_DISCOVERY_DEPTH = 8;
 const MAX_DISCOVERY_REQUESTS = MAX_PACKAGE_FILES * 2;
 const MAX_FETCHED_BYTES = MAX_PACKAGE_BYTES * 2; // package bytes plus bounded GitHub directory listings
 const PACKAGE_DEADLINE_MS = 30000;
+const BODY_DEADLINE_MS = 60000;   // a read with no budget of its own: headers + body, whole
 
 function makeSkillDocumentFetcher(deps) {
   deps = deps || {};
@@ -19,6 +20,7 @@ function makeSkillDocumentFetcher(deps) {
   const assertResolvedSafe = deps.assertResolvedSafe;
   const lookup = deps.lookup;
   const timeoutMs = deps.timeoutMs > 0 ? deps.timeoutMs : 12000;
+  const bodyDeadlineMs = deps.bodyDeadlineMs > 0 ? deps.bodyDeadlineMs : BODY_DEADLINE_MS;
 
   async function checked(raw) {
     let u = assertSafeUrl ? assertSafeUrl(raw) : new URL(raw);
@@ -29,13 +31,15 @@ function makeSkillDocumentFetcher(deps) {
   }
   // limit/label: a caller fetching something other than a SKILL.md (the Skill Market's catalog index) passes its own
   // cap and name, so an oversized document is refused under its real name instead of being called a SKILL.md
-  async function bodyBytes(response, limit, label) {
+  // onChunk: called as each chunk arrives (the body's silence timer re-arms on it)
+  async function bodyBytes(response, limit, label, onChunk) {
     const tooBig = () => new Error(label ? label + ' is larger than ' + Math.round(limit / 1000) + ' KB' : 'SKILL.md is larger than 256 KB');
     const declared = Number(response && response.headers && response.headers.get('content-length')) || 0;
     if (declared > limit) throw tooBig();
     if (response.body && response.body[Symbol.asyncIterator]) {
       const chunks = []; let total = 0;
       for await (const chunk of response.body) {
+        if (onChunk) onChunk();
         const buf = Buffer.from(chunk); total += buf.length;
         if (total > limit) throw tooBig();
         chunks.push(buf);
@@ -50,33 +54,67 @@ function makeSkillDocumentFetcher(deps) {
     if (typeof fetchImpl !== 'function') throw new Error('network fetch is unavailable');
     requestOpts = requestOpts || {};
     const requestTimeoutMs = Math.max(1, Math.min(timeoutMs, Number(requestOpts.timeoutMs) || timeoutMs));
-    let u = await checked(raw);
-    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), requestTimeoutMs);
-      let response;
-      try {
-        response = await fetchImpl(u.href, {
-          method: 'GET', redirect: 'manual', signal: ctrl.signal,
-          headers: { accept: 'text/markdown,text/plain;q=0.9,*/*;q=0.1', 'user-agent': 'StarNet-Skill-Exchange/1' }
-        });
-      } catch (e) {
-        if (ctrl.signal.aborted) throw new Error('skill source timed out');
-        throw e;
-      } finally { clearTimeout(timer); }
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers && response.headers.get('location');
-        if (!location) throw new Error('skill source redirected without a location');
-        if (hop === MAX_REDIRECTS) throw new Error('skill source redirected too many times');
-        u = await checked(new URL(location, u.href).href);
-        continue;
+    /* A BODY IS BOUNDED BY SILENCE, NOT BY THE REQUEST TIMER (2026-10-21). The timer used to stop once headers arrived,
+       so a body that stalled held the fetch open forever; ending the body at the request timer instead failed a large
+       download that was merely slow and steady (a 4 MB community map picture under ~330 KB/s). So the timer is an
+       inactivity timer: headers, then every body chunk, re-arm it, and requestTimeoutMs of silence ends the read. A
+       caller with a budget of its own (the package fetcher passes what is left of its 30 s) also caps the whole read
+       at it; a caller without one (community maps, the market catalog, an import) gets BODY_DEADLINE_MS (review
+       2026-10-21: a source trickling a byte before each silence window ran out held its socket open for as long as it
+       liked, and a caller's own race, like community maps' 45 s, gave up without ever closing it). 60 s still carries
+       a full 4 MB at ~67 KB/s.
+       ONE DEADLINE ACROSS EVERY HOP (polish 2026-10-21): the cap was re-armed per redirect hop, so a source bouncing
+       the read through MAX_REDIRECTS slow redirects held it for up to MAX_REDIRECTS + 1 times that deadline. It is
+       armed once, here, and ends whichever hop is in flight. */
+    const capMs = Number(requestOpts.timeoutMs) > 0 ? Number(requestOpts.timeoutMs) : bodyDeadlineMs;
+    let current = null, expired = false;
+    const cap = setTimeout(() => { expired = true; if (current) current.abort(); }, capMs);
+    try {
+      let u = await checked(raw);
+      for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+        if (expired) throw new Error('skill source timed out');
+        const ctrl = new AbortController();
+        current = ctrl;
+        let idle = null;
+        const arm = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), requestTimeoutMs); };
+        arm();
+        try {
+          let response;
+          try {
+            response = await fetchImpl(u.href, {
+              method: 'GET', redirect: 'manual', signal: ctrl.signal,
+              headers: { accept: 'text/markdown,text/plain;q=0.9,*/*;q=0.1', 'user-agent': 'StarNet-Skill-Exchange/1' }
+            });
+          } catch (e) {
+            if (ctrl.signal.aborted) throw new Error('skill source timed out');
+            throw e;
+          }
+          if (response.status >= 300 && response.status < 400) {
+            const location = response.headers && response.headers.get('location');
+            if (!location) throw new Error('skill source redirected without a location');
+            if (hop === MAX_REDIRECTS) throw new Error('skill source redirected too many times');
+            u = await checked(new URL(location, u.href).href);
+            continue;
+          }
+          if (!response.ok) throw new Error('skill source returned HTTP ' + response.status);
+          const limit = Number(requestOpts.maxBytes) > 0 ? Math.min(Number(requestOpts.maxBytes), 4000000) : MAX_BYTES;
+          arm();   // headers are in: the body's first silence window starts now
+          // the race settles even for a body stream that ignores the abort
+          const timedOut = new Promise((_, reject) => {
+            const fail = () => reject(new Error('skill source timed out'));
+            if (ctrl.signal.aborted) fail(); else ctrl.signal.addEventListener('abort', fail, { once: true });
+          });
+          let bytes;
+          try { bytes = await Promise.race([bodyBytes(response, limit, requestOpts.maxBytes ? String(requestOpts.label || 'the download') : '', arm), timedOut]); }
+          catch (e) {
+            if (ctrl.signal.aborted) throw new Error('skill source timed out');
+            throw e;
+          }
+          return { url: u.href, bytes, text: bytes.toString('utf8') };
+        } finally { clearTimeout(idle); }
       }
-      if (!response.ok) throw new Error('skill source returned HTTP ' + response.status);
-      const limit = Number(requestOpts.maxBytes) > 0 ? Math.min(Number(requestOpts.maxBytes), 4000000) : MAX_BYTES;
-      const bytes = await bodyBytes(response, limit, requestOpts.maxBytes ? String(requestOpts.label || 'the download') : '');
-      return { url: u.href, bytes, text: bytes.toString('utf8') };
-    }
-    throw new Error('skill source redirected too many times');
+      throw new Error('skill source redirected too many times');
+    } finally { clearTimeout(cap); }
   }
   return fetchDocument;
 }

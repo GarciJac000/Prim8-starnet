@@ -137,5 +137,21 @@ async function run(turns, reg, tools) {
     A.eq(res.reason, 'done', 'the run completes');
   }
 
+  // ---- 5. A REPAIR NEVER REWRITES THE FILE BODY: a real trailing comma after the last arg, commas inside the value ----
+  {
+    const writes = [];
+    const reg = makeRegistry();
+    reg.register({ name: 'fs_write', schema: WRITE_SCHEMA, run: async (a) => { writes.push(a); return 'wrote'; } });
+    const body = 'const parts = s.split(/[\\s,]+/);\nconst cells = row.match(/[^,]+/g);\nconst xs = [1, 2, 3,];\n';
+    const broken = '{"path":"src/split.js","content":' + JSON.stringify(body) + ',}';
+    const { seq, messages, res } = await run([call('s1', 'fs_write', broken), say('Wrote it.')], reg);
+    A.eq(writes.length, 1, 'the write with a trailing comma after its last arg is repaired and runs');
+    A.eq(writes[0] && writes[0].content, body, 'the file body written is byte-identical to what the model sent');
+    A.eq(seq.filter(e => e.name === 'tool.args.repaired').length, 1, 'it is announced as repaired');
+    const asst = messages.find(m => m.role === 'assistant' && m.tool_calls);
+    A.eq(JSON.parse(asst.tool_calls[0].function.arguments).content, body, 'the replayed assistant arguments carry the same body');
+    A.eq(res.reason, 'done', 'the run completes');
+  }
+
   A.report('loop.truncated-args-refuse.test');
 })().catch(e => { console.log('FAIL: loop.truncated-args-refuse.test threw -- ' + (e && e.stack || e)); process.exit(1); });

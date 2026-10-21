@@ -122,6 +122,7 @@ const World = (() => {
   let camLock = null;                  // {id, sc, source:'session'|'cine'} — the followed body + its target zoom
   let camUserAt = 0;                   // last USER camera act (performance.now clock) — the cinecam idle clock
   const CINE_IDLE_MS = 120000;         // hands-off threshold before the auto-director may take the camera (2 min)
+  const CAM_SETTLE_PX = 0.25;          // a follow-lock axis this close to its target (device px) lands ON it — see CAMERA SETTLE in frameBody
   let cineIdleMs = CINE_IDLE_MS;       // live threshold (setCinecamIdle lets DEV/verify shrink it — never shipped-UI-tunable)
   let cineHoldUntil = 0;               // director: when the current shot may be re-cast
   let cineWalkAt = 0;                  // last time the director's subject was actually WALKING (movement grace before a cut)
@@ -1548,9 +1549,12 @@ const World = (() => {
     pollFeedState();          // feed truth (channels/cron) for the NO FEED intake nag — server-proven, refreshed slowly
     pollShipStats();          // SHIPPED TODAY truth (completed runs since local midnight) — reload-proof
     pollAffinity();           // the PROVEN social graph — who the run log says works together (biases idle social beats)
-    setInterval(pollFeedState, 60000);   // listenersBound guards init's one-time block, so these arm exactly once
-    setInterval(pollShipStats, 60000);
-    setInterval(pollAffinity, 300000);   // the graph moves on the timescale of DAYS — a 5min refresh is already generous
+    // through PollGate (idle CPU piece 3, 2026-10-20): the same cadence on screen, a 30 s floor while away (never slower
+    // than these already are), a catch-up on return; setInterval when PollGate is absent (node tests)
+    const gatedPoll = (fn, ms) => (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(fn, { ms, immediate: false }) : setInterval(fn, ms);
+    gatedPoll(pollFeedState, 60000);   // listenersBound guards init's one-time block, so these arm exactly once
+    gatedPoll(pollShipStats, 60000);
+    gatedPoll(pollAffinity, 300000);   // the graph moves on the timescale of DAYS — a 5min refresh is already generous
   }
 
   /* Every handler the stage canvas owns, bound to the CURRENT `cv`. Called once from init
@@ -1980,14 +1984,23 @@ const World = (() => {
   }
   function collapseFlood() { if (floodAt && !floodEndAt) floodEndAt = performance.now(); }   // pull the cascade inward into the mind
   function refit() { fitNeeded = true; }
+  /* The bubble shows a line's first 160 characters, whitespace runs folded. chat.js says the WHOLE reply so far on every
+     streamed token, so folding all of it was O(reply) per token — O(n²) per answer (perf p5, 2026-10-20). Only a head that
+     already reaches past 160 folded characters decides them; a whitespace-heavy head falls back to folding everything. */
+  function bubbleText(text) {
+    const s = String(text || '');
+    if (s.length > 2048) { const head = s.slice(0, 2048).replace(/\s+/g, ' ').trimStart(); if (head.length > 160) return head.slice(0, 160); }
+    return s.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
   function say(text, opts) {
     if (!agent) return;
-    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    const ambient = !!(opts && opts.ambient);
+    const t = ambient ? String(text || '').replace(/\s+/g, ' ').trim() : bubbleText(text);
     agent.say = { text: t.slice(0, 160), until: performance.now() + 4200 };
     // ambient station-life remarks are muttered ALOUD too (when the agent has a voice and isn't
     // mid-conversation) so the station feels lived-in. Real replies are spoken by chat.js, not here,
     // so only {ambient:true} lines speak — and pure filler ("...", "hmm") stays a silent bubble.
-    if (opts && opts.ambient && typeof Voice !== 'undefined' && Voice.mutter
+    if (ambient && typeof Voice !== 'undefined' && Voice.mutter
         && /[a-z]/i.test(t) && !/^h+m+[.…]?$/i.test(t)) {
       Voice.mutter(t);
     }
@@ -5928,8 +5941,36 @@ const World = (() => {
      so a bed reclaimed mid-nap can never leave a body posed on a mattress that is no longer there. */
   function lyingBed(b) {
     if (!b || !b.lying || b.goal !== 'sleep' || !b.usingProp || !geo || !geo.props) return null;
-    const p = geo.props.find(q => q.id === b.usingProp);
+    const p = propById(b.usingProp);
     return (p && (propUse(p) || {}).kind === 'bed') ? p : null;
+  }
+  /* ONE WALK, NOT ONE PER PROP (perf, 2026-10-20). The prop pass asked, for EVERY prop, which body sleeps in it and which
+     sits on it — a crew.find per prop, each lyingBed a geo.props.find — O(props² × bodies) per frame: ~1.5 ms on a
+     furnished 300-prop station with sleepers, 12 ms at 600. propById reads the floor's props through an id index (the
+     FIRST prop with an id, as props.find answered), rebuilt whenever the projected prop list is replaced or resized —
+     rederive hands over a fresh array on every edit and nothing mutates it in place. bodyPropIndex() walks [agent,
+     ...crew] once per frame and keeps the FIRST body per bed and per seat: the hero, then the crew in order — exactly
+     what `(agent && … === p) ? agent : crew.find(…)` picked. */
+  let propIndexOf = null, propIndexLen = -1, propIndex = null;
+  function propById(id) {
+    const props = geo && geo.props;
+    if (!props) return undefined;
+    if (props !== propIndexOf || props.length !== propIndexLen) {
+      propIndex = new Map();
+      for (const q of props) if (!propIndex.has(q.id)) propIndex.set(q.id, q);
+      propIndexOf = props; propIndexLen = props.length;
+    }
+    return propIndex.get(id);
+  }
+  function bodyPropIndex() {
+    const sleeper = new Map(), sitter = new Map();   // bed prop -> the body dormant in it · prop id -> the body seated on it
+    for (const b of [agent, ...crew]) {
+      if (!b) continue;
+      const bed = lyingBed(b);
+      if (bed && !sleeper.has(bed)) sleeper.set(bed, b);
+      if (b.seated && !b.lying && !sitter.has(b.usingProp)) sitter.set(b.usingProp, b);
+    }
+    return { sleeper, sitter };
   }
   function planBedSleep(now, reviewBedId = null, reviewZone = null) {
     if (!geo || !geo.props || !geo.props.length) return false;
@@ -6724,6 +6765,17 @@ const World = (() => {
         const ts = camLock.sc, lx = cv.width / 2 - bodyPosX(lb) * ts, ly = cv.height * fy - bodyPosY(lb) * ts;
         const k = easeK(0.08, dt);   // softer than the one-shot focus ease (0.16): a trailing, cinematic follow of a moving body
         scale += (ts - scale) * k; panX += (lx - panX) * k; panY += (ly - panY) * k;
+        /* CAMERA SETTLE (perf, 2026-10-20 — "it eats my PC's resources"). A geometric ease never reaches its target: in
+           float64 each cine shot's zoom crept for ~400 frames (6.6 s; a pan near 0 for 150 s), and every cache keyed on the
+           camera — the belt atlas, the prop shadow layer — was dropped and rebuilt on each of them, all day while idle.
+           Each axis lands on its own once its remaining motion is under CAM_SETTLE_PX device px — the zoom measured at
+           the on-screen pixel it would move farthest, (sx - panX) * Δscale / scale at a screen edge: a walking subject
+           keeps panning, but its zoom still lands. Not camLerp's joint rule — that waits for scale AND pan, which never
+           happens on a walking body, and its 1px/0.01 snap can pop ~4px at the edge. */
+        const reach = Math.max(Math.abs(panX), Math.abs(cv.width - panX), Math.abs(panY), Math.abs(cv.height - panY));
+        if (Math.abs(ts - scale) / scale * reach < CAM_SETTLE_PX) scale = ts;
+        if (Math.abs(lx - panX) < CAM_SETTLE_PX) panX = lx;
+        if (Math.abs(ly - panY) < CAM_SETTLE_PX) panY = ly;
       }
     }
     if (camLerp && !camAnim && !camLock) {   // gently ease toward a conversation framing (set by focusAgent); the awakening camera + a follow-lock win
@@ -6818,6 +6870,7 @@ const World = (() => {
         PropSprites.setJourneyStage(journeyStage);   // one proven goal = one physical beacon on the TROPHY CASE crown
       }
       const outboxLit = now - lastOutboxFlash < 600;   // the OUTBOX flares for 600ms after a reply dispatches
+      const occupants = bodyPropIndex();   // who lies in / sits on each prop, one walk for the whole pass (ONE WALK, NOT ONE PER PROP)
       for (const p of geo.props) {
         // FLOOR DECALS never enter the y-sort: they are paint on the deck, so they go in the floor pass
         // and everything else — props, crates, bodies — is drawn ON them. Decals carry no seat/mount/live
@@ -6836,12 +6889,11 @@ const World = (() => {
         // occludes the sitter's lower body. Beds/beanbags never set `seated` and never enter this branch.
         // A BODY IS IN THIS BED (lyingBed): the bed paints in TWO passes around it — frame + pillow under
         // the sleeper, quilt over it — so the head shows on the pillow and the rest is under the covers.
-        const sleeper = ((agent && lyingBed(agent) === p) ? agent : crew.find(b => lyingBed(b) === p)) || null;
+        const sleeper = occupants.sleeper.get(p) || null;
         // a sleeper is `seated` (it holds a mattress claim with a render anchor) but it is NOT a sitter:
         // the sitter branch pulls the prop's sort key onto the body, which is right for a stool and wrong
         // for a bed, whose frame must keep its own footprint key with the body sorted INSIDE it.
-        const sitter = (agent && agent.seated && !agent.lying && agent.usingProp === p.id) ? agent
-          : crew.find(b => b.seated && !b.lying && b.usingProp === p.id);
+        const sitter = occupants.sitter.get(p.id);
         const sitterUse = sitter ? propUse(p) : null;
         // a SIDE SEAT sorts BEHIND its sitter like a stool, not in front like a sofa: its near arm
         // comes back over the body as the seat-front overlay below, so the sitter shows through the
@@ -8448,7 +8500,10 @@ const World = (() => {
   }
   function pollFeedState() {
     if (typeof fetch === 'undefined') return;
-    const get = u => { try { return fetch(apiUrl(u)).then(r => (r.ok ? r.json() : null)).catch(() => null); } catch (_) { return Promise.resolve(null); } };
+    // each read has a 15 s deadline like every other bounded poll: one the sidecar accepts and never answers must not hold
+    // this beat (PollGate awaits it) or a connection slot to the sidecar for good; a timed-out read is "no answer"
+    const deadline = () => ((typeof U !== 'undefined' && U.timeoutSignal) ? U.timeoutSignal(15000) : undefined);
+    const get = u => { try { return fetch(apiUrl(u), { signal: deadline() }).then(r => (r.ok ? r.json() : null)).catch(() => null); } catch (_) { return Promise.resolve(null); } };
     return Promise.all([get('/api/channels/status'), get('/api/cron'), get('/api/routing/triggers')]).then(([chans, cron, trg]) => {
       if (!chans && !cron && !trg) return;   // nothing answered — keep the last known truth
       const chan = !!(chans && typeof chans === 'object' && Object.keys(chans).some(id => chans[id] && chans[id].configured));
@@ -8716,11 +8771,17 @@ const World = (() => {
   /* PER-OUTBOX CRATES (Andrew 10-03: an OUTBOX shows only ITS conveyor's output). A pending row belongs to a line only
      when a line-job record PROVES it: the row's run stream is a job sent down that line (/api/line-jobs streamId → line).
      Routines, chats and while-away runs are no conveyor's output — they wait in DELIVERABLES › TO REVIEW, never on a
-     chute. Memoized on (pending count, stream join, plan) so the per-frame read stays cheap. */
+     chute. Memoized on (ledger revision, stream join, plan) so the per-frame read stays cheap: the revision moves on every
+     ReturnStore write (perf, 2026-10-20 — the pending COUNT it used to key on cost a ledger hydrate per frame, and a
+     resolve plus a fold between two frames kept the count and left a crate on the old line's chute). A store without
+     revision() keys on the count, as before. */
+  function returnRevision() {
+    try { return (typeof ReturnStore !== 'undefined' && ReturnStore.revision) ? ReturnStore.revision() : undefined; } catch (_) { return undefined; }
+  }
   let lineJobStream = {};   // job streamId -> line key, from the server's line-job records (refreshed with the line plates)
   let crateMemo = null, crateKey = null;
   function outboxCrateMap() {
-    const n = returnCrates(), key = [n, lineJobStream, routingPlan];
+    const n = returnCrates(), rev = returnRevision(), key = [rev, rev === undefined ? n : 0, lineJobStream, routingPlan];
     if (crateKey && crateKey.every((v, i) => v === key[i])) return crateMemo;
     const by = {}, outOf = {};
     try {
@@ -9170,8 +9231,8 @@ const World = (() => {
   }
   function pauseBridge() {
     bridgePaused = true;
-    if (connPollTimer) { clearInterval(connPollTimer); connPollTimer = null; }
-    if (spotifyPollTimer) { clearInterval(spotifyPollTimer); spotifyPollTimer = null; }
+    if (connPollTimer) { if (connPollTimer.stop) connPollTimer.stop(); else clearInterval(connPollTimer); connPollTimer = null; }   // a PollGate loop or a bare interval
+    if (spotifyPollTimer) { if (spotifyPollTimer.stop) spotifyPollTimer.stop(); else clearInterval(spotifyPollTimer); spotifyPollTimer = null; }
     if (chanES) { try { chanES.close(); } catch (_) {} chanES = null; }
   }
   // E1: the ONE public read of the SSE bridge health — the SAME predicate the canvas dims its live
@@ -9187,8 +9248,9 @@ const World = (() => {
   function resumeBridge() {
     if (!bridged) return;                 // never set up yet (no agent has entered) — connectChannelBridge will open it
     bridgePaused = false;
-    if (!connPollTimer && connPollFn) { connPollFn(); connPollTimer = setInterval(connPollFn, 5000); }
-    if (!spotifyPollTimer && spotifyPollFn) { spotifyPollFn(); spotifyPollTimer = setInterval(spotifyPollFn, 5000); }
+    const gated = typeof PollGate !== 'undefined' && PollGate.every;   // idle CPU piece 3: 5 s on screen, 30 s floor while away
+    if (!connPollTimer && connPollFn) { connPollFn(); connPollTimer = gated ? PollGate.every(connPollFn, { ms: 5000, immediate: false }) : setInterval(connPollFn, 5000); }
+    if (!spotifyPollTimer && spotifyPollFn) { spotifyPollFn(); spotifyPollTimer = gated ? PollGate.every(spotifyPollFn, { ms: 5000, immediate: false }) : setInterval(spotifyPollFn, 5000); }
     if (!chanES && connOpenFn) connOpenFn();
   }
   let floor = null, lastSlagAt = -1e9;   // FloorStats: the factory-floor economy fold + a fresh-slag pulse clock
@@ -11127,7 +11189,8 @@ const World = (() => {
         if (PropSprites.reconcileConnectors) PropSprites.reconcileConnectors(connIds);
       }).catch(() => {});   // E4/E6f: on failure keep the last-known portal states — never blank them from an error body
     }
-    connPollFn = pollConnectors; pollConnectors(); connPollTimer = setInterval(pollConnectors, 5000);
+    // idle CPU piece 3 (2026-10-20): 5 s on screen, a 30 s floor while away, a catch-up on return (pauseBridge stops it)
+    connPollFn = pollConnectors; pollConnectors(); connPollTimer = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(pollConnectors, { ms: 5000, immediate: false }) : setInterval(pollConnectors, 5000);
     // JUKEBOX dead-vs-live: poll Spotify's OAuth connected state so a placed jukebox reads DEAD (unplugged)
     // until the user connects Spotify in TOOLSETS, then comes alive. Same keep-last-known-on-failure contract.
     function pollSpotify() {
@@ -11136,7 +11199,7 @@ const World = (() => {
         .then(j => PropSprites.setSpotifyConnected(!!(j && j.connected)))
         .catch(() => {});   // keep last-known on a failed poll (mirrors the connector contract)
     }
-    spotifyPollFn = pollSpotify; pollSpotify(); spotifyPollTimer = setInterval(pollSpotify, 5000);
+    spotifyPollFn = pollSpotify; pollSpotify(); spotifyPollTimer = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(pollSpotify, { ms: 5000, immediate: false }) : setInterval(pollSpotify, 5000);
     // TRUTH (audit T1 finding 5): the per-prop capability SURGE must reflect the tool's REAL OUTCOME, not the
     // mere attempt. agent.tool_call fires BEFORE the capability/consent gate (loop.js), so a denied or errored
     // call emits a tool_call identically to a success — pulsing the granting prop green on tool_call was a lie.
@@ -11258,7 +11321,9 @@ const World = (() => {
     // authoritative snapshot on a slow cadence: truth converges within ~30s in BOTH directions (a dead run is
     // cleared; a genuinely live one is re-stamped, which also keeps the per-run TTL from biting a long quiet
     // run, e.g. one paused on a consent prompt). Paused bridge = deliberate silence — no polling.
-    setInterval(() => { if (!bridgePaused) fetchSnapshot(); }, 30000);
+    // idle CPU piece 3 (2026-10-20): through PollGate — 30 s on screen and away alike, plus a catch-up read on return
+    if (typeof PollGate !== 'undefined' && PollGate.every) PollGate.every(() => { if (!bridgePaused) fetchSnapshot(); }, { ms: 30000, immediate: false });
+    else setInterval(() => { if (!bridgePaused) fetchSnapshot(); }, 30000);
   }
   /* E2: fetch the authoritative live-state snapshot on every SSE (re)open and reconcile the paired-state maps.
      404/failure-tolerant: the endpoint is owned by the lifecycle lane and may not exist here — any non-OK/throw

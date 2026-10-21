@@ -3270,7 +3270,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // nextRunAt arrives as an ISO string from the cron store — parse, never subtract a string (NaN → "in now")
       const nextAt = j.nextShiftAt ? (Date.parse(j.nextShiftAt) || Number(j.nextShiftAt) || 0) : 0;
       const due = nextAt ? (nextAt - Date.now()) : 0;
-      const next = (j.granted && nextAt)
+      // the station withholds the clock while scheduling is OFF or E-STOPped (shiftsPaused) — say that, never a countdown
+      const next = (j.granted && j.shiftsPaused === 'halted') ? 'shifts paused — the E-STOP is engaged (resume automation to lift it)'
+        : (j.granted && j.shiftsPaused) ? 'shifts paused — scheduling is OFF (AUTOMATE › SCHEDULES › TURN SCHEDULING ON)'
+        : (j.granted && nextAt)
         ? (due <= 60000 ? 'next shift: due now' : 'next shift in ' + rel(due))
         : (j.granted ? 'shift not scheduled yet' : 'shifts are off (grant above)');
       h += '<div class="ws-bl-foot">' +
@@ -4990,20 +4993,22 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // chat.js's in-band error branch. null (no outcome recorded — legacy save / delegated run) keeps
       // the DONE chip: we only claim FAILED when the failure is provable, never by inference.
       if (s.lastRunOk === false) return '<div class="kb-state failed">✗ RUN FAILED — REVIEW</div>';
+      if (s.lastRunOk == null && s.lastRunReason) return '<div class="kb-state stopped">■ STOPPED — REVIEW</div>';   // stopped before it finished (noteStopReason)
       return '<div class="kb-state done">FINISHED — RESULT READY</div>';
     }
     return '';
   }
   function activeAggregate(items) {
-    let running = 0, ready = 0, failed = 0;
+    let running = 0, ready = 0, failed = 0, stopped = 0;
     items.forEach(s => {
       const busy = (typeof Channels !== 'undefined' && Channels.isBusy && Channels.isBusy(s.id));
       if (busy) running++;
-      else if (s.runIds && s.runIds.length) { if (s.lastRunOk === false) failed++; else ready++; }
+      else if (s.runIds && s.runIds.length) { if (s.lastRunOk === false) failed++; else if (s.lastRunOk == null && s.lastRunReason) stopped++; else ready++; }
     });
     const parts = [];
     if (running) parts.push(running + ' RUNNING');
     if (failed) parts.push(failed + ' FAILED');
+    if (stopped) parts.push(stopped + ' STOPPED');
     if (ready) parts.push(ready + ' READY TO OPEN');
     return parts.length ? '<small class="kb-col-state">' + parts.join(' · ') + '</small>' : '';
   }
@@ -10684,7 +10689,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     const registered = !!(g && Array.isArray(j.goals) && j.goals.some(x => x && x.id === g.id));
     const metric = g && Array.isArray(j.metrics) ? j.metrics.find(m => m && m.goalId === g.id) : null;
     return BattlePass.build({ progression: j.progression, goal: g ? { id: g.id, text: g.text, done: pr.done, total: pr.total } : null,
-      goalRegistered: registered, metric, claimedTier: bpClaimed(), now: Date.now() });
+      goalRegistered: registered, goalSaved: !!(g && g.successCondition), metric, claimedTier: bpClaimed(), now: Date.now() });
   }
   function bpRule(frame, label) {
     const run = frame.run.repeat(240);
@@ -10697,6 +10702,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (!m) return '<div class="q-journal-empty"><span aria-hidden="true">◇</span><h3>Pass offline</h3><p>Your Commander progression has not loaded yet. It appears here as soon as the station reports it.</p></div>';
     const f = m.frame, pad = n => String(n).padStart(2, '0');
     const s = m.streak;
+    // the sidecar went quiet: these are the last VERIFIED numbers, not live ones — say so (sweep 10-20; the PROGRESS view
+    // and the topbar's "Lv N · saved" already do). CLAIM still works: it only marks tiers the ledger already proved.
+    let stale = false; try { const st = JourneyStore.state && JourneyStore.state(); stale = !!(st && st.stale); } catch (_) {}
+    const staleHtml = stale ? '<div class="sub warn bp-stale">[ OFFLINE ] showing your last verified pass — points and streak refresh when the station reconnects.</div>' : '';
     // the flame: lit while the streak is alive, an ember when it is at risk, cold ash at zero.
     const flame = s.current > 0
       ? (s.atRisk ? '   .   \n  ( )  \n (   ) \n  \'-\'  ' : '   (   \n  ) )  \n ( ( ( \n  \'-\'  ')
@@ -10728,11 +10737,11 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       + ' <span class="bp-pts">' + esc(c.pts) + '</span></span></span>'
       + (c.done ? '<span class="bp-done-tag">DONE</span>' : '<button class="consent-btn bp-go" data-view="' + esc(c.go.view) + '"' + (c.go.category ? ' data-category="' + esc(c.go.category) + '"' : '') + '>GO</button>') + '</li>').join('');
     return '<section class="bp bp-frame-' + esc(f.name.toLowerCase().replace(/\s+/g, '-')) + '" aria-label="Battle pass">'
-      + bpRule(f, 'SEASON ' + m.season.no + ' · ' + m.season.name + ' · ' + m.season.daysLeft + 'D LEFT')
+      + bpRule(f, 'SEASON ' + m.season.no + ' · ' + m.season.name + ' · ' + m.season.daysLeft + 'D LEFT') + staleHtml
       + '<div class="bp-hero">'
       + '<pre class="bp-tier" aria-hidden="true"> .--------.\n |  TIER  |\n |   ' + pad(m.tier) + '   |\n \'--------\'</pre>'
       + '<div class="bp-hero-main"><span class="bp-eyebrow">RANK</span><b class="bp-rank">' + esc(m.rank) + '</b>'
-      + '<div class="bp-xp"><span class="bp-bar" aria-hidden="true">' + esc(BattlePass.bar(m.pct, 24)) + '</span> <b>' + m.into + '</b>/' + m.perTier + ' PTS</div>'
+      + '<div class="bp-xp"><span class="bp-bar bp-bar-l" aria-hidden="true">' + esc(BattlePass.bar(m.pct, 24)) + '</span><span class="bp-bar bp-bar-s" aria-hidden="true">' + esc(BattlePass.bar(m.pct, 10)) + '</span> <b>' + m.into + '</b>/' + m.perTier + ' PTS</div>'
       + '<div class="sub">' + m.toNext + ' pts to TIER ' + (m.tier + 1) + ' · ' + esc(m.nextRank) + ' &nbsp;·&nbsp; season +' + m.season.pts + ' pts</div></div>'
       + '<div class="bp-streak' + (s.current > 0 ? ' lit' : '') + (s.atRisk ? ' risk' : '') + '"><pre class="bp-flame" aria-hidden="true">' + flame + '</pre>'
       + '<div><b class="bp-streak-n">' + s.current + '</b> DAY STREAK<div class="sub">' + esc(streakLine) + '</div><div class="sub dim">BEST ' + s.best + '</div></div>'
@@ -10740,7 +10749,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       + '</div>'
       + bpRule(f, 'TIER TRACK') + claimAll
       + '<ol class="bp-track">' + nodes + '</ol>'
-      + bpRule(f, 'WEEKLY CHALLENGES · RESETS IN ' + m.week.resetsIn)
+      + bpRule(f, 'WEEKLY CHALLENGES') + '<div class="sub bp-reset">resets in ' + esc(m.week.resetsIn.toLowerCase()) + '</div>'
       + '<ul class="bp-chals">' + chal + '</ul>'
       + '<p class="sub dim bp-law">Points come only from real progress on your goals: +10 for each goal quest you confirm, planned step you finish, or metric checkpoint you pass, and +100 when you confirm a goal is achieved. Station, profile, and build quests earn no points. Tiers give titles and frames only. Every tool works at every tier.</p>'
       + bpRule(f, '')
@@ -11468,7 +11477,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     // and a challenge's GO jumps to the view where that kind of progress is actually made.
     body.querySelectorAll('.bp-claim, .bp-claim-all').forEach(b => b.addEventListener('click', () => {
       const t = Number(b.dataset.tier) || 0;
-      if (t > bpClaimed()) bpSetClaimed(t);
+      if (!(t > bpClaimed())) return;   // already claimed (a double-click or a stale button): no second sting (sweep 10-20)
+      bpSetClaimed(t);
       try { if (typeof SFX === 'object' && SFX.level) SFX.level(); } catch (_) {}
       body.dataset.bpFlash = String(t);
       rerender('quests');
@@ -12238,7 +12248,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     wireCompactBeat();
     wireNotifyLive();
     tick();
-    if (!started) { started = true; tickTimer = setInterval(tick, 1000); }
+    /* the 1 s station tick runs through PollGate (idle CPU piece 3, 2026-10-20): 1 s while the station can be seen, a
+       30 s floor while the Commander is away, and one tick at once on return. The quest ledger and refresh syncs ride it. */
+    if (!started) { started = true; tickTimer = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(tick, { ms: 1000, immediate: false }) : setInterval(tick, 1000); }
   }
 
   // update the live roster WITHOUT re-running enter's one-time setup (legacy-task import, timer) — used

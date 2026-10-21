@@ -62,6 +62,9 @@
     const schemaCache = deps.schemaCache || null;
     const fingerprintConfig = typeof deps.fingerprintConfig === 'function' ? deps.fingerprintConfig : function () { return ''; };
     const validateConfig = typeof deps.validateConfig === 'function' ? deps.validateConfig : function () { return ''; };
+    // awaited before EVERY (re)connect builds its transport: the host readies what the transport will run in (a
+    // stdio server's Safe Cell, which may have stopped since the last connect). A throw fails this connect honestly.
+    const prepareConnect = typeof deps.prepareConnect === 'function' ? deps.prepareConnect : null;
     const STDIO_IDLE_MS = Math.max(0, Number(deps.stdioIdleMs) || 15 * 60 * 1000);
     const STDIO_MAX_LIFETIME_MS = Math.max(0, Number(deps.stdioMaxLifetimeMs) || 6 * 60 * 60 * 1000);
     const RECONNECT_BASE_MS = Math.max(250, Number(deps.reconnectBaseMs) || 1000);
@@ -252,6 +255,7 @@
         // connector surfaces an HONEST 401/error (visible + reloadable), never a crash or a silently-frozen stale token.
         let liveToken = c.token;
         if (typeof c.tokenProvider === 'function') { const got = await resolveToken(c, false); if (got.token != null) liveToken = got.token; }
+        if (prepareConnect) await prepareConnect({ id: c.id, transport: c.transportKind, agentId: c.agentId });
         if (!isCurrent()) { if (drained) closeResources(drained.client, drained.transport, 'reconnect'); return { ok: false, state: 'down', toolCount: 0, superseded: true }; }
         attempt.transport = makeTransport({
           id: c.id,

@@ -88,5 +88,18 @@ const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(
   let resolveClosed; request = () => new Promise(resolve => { resolveClosed = resolve; });
   const pending = ctx.controller.open('alpha'); ctx.controller.close(); resolveClosed({ ok: true, json: async () => data('alpha') }); await pending; await settle();
   assert.equal(panel.hidden, true); assert.equal(active, 'beta-home', 'closing cancels pending focus changes');
+  // FORGOTTEN UNDER AN OPEN HOME (sweep/sessions 2026-10-20): PROJECTS › Forget removes the row while its home is open.
+  // The workspace read then answers 404 "Project not found." — the station's answer, not an outage — so the home closes
+  // instead of polling forever under "Showing the last confirmed state; reconnecting…".
+  request = async () => ({ ok: true, json: async () => data('gamma') });
+  await ctx.controller.open('gamma');
+  assert.equal(title.textContent, 'gamma');
+  request = async () => ({ ok: false, status: 404, json: async () => ({ error: 'Project not found.' }) });
+  const gammaPoll = [...timers.entries()].filter(([, t]) => t.ms === 2500).pop();
+  const before = serial;
+  await gammaPoll[1].fn(); await settle();
+  assert.equal(ctx.controller.owns(), false, 'a forgotten project releases COMMS');
+  assert.ok(![...timers.entries()].some(([id, t]) => id > before && t.ms === 2500), 'a forgotten project is not polled again');
+  assert.ok(!/reconnecting/.test(String((panel.querySelector('.ph-notice') || {}).textContent || '')), 'a 404 is never presented as a connection problem');
   console.log('project home UI: draft preservation, unsaved crew, stable focus, rapid project switching and close races PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });

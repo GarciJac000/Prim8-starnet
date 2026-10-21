@@ -97,6 +97,16 @@ A.eq(se.daysLeft, 10, 'Oct 21 → 10 days left after today');
 A.eq(BP.build({ now: NOW }).week.resetsIn, '4D 9H', 'Wed 15:00 → next Monday 00:00 is 4D 9H');
 A.eq(BP.build({ now: at(2026, 10, 25, 23) }).week.resetsIn, '1H', 'Sunday 23:00 → 1H');
 
+// ---- sweep 10-20 regressions
+const astral = BP.build({ progression: prog(0, []), goal: { id: 'g1', text: 'a'.repeat(46) + '🚀 tail of the goal', done: 0, total: 3 }, goalRegistered: true, now: NOW }).challenges[0].title;
+A.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(astral), 'a clipped goal title never ends in a lone surrogate (no broken emoji)');
+const pendingReg = BP.build({ progression: prog(0, []), goal, goalRegistered: false, goalSaved: true, now: NOW }).challenges[0].title;
+A.ok(/^Finish saving/.test(pendingReg) && !/a success condition$/.test(pendingReg), 'a goal saved offline is not told it lacks a success condition');
+const SUN = at(2026, 10, 25, 18);
+A.eq(BP.build({ progression: prog(10, []), goal, goalRegistered: true, now: SUN }).challenges.find(x => x.id === 'days').need, 1, 'Sunday with no active days asks for 1 day, never an impossible 3');
+const satActs = [ev(at(2026, 10, 19)), ev(at(2026, 10, 24, 9))];
+A.eq(BP.build({ progression: prog(20, satActs), goal, goalRegistered: true, now: at(2026, 10, 24, 15) }).challenges.find(x => x.id === 'days').need, 3, 'Saturday with Mon+Sat counted still allows a 3rd day (Sunday)');
+
 // ---- older sidecars without `activity` fall back to the achievements window
 const legacy = BP.build({ progression: { level: 1, points: 10, achievements: [{ at: at(2026, 10, 21), kind: 'quest', points: 10, goalId: 'g1', key: 'quest:q1' }] }, now: NOW });
 A.eq(legacy.streak.current, 1, 'legacy achievements feed the streak');

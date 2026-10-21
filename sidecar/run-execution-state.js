@@ -71,8 +71,14 @@ function makeRunExecutionState(options) {
       ? Math.max(0, Math.floor(Number(result.outputBytes))) : Buffer.byteLength(result.content, 'utf8');
     const summary = String(result.summary || '').replace(/\s+/g, ' ').trim().slice(0, 240);
     const parkedPath = String(result.parkedPath || '').trim();
+    // outputElided (registry): the parked file is the command's kept head + tail, not its full output.
+    const captureDropped = Number(result.outputElided) > 0 ? Number(result.outputElided) : 0;
     const receipt = (summary || parkedPath) ? ('[Tool result receipt' + (summary ? ': ' + summary : '') + '. '
-      + (parkedPath
+      + (parkedPath && captureDropped
+        ? 'The kept first and last parts of this output (' + originalChars + ' characters / ' + originalBytes + ' UTF-8 bytes; the command\'s own capture had already dropped '
+          + captureDropped + ' characters from its middle) were saved to ' + parkedPath + ' because this run reached its context allowance. The tool already completed; '
+          + 'read the saved file in focused ranges, and rerun with narrower output only if you need the dropped middle.'
+        : parkedPath
         ? 'The full ' + originalChars + '-character / ' + originalBytes + '-byte UTF-8 output was saved to ' + parkedPath
           + ' because this run reached its context allowance. The tool already completed; do not rerun it merely to recover output. Read the saved file in focused ranges.'
         : originalChars + ' characters / ' + originalBytes + ' UTF-8 bytes were returned, but the full output could not fit or be preserved. Narrow the command before rerunning it.')

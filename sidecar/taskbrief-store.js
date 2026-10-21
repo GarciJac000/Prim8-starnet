@@ -126,8 +126,13 @@ function makeTaskBriefStore(deps) {
         // walks away mid-batch; the durable fallback re-asks them in order, so the reply belongs to the
         // earliest open one. For legacy single-question briefs the two are the same question.
         const q = prior.questions.find(x => !x.answer);
+        const prevInput = prior.currentInput;
         if (q) { q.answer = q.mode === 'conversation' ? text : routed.text; q.answeredAt = ts; }
         prior.currentInput = text; prior.status = 'ready'; prior.updatedAt = ts; out = prior;
+        // The answer is only SPENT once a model run actually reads it. The returned copy (never the persisted
+        // record) names what this call consumed, so a run refused or failed before any model output can hand
+        // the question back with reopenAnswer() instead of stranding the original task behind a 'ready' brief.
+        if (q) out = Object.assign({}, prior, { inputAction: 'answer', answered: { index: prior.questions.indexOf(q), at: ts, prevInput } });
       } else {
         out = normalizeBrief({
           id: bounded(input.id, 100) || ('tb_' + bounded(input.runId, 80)), key,
@@ -208,6 +213,27 @@ function makeTaskBriefStore(deps) {
       // 'clarifying' state so a walk-away mid-batch still resumes on the remaining question.
       if (!b.questions.some(x => !x.answer)) b.status = 'ready';
       b.updatedAt = Number(now) || b.updatedAt; out = b; return rec;
+    }).then(() => out);
+  }
+
+  /* reopenAnswer(id, answered, now) — undo ONE prepare() answer that no model run ever read. The run that
+     carried the Commander's answer was refused before the model (a dead sign-in, a tool-less model, a journal
+     failure) or the provider failed on turn 0, so nothing acted on the answer; leaving the brief 'ready' made
+     the re-sent answer mint a NEW brief whose ORIGINAL REQUEST was the one-word answer (and a "yes"/"no" ran
+     as tool-less chat). Restores exactly the pre-answer state. Refuses (null, record untouched) whenever
+     anything moved since that answer: a proceed/ask/update/complete on this brief, or a newer brief on the key. */
+  function reopenAnswer(id, answered, now) {
+    const key = String(id || ''); const a = answered && typeof answered === 'object' ? answered : null; let out = null;
+    if (!key || !a || !(Number(a.at) > 0) || !Number.isInteger(a.index) || a.index < 0) return Promise.resolve(null);
+    return durable.update(STORE_KEY, cur => {
+      const rec = normalize(cur); const b = rec.briefs.find(x => x.id === key); if (!b) return undefined;
+      if (b.status !== 'ready' || b.updatedAt !== Number(a.at)) return undefined;
+      const q = b.questions[a.index];
+      if (!q || !q.answer || q.answeredAt !== Number(a.at)) return undefined;
+      if (rec.briefs.some(x => x !== b && x.key === b.key && (x.updatedAt >= b.updatedAt || x.createdAt > Number(a.at)))) return undefined;
+      q.answer = ''; q.answeredAt = 0;
+      b.status = 'clarifying'; b.currentInput = bounded(a.prevInput, 4000); b.updatedAt = Number(now) || b.updatedAt;
+      out = b; return rec;
     }).then(() => out);
   }
 
@@ -361,7 +387,7 @@ function makeTaskBriefStore(deps) {
       .map(t => t.dimension);
   }
 
-  return { read, list, active, prepare, ask, askMany, answerInTurn, updateContext, proceed, complete, patterns, groundedFor, dimensionDeferrals, deferredDimensions, fingerprintQuestion, _durable: durable };
+  return { read, list, active, prepare, reopenAnswer, ask, askMany, answerInTurn, updateContext, proceed, complete, patterns, groundedFor, dimensionDeferrals, deferredDimensions, fingerprintQuestion, _durable: durable };
 }
 
 module.exports = { makeTaskBriefStore, normalize, normalizeBrief, normalizeQuestion, fingerprintQuestion };

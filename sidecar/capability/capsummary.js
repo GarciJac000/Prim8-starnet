@@ -29,20 +29,54 @@ const { delegatedCommandGap } = require('./withheld.js');
 // detected from resolved.tools below.
 const CAPS = [
   { id: 'orchestrator', probe: 'team.dispatch',   have: 'delegate to crew, spawn subagents, summon specialists, and create routines', object: 'the lead ORCHESTRATOR role' },
-  { id: 'web',          probe: 'web_search',      have: 'search/fetch the web and use the controlled browser', object: 'a DISH' },
-  { id: 'cabinet',      probe: 'fs.read',         have: 'read and write files', object: 'an INTEL CAB' },
+  { id: 'web',          probe: 'web_search',      have: 'search/fetch the web and use the controlled browser', object: 'a DISH', type: 'dish' },
+  { id: 'cabinet',      probe: 'fs.read',         have: 'read and write files', object: 'an INTEL CAB', type: 'cabinet' },
   // NOT "control the desktop computer": computer.use/desktop.open carry no capability grant at all and are
   // stripped unconditionally by enforceSyntheticOnly, so claiming desktop control here was a standing lie.
-  { id: 'workbench',    probe: 'shell.exec',      have: 'run shell commands and verify code', object: 'a WORKBENCH' },
-  { id: 'memory',       probe: 'notebook.write',  have: 'keep long-term memory, reusable skills, and recall conversation history', object: 'a NOTEBOOK' },   // task plans ride the computer now (taskplan freebie, 2026-08-17)
+  { id: 'workbench',    probe: 'shell.exec',      have: 'run shell commands and verify code', object: 'a WORKBENCH', type: 'workbench' },
+  // memory's object is the SERVER CART: the word the build palette, the tutorial and manual.js use (no prop is labelled NOTEBOOK)
+  { id: 'memory',       probe: 'notebook.write',  have: 'keep long-term memory, reusable skills, and recall conversation history', object: 'a SERVER CART', type: 'notebook' },   // task plans ride the computer now (taskplan freebie, 2026-08-17)
   // `alt`: a narrower true claim when the headline tool is gone but a sibling survives (image generation deferred as
   // certainly unavailable -- no image connection -- while image_analyze still works). Never claim the headline then.
-  { id: 'studio',       probe: 'image_generate',  have: 'generate and analyze images', object: 'a STUDIO', alt: { probe: 'image_analyze', have: 'analyze images' } },
+  { id: 'studio',       probe: 'image_generate',  have: 'generate and analyze images', object: 'a STUDIO', type: 'studio', alt: { probe: 'image_analyze', have: 'analyze images' } },
   { id: 'jukebox',      probe: 'spotify_play',    have: 'search and control Spotify', object: 'a JUKEBOX' }
 ];
 
 // The powers a Commander most often assumes an agent has -> highest over-promise risk -> nag if absent.
 const CORE = ['web', 'cabinet', 'workbench'];
+// ROOM SCOPE (cap-scope.js, 2026-10-20): the floor gear a room-scoped agent is told to place IN ITS ROOM. Memory and
+// images join the core three only when that gear stands elsewhere on the station (the case the Commander can't see).
+const ROOM_GEAR = ['web', 'cabinet', 'workbench', 'memory', 'studio'];
+// ...and the ones an UNATTENDED run's note offers as a floor fix: web (web_search/fetch need no consent) and the INTEL
+// CAB's READING (fs.write/edit stay default-denied there without an AWAY WORKSHOP grant). Never the terminal (the
+// routine's own grant), never images (image_generate needs the routine's ▣ ALLOW IMAGES; a line hop never has it).
+const FLOOR_UNATTENDED = ['web', 'cabinet'];
+// the unattended room advice's power words: what that gear really grants with nobody watching
+const ROOM_WORD = { web: 'web', cabinet: 'file reading' };
+// memory's headline is 70 chars; the room advice names its core. A STUDIO generates images only on a station with an
+// image route (host fact opts.mediaRoute, the route makeImageTools is built from): without one it grants image_analyze alone.
+const extraHave = (c, noImageRoute) => c.id === 'memory' ? 'keep long-term memory' : (noImageRoute && c.alt) ? c.alt.have : c.have;
+
+const bare = (c) => c.object.replace(/^an? /, '');
+const listJoin = (xs, last) => xs.length > 1 ? xs.slice(0, -1).join(', ') + ' ' + (last || 'and') + ' ' + xs[xs.length - 1] : (xs[0] || '');
+// "(the UPLINK in HOME does not reach you)", or `like` "(like the DISH in HOME)": the prop each missing power's gear really
+// is, in the room it already stands in (cap-scope labels, keyed by room id), so the Commander does not place a second one
+// there. A room named like this agent's own is never named (it would be both places). '' when none stands anywhere else.
+function elsewhereOf(fix, scope, like) {
+  const groups = [];
+  for (const c of fix) {
+    const r = ((scope.gearElsewhere || {})[c.type] || []).find(x => x && x.label && x.name !== scope.roomName);
+    if (!r) continue;
+    let g = groups.find(x => x.id === r.id);
+    if (!g) groups.push(g = { id: r.id, room: r.name, names: [] });
+    g.names.push(r.label);
+  }
+  const n = groups.reduce((k, g) => k + g.names.length, 0);
+  if (!n) return '';
+  const what = (groups.length === 1 && n > 1 && groups[0].names.join() === fix.map(bare).join()) ? 'the ones in ' + groups[0].room
+    : listJoin(groups.map(g => 'the ' + listJoin(g.names) + ' in ' + g.room));
+  return like ? ' (like ' + what + ')' : ' (' + what + (n > 1 ? ' do' : ' does') + ' not reach you)';
+}
 
 function summarizeCapabilities(resolved, opts) {
   opts = opts || {};
@@ -95,7 +129,37 @@ function summarizeCapabilities(resolved, opts) {
   // block must render even when lackCore is EMPTY (a routine granted the terminal has no lacking core cap, yet
   // still needs to be told whether its Commander's connectors are reachable). Interactive is unchanged.
   const lackAutonomous = lackCore.map((c) => c.have).concat(hasConnectorTools ? [] : ['use live MCP connector tools']);
-  const missing = interactive ? lackCore.map((c) => c.have) : lackAutonomous;
+  /* ROOM SCOPE (cap-scope.js): a bay-owning agent's floor tools come ONLY from its desk's (else its bay's) room, so
+     "place a DISH" sent Commanders to gear already standing in HOME. opts.scopeFn (host-built, lazy) is asked only
+     when a floor object is really absent (it validates the saved floor) and only on the branches that advise
+     placement. A null scope (no scopeFn, an unscoped agent, a saved floor that is not this run's) = byte-identical. */
+  // TOOLSETS kill-switch (host: the same disabledCaps resolveTools used, any shape resolve.js takes): a family switched
+  // OFF is absent because of the switch, not the floor, so placing its gear grants nothing and it is never a room fix
+  const dc = opts.disabledCaps;
+  const switchedOff = !dc ? () => false : (typeof dc.has === 'function') ? (id) => dc.has(id)
+    : Array.isArray(dc) ? (id) => dc.indexOf(id) >= 0 : (id) => !!dc[id];
+  // ...and so is a family the run's own toolset list leaves out (host: the o.enabledToolsets enforceEnabledToolsets narrowed
+  // this run with, same semantics: null = no restriction, any other value keeps only what it lists): a routine limited to
+  // ['cabinet'] lacks web because of its list, so a DISH in its room grants nothing -- the per-routine sentence stays true
+  const et = opts.enabledToolsets;
+  const listed = et == null ? null : new Set(Array.isArray(et) ? et.map(String) : []);
+  const placeable = (c) => !capIds.has(c.id) && !switchedOff(c.id) && (!listed || listed.has(c.id));
+  const noImageRoute = opts.mediaRoute === false;   // certain only as false (effective-toolsets' convention)
+  let scope = null;
+  if (typeof opts.scopeFn === 'function' && !unrestrictedHost && (interactive || (!delegatedBy && !ownerTrusted)) &&
+      CAPS.some((c) => (interactive ? ROOM_GEAR : FLOOR_UNATTENDED).indexOf(c.id) !== -1 && placeable(c))) {
+    try { const s = opts.scopeFn(); scope = (s && s.scoped && s.roomName && Array.isArray(s.placedTypes)) ? s : null; } catch (_) { scope = null; }
+  }
+  // what placing gear in THAT room would grant: the object is absent from this run (not merely a stripped tool) and
+  // absent from the room; on an unattended run only what the floor projects there
+  const roomFix = !scope ? [] : CAPS.filter((c) => ROOM_GEAR.indexOf(c.id) !== -1 && placeable(c) && scope.placedTypes.indexOf(c.type) === -1 &&
+    (interactive || FLOOR_UNATTENDED.indexOf(c.id) !== -1) && (CORE.indexOf(c.id) !== -1 || ((scope.gearElsewhere || {})[c.type] || []).length > 0));
+  const roomExtra = roomFix.filter((c) => CORE.indexOf(c.id) === -1);   // memory / images: not in the core lack list
+  // a desk-less agent crewing several bays: a line run is at ONE of them ("this bay"); a chat is at none and draws on its
+  // first bay's room (worldmodel.agentRoomId with no dock)
+  const roomIs = scope ? scope.roomName + ', the room ' + (scope.via !== 'bay' ? 'your desk' : !(scope.bays > 1) ? 'your bay'
+    : scope.floorRouted ? 'this bay' : 'your first bay') + ' is in' : '';
+  const missing = (interactive ? lackCore.map((c) => c.have) : lackAutonomous).concat(roomExtra.map((c) => extraHave(c, noImageRoute)));
   if (missing.length) {
     note += '- You do NOT have: ' + missing.join(', ') + '.\n';
     if (interactive) {
@@ -104,7 +168,10 @@ function summarizeCapabilities(resolved, opts) {
       // the next run (the floor decides each run's grants)
       note += 'If the Commander asks for something you lack, do NOT claim, promise, or pretend to do it. Say plainly you can\'t yet, ' +
         (capIds.has('orchestrator') ? 'and offer to place it yourself (station builder add; they approve; works from their next message): ' : 'and name the object to place to grant it: ') +
-        lackCore.map((c) => c.have + ' -> place ' + c.object).join('; ') + '. ' +
+        lackCore.map((c) => c.have + ' -> place ' + c.object).concat(roomExtra.map((c) => extraHave(c, noImageRoute) + ' -> place ' + c.object)).join('; ') + '. ' +
+        // only what is true of FLOOR gear: files + terminal come from a hire's execution profile and connectors are
+        // account-level, so "your tools come only from that room" was false for the very agents this names
+        (roomFix.length ? 'Place the ' + listJoin(roomFix.map(bare)) + ' in ' + roomIs + ': gear in any other room' + elsewhereOf(roomFix, scope, true) + ' does not reach you. ' : '') +
         'You can always think and reply; that needs nothing.\n';
     } else if (delegatedBy) {
       // A DELEGATED worker (issue #77) is not a routine and nobody set a per-routine grant: the "UNATTENDED ... per-routine
@@ -129,9 +196,19 @@ function summarizeCapabilities(resolved, opts) {
       // that would be a fresh lie to the model on exactly the granted runs the grant exists to enable. Only
       // the capabilities genuinely absent from THIS run's resolved set (lackCore, plus connectors when none
       // survived) are named; desktop control is unconditional because it carries no grant on any surface.
-      note += 'This is an UNATTENDED run: no Commander is watching, so ' + lackAutonomous.join(', ') + ' and desktop control ' +
-        'are unavailable on this run -- each needs either a watched session or an explicit per-routine grant the ' +
-        'Commander sets on the routine itself. Placing objects cannot change that here. ' +
+      // A BAY-ROUTED run's web and file reading DO come from the floor here (scope = this run's own routed room):
+      // "placing objects cannot change that" was false for them, so they get the room fix and leave that sentence.
+      // The fix is named only when the job needed it: an order on every line hop put the same gear advice into every
+      // delivered output and channel reply (and a toolless turn has no job that could have needed it).
+      const rest = lackAutonomous.filter((h) => !roomFix.some((c) => c.have === h));
+      note += 'This is an UNATTENDED run: no Commander is watching, so ' + (rest.length || !roomFix.length
+        ? rest.join(', ') + ' and desktop control ' +
+          'are unavailable on this run -- each needs either a watched session or an explicit per-routine grant the ' +
+          'Commander sets on the routine itself. Placing objects cannot change that here. '
+        : 'desktop control is unavailable on this run. ') +
+        (roomFix.length ? 'No ' + listJoin(roomFix.map((c) => ROOM_WORD[c.id]), 'or') + ' on this run: ' + roomIs + ', has no ' + listJoin(roomFix.map(bare), 'or') +
+          '; the Commander can place ' + (roomFix.length > 1 ? 'them' : 'one') + ' there for your next job' + elsewhereOf(roomFix, scope) + '. ' +
+          (toolless ? '' : 'If the job needed ' + (roomFix.length > 1 ? 'them' : 'it') + ', name that fix in your closing clause. ') : '') +
         'Do NOT claim, promise, or pretend to do what you lack, and do NOT blame missing credentials for a power you were never granted. ' +
         'Do everything you genuinely can, then state plainly what you could not do and why, so the Commander can finish it in a watched session. ' +
         'Say it in the Commander\'s terms, in one short closing clause (e.g. "Not saved as a file — copy it from here."), and never open with or explain approval rules, run modes or station policy; ' +

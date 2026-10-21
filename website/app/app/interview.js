@@ -34,7 +34,7 @@
 
     { dim: 'stack',
       pre: 'so i reach for the right tools instead of guessing —',
-      ask: 'what’s open on your screen right now? that’s the honest answer.',
+      ask: 'which apps and tools do you use most for your work?',
       chips: [
         { label: 'An editor & a terminal', value: 'Works in a code editor and terminal most of the day.' },
         { label: 'Docs & spreadsheets', value: 'Lives in documents and spreadsheets most of the day.' },
@@ -44,12 +44,12 @@
 
     { dim: 'goals',
       pre: 'and the thing that actually matters right now —',
-      ask: 'if this month ends well — what got finished? name the one thing.',
+      ask: 'what is the one thing you most want to get finished this month?',
       chips: [{ label: 'skip', value: '', skip: true }] },
 
     { dim: 'pain',
       pre: 'now the one that tells me the most about where i can help —',
-      ask: 'what did you catch yourself complaining about this week — not the big stuff, the dumb recurring thing?',
+      ask: 'what small task keeps coming back and wastes your time?',
       chips: [
         { label: 'Repetitive busywork', value: 'Loses time to repetitive busywork they wish were automated.' },
         { label: 'Context-switching', value: 'Loses time to constant context-switching between tools.' },
@@ -59,7 +59,7 @@
 
     { dim: 'ambition',
       pre: 'and the other direction —',
-      ask: 'say i work for you for a year, free and tireless — what exists at the end that doesn’t right now?',
+      ask: 'what have you been meaning to start or build, but never have time for?',
       chips: [
         { label: 'A project on the back burner', value: 'Has a project they keep meaning to start but never find time for.' },
         { label: 'Something to automate', value: 'Keeps meaning to automate a recurring task but never gets to it.' },
@@ -69,7 +69,7 @@
 
     { dim: 'style',
       pre: 'how you want me to carry myself when i work for you —',
-      ask: 'when work lands on your desk — do you want the one-liner or the walkthrough? and should i ask first, or run and report back?',
+      ask: 'do you want short answers or detailed ones? and should i ask before acting, or act and then report back?',
       chips: [
         { label: 'Terse & fast', value: 'Prefers terse, fast, high-signal replies.' },
         { label: 'Thorough', value: 'Prefers thorough, detailed work.' },
@@ -80,7 +80,7 @@
 
     { dim: 'people',
       pre: 'work is always FOR someone —',
-      ask: 'who’s waiting on something from you this week?',
+      ask: 'who do you usually do your work for?',
       chips: [
         { label: 'Just me', value: 'Works solo; the deliverables are for themselves.' },
         { label: 'A team', value: 'Works with a team; deliverables are often shared with teammates.' },
@@ -91,7 +91,7 @@
 
     { dim: 'schedule',
       pre: 'so i can time things right — schedules, night work, when to have things ready —',
-      ask: 'when do you actually work — and when should finished work be waiting for you?',
+      ask: 'what hours do you usually work, and when should finished work be ready for you?',
       chips: [
         { label: 'Early bird', value: 'Works mostly mornings; wants overnight work ready by early morning.' },
         { label: 'Night owl', value: 'Works mostly evenings and nights.' },
@@ -101,7 +101,7 @@
 
     { dim: 'standing_orders',
       pre: 'last one — the lines i hold to no matter what.',
-      ask: 'what’s the rule you catch yourself repeating to anyone who works with you?',
+      ask: 'is there a rule you want every agent here to always follow?',
       chips: [
         { label: 'Cite sources', value: '- Always cite your sources.' },
         { label: 'Ask before risky moves', value: '- Never take an irreversible action without asking first.' },
@@ -140,7 +140,9 @@
   ]);
   function isSkipAnswer(text) {
     const t = String(text == null ? '' : text).trim().toLowerCase().replace(/[.,!?/\-–—'’"]+/g, ' ').replace(/\s+/g, ' ').trim();
-    return t === '' || SKIP_ANSWERS.has(t);
+    // a reply with no letter or digit in ANY script (emoji, symbols, punctuation) says nothing to extract — a
+    // non-answer like a typed skip, never the Commander's 'stated' words (sweep/onboarding 2026-10-20).
+    return t === '' || SKIP_ANSWERS.has(t) || !/[\p{L}\p{N}]/u.test(t);
   }
 
   // turn an answer into a durable dossier belief, or null for a blank/skip (never store an empty belief).

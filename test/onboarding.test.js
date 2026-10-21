@@ -128,7 +128,7 @@ A.ok(/World\.heroCaps\('agent'\)/.test(src) && /capabilities:\s*liveCaps/.test(s
     'the mirror unwraps World.heroCaps {objectType} records before resolving their power labels');
 }
 A.ok(/const mirrorCtx = \{ tuesday: tuesdayT, dig: digT/.test(src), 'the mirror sees motivation and follow-up answers');
-A.ok(/PitchStore\.armFirstMove\(grabbedMove\)/.test(src),
+A.ok(/PitchStore\.armFirstMove\(firstTask \|\| grabbedMove\)/.test(src),   // a grabbed offer arrives phrased as the Commander accepting it (test/onboarding-answer-hygiene.test.js)
   'a grabbed offer arms the post-tour first move (the one below-gate starter allowed)');
 // B8 thin honesty: a loose/empty run synthesizes with thin:true and its purpose lands as a SEED belief.
 A.ok(/thin:\s*!gaveAnything/.test(src), 'a thin run tells the synthesis to own the thinness');

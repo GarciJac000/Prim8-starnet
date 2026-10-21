@@ -182,6 +182,53 @@ module.exports = (async () => {
     A.eq(argsFor2(starts[1].index), '{"path":"y"}', 'second call keeps its own args');
   }
 
+  // A FILE-SIZED name-echoing call is not re-parsed whole on every delta (2026-10-20). The arbitration above used to
+  // JSON.parse the slot's whole accumulated args per delta: quadratic on the sidecar's main thread (64 KB in 16-char
+  // deltas = ~134 M characters parsed). Same calls, same slots — and only a top-level close is ever parsed.
+  {
+    const big = JSON.stringify({ path: 'big.txt', content: 'x,]}{["\\'.repeat(8 * 1024) });   // brackets, quotes and escapes inside the value
+    const small = '{"path":"y.txt","content":"ok"}';
+    const sse = [];
+    for (let i = 0; i < big.length; i += 16) sse.push(line({ choices: [{ delta: { tool_calls: [{ function: { name: 'fs_write', arguments: big.slice(i, i + 16) } }] } }] }));
+    sse.push(line({ choices: [{ delta: { tool_calls: [{ function: { name: 'fs_write', arguments: small } }] } }] }));
+    sse.push(line({ choices: [{ finish_reason: 'tool_calls', delta: {} }] }), 'data: [DONE]', '');
+    const p = makeOpenAICompatibleProvider({ fetch: async () => new Response(sse.join('\n'), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }), baseUrl: 'http://local/v1' });
+    const realParse = JSON.parse;
+    let parsedChars = 0;
+    let evs;
+    JSON.parse = function (s) { if (typeof s === 'string' && s.startsWith('{"path"')) parsedChars += s.length; return realParse.apply(this, arguments); };
+    try { evs = await collect(p, { model: 'm', messages: [], tools: [{ type: 'function', function: { name: 'fs_write' } }] }); }
+    finally { JSON.parse = realParse; }
+    const starts = evs.filter(e => e.type === 'tool_start');
+    A.eq(starts.length, 2, 'file-sized name-echo: one streamed call plus the next complete call, no more, no fewer');
+    const argsFor3 = idx => evs.filter(e => e.type === 'tool_args' && e.index === idx).map(e => e.chunk).join('');
+    A.eq(argsFor3(starts[0].index), big, 'file-sized name-echo: the big call reassembles byte-exact');
+    A.eq(argsFor3(starts[1].index), small, 'file-sized name-echo: the next call keeps its own args');
+    A.ok(parsedChars <= 2 * (big.length + small.length), 'file-sized name-echo: args parsed ' + parsedChars + ' chars for ' + (big.length + small.length) + ' chars of args (was ~2000x)');
+  }
+
+  // makeArgsTracker answers exactly what JSON.parse of the accumulated text answers, at every prefix of every chunking.
+  {
+    const { makeArgsTracker } = require('../sidecar/providers/openai-compatible.js')._internals;
+    const corpus = ['{"path":"a.txt"}', '{"a":[1,2,{"b":"}]\\"{"}]}', ' {"x":"\\\\"}', '\n[1, {"k": []}]\t', '{"a":1,}', '{"a":1}}', '{}{}', '[1,2]',
+      '"str"', '42', 'null', '{"content":"say "hi" {}"}', '{"a":"\\u0041"}', '{"k":"x\ny"}', '{"a":{"b":{"c":[[]]}}}  ', '  ', '{', '}{', '{"a":"\\"}"}', ']['];
+    let seed = 20261020, checks = 0, mismatches = 0;
+    const rnd = n => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    for (const s of corpus) for (let trial = 0; trial < 60; trial++) {
+      const t = makeArgsTracker();
+      let acc = '';
+      for (let i = 0; i < s.length;) {
+        const c = s.slice(i, i + 1 + rnd(4)); i += c.length;
+        t.feed(c); acc += c; checks++;
+        let old = false; if (acc) { try { JSON.parse(acc); old = true; } catch (_) { old = false; } }
+        if (t.complete() !== old) mismatches++;
+      }
+    }
+    A.ok(checks > 1000, 'tracker equivalence: ' + checks + ' prefixes checked');
+    A.eq(mismatches, 0, 'tracker equivalence: complete() === JSON.parse ok at every prefix');
+    A.eq(makeArgsTracker().complete(), false, 'tracker: empty args are never complete');
+  }
+
   // model catalog parsing and no-auth local shape
   {
     const calls = [];

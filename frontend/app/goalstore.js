@@ -37,6 +37,9 @@ const GoalStore = (() => {
   let bound = false;
   let firing = false;           // re-entrancy guard while a decomposition confirm is mid-flight
   let creatingGoal = false;
+  // every stored text cap: UTF-16 units (bounded storage), never ending on half an emoji. Also heals a save written
+  // before this rule — hydrate runs every stored string through it (2026-10-21).
+  const cut = (s, n) => String(s == null ? '' : s).slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
   /* THE STUBBORN-BELIEF SPEND LEAK (fixed 2026-08-04). A reply that parses to fewer than MIN_PATH milestones is
      unusable, and the old code marked NOTHING offered so a later, better reply could still land — which meant a
      belief the model simply cannot decompose re-paid the aux call at EVERY run end, forever. Two failed attempts
@@ -69,10 +72,10 @@ const GoalStore = (() => {
           if (!Number.isFinite(created)) continue;
           const ms = Array.isArray(g.milestones) ? g.milestones.map(m => ({
             id: String((m && m.id) || ''),
-            text: String((m && m.text) || '').slice(0, 140),
+            text: cut((m && m.text) || '', 140),
             status: (m && m.status === 'done') ? 'done' : 'open',
             questRef: (m && m.questRef != null) ? String(m.questRef) : null,
-            evidence: String((m && m.evidence) || '').slice(0, 160),
+            evidence: cut((m && m.evidence) || '', 160),
             source: m && m.source === 'commander' ? 'commander' : 'harness',
             doneAt: (m && Number.isFinite(Number(m.doneAt))) ? Number(m.doneAt) : null,
             journeySyncedAt: (m && m.journeySyncedAt != null && Number.isFinite(Number(m.journeySyncedAt))) ? Number(m.journeySyncedAt) : null
@@ -80,12 +83,12 @@ const GoalStore = (() => {
           if (!ms.length) continue;
           const status = ['done', 'retired', 'paused', 'archived'].includes(g.status) ? g.status : 'active';
           s.goals.push({
-            id: String(g.id), text: String(g.text || '').slice(0, 280),
-            successCondition: String(g.successCondition || '').slice(0, 500),
-            outcomeEvidence: String(g.outcomeEvidence || '').slice(0, 1000),
-            motivation: String(g.motivation || '').slice(0, 500),
-            constraints: String(g.constraints || '').slice(0, 500),
-            journal: (Array.isArray(g.journal) ? g.journal : []).filter(e => e && Number.isFinite(e.at) && e.text).map(e => ({ at: e.at, kind: String(e.kind || 'reflection').slice(0, 30), text: String(e.text).slice(0, 1000) })),
+            id: String(g.id), text: cut(g.text || '', 280),
+            successCondition: cut(g.successCondition || '', 500),
+            outcomeEvidence: cut(g.outcomeEvidence || '', 1000),
+            motivation: cut(g.motivation || '', 500),
+            constraints: cut(g.constraints || '', 500),
+            journal: (Array.isArray(g.journal) ? g.journal : []).filter(e => e && Number.isFinite(e.at) && e.text).map(e => ({ at: e.at, kind: String(e.kind || 'reflection').slice(0, 30), text: cut(e.text, 1000) })),
             focusedAt: Number(g.focusedAt) || 0,
             nextMilestoneId: ms.some(m => m.id === g.nextMilestoneId) ? g.nextMilestoneId : null,
             pendingRegistration: !!g.pendingRegistration,
@@ -96,8 +99,8 @@ const GoalStore = (() => {
         }
       }
       s.ideas = (Array.isArray(raw.ideas) ? raw.ideas : []).filter(i => i && i.id && i.text).slice(0, 100).map(i => ({
-        id: String(i.id), text: String(i.text).slice(0, 280), question: String(i.question || '').slice(0, 500),
-        learning: String(i.learning || '').slice(0, 1000), createdAt: Number(i.createdAt) || 0,
+        id: String(i.id), text: cut(i.text, 280), question: cut(i.question || '', 500),
+        learning: cut(i.learning || '', 1000), createdAt: Number(i.createdAt) || 0,
         goalId: i.goalId ? String(i.goalId) : null, archived: !!i.archived
       }));
       // rebuild the offered set from its FIFO order (capped) — pre-order saves fall back to key iteration once.
@@ -351,7 +354,7 @@ const GoalStore = (() => {
         try {
           const r = await JourneyStore.noteMilestone({
             goalId: g.id, goalText: g.text, milestoneId: m.id, milestoneText: m.text,
-            evidence: m.evidence || ('completed: ' + String(m.text || '')).slice(0, 160),
+            evidence: m.evidence || cut('completed: ' + String(m.text || ''), 160),
             source: m.source || 'harness', agentId: m.source === 'commander' ? null : 'agent',
             goalDone: false
           });
@@ -370,7 +373,7 @@ const GoalStore = (() => {
     if (!g || condition.length < 4) return { ok: false, error: 'describe the observable result that means this goal is achieved' };
     if (typeof JourneyStore === 'undefined' || !JourneyStore.registerGoal) return { ok: false, error: 'journey service unavailable' };
     const r = await JourneyStore.registerGoal({ id: g.id, text: g.text, successCondition: condition });
-    if (r && r.ok) { g.successCondition = condition.slice(0, 500); g.pendingRegistration = false; save(); pushToSidecar(); poke(); }
+    if (r && r.ok) { g.successCondition = cut(condition, 500); g.pendingRegistration = false; save(); pushToSidecar(); poke(); }
     return r;
   }
 
@@ -414,7 +417,7 @@ const GoalStore = (() => {
     creatingGoal = true;
     // Save the user-authored goal and stable id before the network boundary. A lost response cannot
     // strand the path; the success-condition action retries this id, and sync reconciles an accepted write.
-    g.successCondition = condition.slice(0, 500); g.pendingRegistration = true;
+    g.successCondition = cut(condition, 500); g.pendingRegistration = true;
     g.focusedAt = Math.max(stamp, ...state.goals.map(g => (g.focusedAt || g.createdAt || 0) + 1));
     g.motivation = cleanNote(options && options.motivation, 500);
     g.constraints = cleanNote(options && options.constraints, 500);
@@ -430,7 +433,7 @@ const GoalStore = (() => {
     return { ok: false, saved: true, goalId: g.id, error: 'goal saved on this device; save its success condition to retry Journey registration' };
   }
 
-  const cleanNote = (text, limit = 1000) => Goals.scrubSecrets(String(text || '').trim()).slice(0, limit);
+  const cleanNote = (text, limit = 1000) => cut(Goals.scrubSecrets(String(text || '').trim()), limit);
   function record(g, kind, text) {
     (g.journal || (g.journal = [])).push({ at: now(), kind, text: cleanNote(text) });
     g.updatedAt = now(); save(); pushToSidecar(); poke();
@@ -519,7 +522,7 @@ const GoalStore = (() => {
     if (!g || typeof JourneyStore === 'undefined' || !JourneyStore.confirmGoal) return { ok: false, error: 'active goal unavailable' };
     const r = await JourneyStore.confirmGoal({ id: g.id, evidence: String(evidence || '').trim() });
     if (r && r.ok) {
-      g.status = 'done'; g.outcomeEvidence = String(evidence || '').trim().slice(0, 1000); g.updatedAt = now();
+      g.status = 'done'; g.outcomeEvidence = cut(String(evidence || '').trim(), 1000); g.updatedAt = now();
       save(); pushToSidecar(); poke(); celebrateGoalDone();
     }
     return r;
@@ -543,7 +546,7 @@ const GoalStore = (() => {
 
   function addStep(goalId, text) {
     const g = ready() && state.goals.find(g => g.id === goalId && g.status === 'active');
-    const clean = typeof Goals !== 'undefined' ? Goals.scrubSecrets(String(text || '').trim()).slice(0, 140) : '';
+    const clean = typeof Goals !== 'undefined' ? cut(Goals.scrubSecrets(String(text || '').trim()), 140) : '';
     if (!g || Goals.lowValue(clean) || g.milestones.length >= 100) return false;
     if (g.milestones.some(m => m.text.toLowerCase() === clean.toLowerCase() && m.status === 'open')) return false;
     g.milestones.push({ id: g.id + ':m' + (g.milestones.length + 1), text: clean, status: 'open', questRef: null,
@@ -593,8 +596,8 @@ const GoalStore = (() => {
   // the evidence line folded onto a completed milestone: prefer a real run summary, else name the milestone.
   function clipEvidence(runSummary, milestoneText) {
     const s = String(runSummary == null ? '' : runSummary).trim();
-    if (s) return ('done via: ' + s).slice(0, 160);
-    return ('completed: ' + String(milestoneText || '')).slice(0, 160);
+    if (s) return cut('done via: ' + s, 160);
+    return cut('completed: ' + String(milestoneText || ''), 160);
   }
   // FEEDBACK LOOP (§5): a milestone completing is a goal-progress note the Tier 1 Study engine can weight. Additive
   // + fail-open — a missing hook is a silent no-op; it never blocks the fold. Uses StudyStore's optional salience

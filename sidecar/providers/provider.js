@@ -35,6 +35,7 @@
   else { root.SK = root.SK || {}; (root.SK.providers = root.SK.providers || {}).provider = api; }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
+  const { note: failNote } = (typeof require === 'function') ? require('../failopen.js') : { note: function (tag, e) { console.warn('[failopen] ' + tag + ':', (e && e.message) || e); } };
 
   const EVENT_TYPES = ['text', 'tool_start', 'tool_args', 'tool_done', 'reasoning', 'usage', 'done'];
   const FINISH = ['tool_calls', 'stop', 'length', 'content_filter', 'error'];
@@ -270,8 +271,73 @@
     return { read, cancel, get _cancelledByTimeout() { return cancelled; } };
   }
 
+  // ---- shared error-body reader (2026-10-20, lifted from openai-compatible.js) ----
+  // A provider's error text goes into an Error message and diagnostics: bearer tokens and sk-/api- keys are redacted,
+  // control characters and runs of whitespace collapse, and the result is clamped.
+  function safeErrorField(value, limit) {
+    if (value == null || (typeof value === 'object' && typeof value !== 'number')) return '';
+    return String(value)
+      .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+      .replace(/\b(?:sk|api)[-_][A-Za-z0-9_-]{8,}\b/gi, '[redacted]')
+      .replace(/[\r\n\t\0-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, ' ')
+      .replace(/\s+/g, ' ').trim().slice(0, limit || 300);
+  }
+  // An error body is read only this far, so a proxy's endless HTML page is cut off.
+  const MAX_ERR_BODY = 64 * 1024;
+  /* readErrorBody(res, { signal, url, tag }) -> { parsed, data, text, stalled }
+     Reads a non-ok response's body ONCE, as text, and parses JSON from that text. The adapters used to call res.json()
+     and, when that failed, res.text(): on a real Response the body was already consumed, so text() always threw and
+     an HTML 502 from a proxy read only "Bad Gateway". The headers also disarmed the connect guard, which unhooks the
+     caller's signal, so a stalled error body ignored Stop until undici's own 300 s body timeout. Here the body goes
+     through the same idle watchdog and caller signal as a successful stream: Stop rethrows as an AbortError (the
+     adapter's stream catch ends the run as cancelled), and an idle stall keeps the status with `stalled` set and the
+     text that did arrive. `tag` names the cleanup failures (tag + '.error_reader_cancel' / '.error_reader_release').
+     Without a stream reader (test doubles) it falls back to res.text(), then res.json(). */
+  async function readErrorBody(res, opts) {
+    opts = opts || {};
+    const signal = opts.signal || null;
+    const tag = String(opts.tag || 'providers.provider');
+    let data = null, parsed = false, text = '', readStream = false, stalled = false;
+    try {
+      if (res && res.body && typeof res.body.getReader === 'function') {
+        readStream = true;
+        const raw = res.body.getReader();
+        const reader = idleGuardedReader(raw, { signal, url: opts.url });
+        const decoder = new TextDecoder();
+        let bytes = 0;
+        try {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            text += decoder.decode(chunk.value, { stream: true });
+            bytes += (chunk.value && chunk.value.byteLength) || 0;
+            if (bytes >= MAX_ERR_BODY) {
+              try { await reader.cancel(); } catch (e) { failNote(tag + '.error_reader_cancel', 'error response reader cancel failed'); }
+              break;
+            }
+          }
+          text += decoder.decode();
+        } finally { try { raw.releaseLock(); } catch (_) { failNote(tag + '.error_reader_release', 'error response reader release failed'); } }
+      } else text = (res && typeof res.text === 'function') ? await res.text() : '';
+      if (text) { try { data = JSON.parse(text); parsed = true; } catch (_) { data = null; } }
+    } catch (e) {
+      if (isAbort(e, signal)) throw e;
+      // The status line already arrived: a body that stalls is still that status (a 401 keeps its reconnect door),
+      // never a "no bytes received" stall. Keep what text did arrive.
+      if (e && e.code === 'PROVIDER_STREAM_TIMEOUT') stalled = true; else text = '';
+      data = null; parsed = false;
+    }
+    if (!readStream && !parsed && !text && res && typeof res.json === 'function') {
+      try { data = await res.json(); parsed = true; } catch (e) {
+        if (isAbort(e, signal)) throw e;
+        data = null;
+      }
+    }
+    return { parsed, data, text, stalled };
+  }
+
   const timeouts = { envInt, connectMs, idleMs, connectSignal, connectGuard, idleGuardedReader, timeoutError, makeAbortError };
-  const runtime = { isAbort, abortableDelay, markPreStreamRetriesExhausted, preStreamRetries, stampRequestHost, requestHostOf };
+  const runtime = { isAbort, abortableDelay, markPreStreamRetriesExhausted, preStreamRetries, stampRequestHost, requestHostOf, readErrorBody, safeErrorField, MAX_ERR_BODY };
 
   function recoveredToolContent(callId, content) {
     let body;

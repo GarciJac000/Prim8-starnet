@@ -363,6 +363,10 @@ async function queuedAcknowledgement() {
   await vm.runInContext('CloudSave.flush({ force: true })', page3.c);
   limit3.limit = Array.from(ls3._map).reduce((n, [k, v]) => n + k.length + v.length, 0) + 4000;
   ws3.slice = { workstreams: [{ id: 'general', history: [{ role: 'user', content: 'x'.repeat(20000) }] }], activeId: 'general', generalId: 'general' };
+  // the frozen stamp must be NEWER than the confirmed amber save: in the same millisecond the store's anti-clobber +1
+  // bump (savestore compareRevision) writes verdant at stamp+1 and the precondition below flaked (~1 run in 8)
+  const amberAt = store3.load('agent').updatedAt;
+  while (Date.now() <= amberAt) { /* wait out the amber save's millisecond */ }
   const stamp = vm.runInContext('Date.now = (t => () => t)(Date.now()); Date.now()', page3.c);   // both saves below carry ONE stamp
   station3.setFloor(room3, 'verdant'); await tick();                      // the cache write fails
   let release3;

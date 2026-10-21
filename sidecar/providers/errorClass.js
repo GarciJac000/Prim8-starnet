@@ -262,8 +262,9 @@
      created team doesn't have any credits yet. You can purchase credits on https://console.x.ai/…") or
      "…has either used all available credits or reached its monthly spending limit". The plain status read called
      that `auth`, and the user was told no model was connected. */
-  const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low/;
+  const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low|key limit exceeded/;
 
+  const REGION_REFUSAL_RE = /unsupported_country_region_territory|country,? region,? or territory not supported|not available in your (?:country|region)/;
   const TOOL_GEN_FAILED_RE = /tool_use_failed|failed to call a function|tool call validation failed/;
   function classify400(low, code, ctx) {
     const c = String(code || '').toLowerCase();
@@ -307,7 +308,11 @@
      quota metric", and that must stay rate_limit — hence the short-window veto. */
   const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)/;
   const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|\brpm\b|\btpm\b|requests per/;
-  function isQuotaExhausted(low) { return QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low); }
+  /* OpenRouter's FREE-MODEL DAILY CAP ("Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free
+     model requests per day") resets the next UTC day. Its own text says "requests per day", which the short-window veto
+     above reads as a per-minute limit — so it is named outright, ahead of the veto (sweep/providers 2026-10-20). */
+  const DAILY_FREE_CAP_RE = /free-models-per-day/;
+  function isQuotaExhausted(low) { return DAILY_FREE_CAP_RE.test(low) || (QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low)); }
 
   function pickReason(status, code, low, err, ctx) {
     // 0. errors that never reached an API: a certificate the machine rejects, or a crash in our own code. First,
@@ -332,6 +337,9 @@
     if ((!status || status === 400 || status === 422) && parseOutputCap(low) > 0) return 'output_cap';
     // 2. HTTP status
     if (status) {
+      // a 403 the UPSTREAM gave for this region (OpenAI behind OpenRouter: unsupported_country_region_territory) is the
+      // model being unavailable here — the key is fine, and another model/provider may answer (shouldFallback)
+      if (status === 403 && REGION_REFUSAL_RE.test(low)) return 'model_not_found';
       if (status === 401 || status === 403) return NO_CREDIT_RE.test(low) ? 'billing' : 'auth';
       if (status === 402) return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
       if (status === 404) return 'model_not_found';

@@ -45,6 +45,8 @@ function world(opts) {
     concurrencyFree: () => opts.agentBusy !== true,
     agentExists: opts.agentExists,
     precheck: opts.precheck,
+    hasCredential: opts.hasCredential,
+    declineRepeatMs: opts.declineRepeatMs,
     defaultModel: 'test-model',
     persona: 'STATION PERSONA',
     harvest: opts.harvest,
@@ -71,7 +73,8 @@ function world(opts) {
     // resolve the oldest in-flight run, then let the settle microtasks drain
     finish: (res) => { const p = pending.shift(); p.resolve(Object.assign({ reason: 'done' }, res)); return new Promise(r => setImmediate(r)); },
     fail: (err) => { const p = pending.shift(); p.reject(err); return new Promise(r => setImmediate(r)); },
-    seed: (spec) => { loops = S.createLoop(loops, Object.assign({ id: 'l1', objective: 'find bugs' }, spec), { now: T0 }); }
+    seed: (spec) => { loops = S.createLoop(loops, Object.assign({ id: 'l1', objective: 'find bugs' }, spec), { now: T0 }); },
+    replace: (next) => { loops = next; }
   };
 }
 
@@ -605,6 +608,117 @@ function world(opts) {
     await w.flush();
     A.eq(w.loop().iterations[1].outcome, 'candidate', seam + ': replacement completes instead of stranding RUNNING');
     A.eq(w.drv.leases.size, 0, seam + ': replacement releases its own lease');
+  }
+
+  /* ---- 19. STAND-DOWNS ARE EDGE-TRIGGERED (2026-10-19, idle-CPU piece 2) -----------------------------------
+     The 20s tick used to ledger a 'skip' on EVERY tick a loop sat budget-capped / busy / precheck-blocked: 4,320
+     fsync'd rows a day per stuck loop, evicting the night shift's trail from the ledger's 3,000-row RAM ring in
+     under 17 h. Modelled on nightshift-decline-edge.test.js: a row lands only when the reason CHANGES or once an
+     hour while it holds, and the first row of a run is byte-identical to the old per-tick row. */
+  const TICK = 20000;
+  const skips = (w) => w.ledger.filter(e => e.kind === 'skip');
+  {
+    // (i) budget cap held for an hour of 20s ticks → the first row + the hourly repeat, not 181
+    const l = S.createLoop([], { id: 'l1', objective: 'find bugs', perDayUsd: 1 }, { now: T0 })[0];
+    const capped = [Object.assign({}, l, { budget: Object.assign({}, l.budget, { spentTodayUsd: 1, day: Math.floor(T0 / 86400000) }) })];
+    const w2 = world({ loops: capped });
+    for (let i = 0; i <= 180; i++) A.eq(w2.tick(T0 + i * TICK).fired, 0, i === 0 ? 'a budget-capped loop never fires' : undefined);
+    const rows = skips(w2);
+    A.eq(rows.length, 2, '181 budget-bound ticks (one hour) write TWO rows, not 181 — the first and the hourly repeat');
+    A.eq(rows[0], { source: 'loop', kind: 'skip', jobId: 'l1', agentId: 'agent', reason: 'budget', binding: 'budget', detail: { note: 'daily cap $1 reached' } },
+      'the first row of a run is byte-identical to the old per-tick row (no new keys)');
+    A.eq(rows[1].detail.heldTicks, 179, 'the hourly repeat carries how many identical ticks were folded since the first row');
+    A.eq(rows[1].detail.heldBinding, 'budget', '…and which reason held');
+    A.eq(rows[1].detail.note, 'daily cap $1 reached', 'the repeat keeps the reason note');
+    A.eq(LJ.decide(w2.loop(), {}, { now: T0 + 180 * TICK }).binding, 'budget', 'the LIVE gate still names budget (what GET /api/loops reads)');
+  }
+  {
+    // (ii) a CHANGED precheck reason lands on that very tick, carrying the previous run's tally
+    let reason = 'no credential for openrouter';
+    const w = world({ precheck: () => ({ ok: false, reason: reason }) });
+    w.seed({});
+    for (let i = 0; i < 6; i++) w.tick(T0 + i * TICK);
+    A.eq(skips(w).length, 1, 'six identical precheck stand-downs → one row');
+    reason = 'the project folder is gone';
+    w.tick(T0 + 6 * TICK);
+    const rows = skips(w);
+    A.eq(rows.length, 2, 'a changed precheck reason is an edge: it logs immediately');
+    A.eq(rows[1].detail.note, 'the project folder is gone', 'naming the new reason');
+    A.eq(rows[1].detail.heldTicks, 5, 'and folding the previous reason\'s held ticks into it');
+    A.eq(rows[1].detail.heldBinding, 'precheck', '…with the previous binding');
+    w.tick(T0 + 7 * TICK);
+    A.eq(skips(w).length, 2, 'the new reason is folded in turn');
+  }
+  {
+    // (iii) a FIRE ends the run: the fire row carries the tally, and the next stand-down is a fresh edge
+    const opts = { agentBusy: true };
+    const w = world(opts);
+    w.seed({ queueCap: 5 });
+    for (let i = 0; i < 5; i++) w.tick(T0 + i * TICK);
+    A.eq(skips(w).length, 1, 'five busy ticks → one skip row');
+    opts.agentBusy = false;
+    A.eq(w.tick(T0 + 5 * TICK).fired, 1, 'the agent frees up and the loop fires');
+    const fire = w.ledger.find(e => e.kind === 'fire');
+    A.eq(fire.detail, { iteration: 1, heldTicks: 4, heldBinding: 'concurrency' }, 'the fire row carries the folded busy ticks');
+    await w.finish({ text: 'did one thing' });
+    opts.agentBusy = true;
+    w.tick(T0 + 6 * TICK);
+    A.eq(skips(w).length, 2, 'after a fire the first busy tick is a fresh edge and logs');
+    A.eq(skips(w)[1].detail, { note: 'agent busy' }, 'with no stale tally (the fire already reported it)');
+    opts.agentBusy = false;
+    w.tick(T0 + 7 * TICK);
+    const fires = w.ledger.filter(e => e.kind === 'fire');
+    A.eq(fires[1].detail, { iteration: 2 }, 'a fire with nothing folded keeps the exact old detail shape');
+  }
+  {
+    // (iv) at-capacity: the held loop's per-tick defer is folded too
+    let loops = S.createLoop([], { id: 'l1', objective: 'a' }, { now: T0 });
+    loops = S.createLoop(loops, { id: 'l2', objective: 'b' }, { now: T0 });
+    const w = world({ loops: loops, maxParallel: 1 });
+    for (let i = 0; i < 10; i++) w.tick(T0 + i * TICK);
+    const defers = w.ledger.filter(e => e.kind === 'defer' && e.reason === 'at-capacity');
+    A.eq(defers.length, 1, 'ten at-capacity ticks → ONE defer row');
+    A.eq(defers[0], { source: 'loop', kind: 'defer', jobId: 'l2', agentId: 'agent', reason: 'at-capacity', binding: 'concurrency-cap' },
+      'byte-identical to the old at-capacity row');
+  }
+  {
+    // (v) the no-credential skip inside fireLoop is folded the same way
+    const w = world({ hasCredential: () => false });
+    w.seed({});
+    for (let i = 0; i < 10; i++) A.eq(w.tick(T0 + i * TICK).fired, 0, i === 0 ? 'no credential → nothing fires' : undefined);
+    const rows = skips(w);
+    A.eq(rows.length, 1, 'ten no-credential ticks → ONE skip row');
+    A.eq(rows[0], { source: 'loop', kind: 'skip', jobId: 'l1', agentId: 'agent', reason: 'no-credential', binding: 'precheck' }, 'byte-identical to the old row');
+  }
+  {
+    // (vi) a persist-failure defer is NEVER folded, and it breaks the run so the trail never ends on it
+    let failing = false;
+    const opts = { agentBusy: true, persistFails: () => failing };
+    const w = world(opts);
+    w.seed({});
+    w.tick(T0); w.tick(T0 + TICK);
+    opts.agentBusy = false; failing = true;
+    w.tick(T0 + 2 * TICK); w.tick(T0 + 3 * TICK);
+    A.eq(w.ledger.filter(e => e.reason === 'claim-persist-failed').length, 2, 'every failed claim persist is ledgered — a failing disk is never folded');
+    opts.agentBusy = true; failing = false;
+    w.tick(T0 + 4 * TICK);
+    const rows = skips(w);
+    A.eq(rows.length, 2, 'the busy stand-down after a persist failure is a fresh row, not folded into the old run');
+    A.eq(rows[1].detail, { note: 'agent busy', heldTicks: 1, heldBinding: 'concurrency' }, 'carrying the tally folded before the failure');
+  }
+  {
+    // (vii) the hourly repeat is injectable, and the RAM memory is pruned when a loop is deleted
+    const w = world({ agentBusy: true, declineRepeatMs: 10 * MIN });
+    w.seed({});
+    for (let i = 0; i < 90; i++) w.tick(T0 + i * TICK);      // 30 min
+    A.eq(skips(w).length, 3, 'declineRepeatMs 10 min → a row at 0, 10 and 20 min over 30 min');
+    A.eq(w.drv._internals.standDownRuns(), 1, 'one live run is remembered');
+    const w2 = world({ agentBusy: true });
+    w2.seed({}); w2.tick(T0);
+    A.eq(w2.drv._internals.standDownRuns(), 1, 'the stuck loop has a run in memory');
+    w2.replace(S.removeLoop(w2.loops, 'l1'));
+    w2.tick(T0 + TICK);
+    A.eq(w2.drv._internals.standDownRuns(), 0, 'a deleted loop\'s run is pruned — the memory stays bounded');
   }
 
   A.report('loopjob-driver (LOOP tick driver)');

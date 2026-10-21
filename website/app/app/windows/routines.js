@@ -672,7 +672,8 @@
     function historyLine(r) {
       const ok = r.reason === 'done';
       const usd = Number(r.usd) || 0;
-      const cost = r.unmetered ? 'subscription' : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '$' + usd.toFixed(4) : '$0';
+      // an interrupted run's spend was never reconciled (runstore spendUnknown) — never print that as $0
+      const cost = r.spendUnknown ? 'spend unknown' : r.unmetered ? 'subscription' : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '$' + usd.toFixed(4) : '$0';
       const secs = Math.round((Number(r.durationMs) || 0) / 1000);
       const took = secs >= 60 ? Math.floor(secs / 60) + 'm ' + (secs % 60) + 's' : secs + 's';
       const tools = Number(r.toolsOk) || 0, files = Number(r.artifacts) || 0;

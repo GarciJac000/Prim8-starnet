@@ -40,7 +40,8 @@ const Overseer = (() => {
       const deliveries = JSON.stringify([(data.workers || []).map(w => [w.runId, w.status]),
         (data.reviews || []).map(r => [r.reviewRunId, r.status])]);
       if ((adopted || deliveries !== lastDeliveries) && typeof StationCommands !== 'undefined') {
-        await StationCommands.reconcile(); lastDeliveries = deliveries;
+        // -1: the run list was never read (failed or timed out), so these deliveries are not reconciled — retry next beat
+        if ((await StationCommands.reconcile()) !== -1) lastDeliveries = deliveries;
       }
     } catch (error) {
       // Existing connection UI owns outages. Retry reconciliation after recovery.
@@ -50,7 +51,13 @@ const Overseer = (() => {
       console.debug('[overseer sync]', error.message);
     } finally { clearTimeout(timeout); busy = false; }
   }
-  if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => { refresh(); setInterval(refresh, BEAT); });
+  // the beat runs through PollGate (idle CPU piece 3, 2026-10-20): the same 2.5 s while the station can be seen, a 30 s
+  // floor while the Commander is away, and a catch-up read the moment they are back. Only the scheduling moved: what
+  // fresh() and unreachable() say is unchanged, so an ask out after a long away reads as it always did until it answers
+  if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
+    if (typeof PollGate !== 'undefined' && PollGate.every) PollGate.every(refresh, { ms: BEAT });
+    else { refresh(); setInterval(refresh, BEAT); }
+  });
   return { refresh, snapshot: () => last, fresh, unreachable };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = Overseer;

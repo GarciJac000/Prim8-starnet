@@ -939,16 +939,19 @@ const Widgets = (() => {
     // Immediate kick + steady cadence. Each poller no-ops until the game is entered (see gameEntered), so on
     // the title screen these are cheap early-returns; the first REAL fetch happens on the catch-up below the
     // moment entry is detected (≤4s), not after a full 30s interval.
-    pollInsights(); setInterval(pollInsights, POLL_INSIGHTS_MS);
+    // through PollGate (idle CPU piece 3, 2026-10-20): the same cadences while the rail can be seen, a 30 s floor while the
+    // Commander is away, a catch-up on return; setInterval when PollGate is absent (node tests)
+    const every = (fn, ms) => (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(fn, { ms, immediate: false }) : setInterval(fn, ms);
+    pollInsights(); every(pollInsights, POLL_INSIGHTS_MS);
     startCron();
-    pollFeed(); setInterval(pollFeed, POLL_FEED_MS);
-    setInterval(tickTicker, TICKER_MS);
+    pollFeed(); every(pollFeed, POLL_FEED_MS);
+    every(tickTicker, TICKER_MS);
     // E3: repaint on a short cadence so an SSE bridge drop surfaces the stale cue promptly (the QUEUE
     // widget is event-driven, so nothing else would repaint it) instead of waiting for the next poll.
     // Also the ENTRY WATCHER: on the not-entered→entered edge, fire a one-shot catch-up of the gated pollers
     // so the rail fills within ≤4s of the player entering (reusing this existing timer — no new interval).
     let lastEntered = gameEntered();
-    setInterval(() => {
+    every(() => {
       try {
         const now = gameEntered();
         if (now && !lastEntered) { pollInsights(); startCron(); pollFeed(); }

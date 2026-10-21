@@ -41,10 +41,23 @@
      same line (kept when the marker is stripped), 2 the question, 3 the options. Prose that merely says "FORK:" has no
      `||` after it and never matches. No lookbehind: older macOS WebKit cannot parse one. */
   const DECO = '[*_`~]*';
+  /* ONE WAY TO READ EACH CHARACTER (perf p5, 2026-10-20: "eats my PC's resources"). The grammar used to be written as a lazy
+     prefix followed by three quantifiers that all eat spaces (`[ \t>+-]*` `[ \t]*` `[*_`~]*` `[ \t]*`), so a line with a long
+     run of spaces — an ASCII box, a padded table — was tried every way the run can be split, at every position: a 20-line box
+     with 58-space interiors cost ~200 ms per live frame and one 400-space line ~8 s. Same language, same captures, written so
+     each character has one reading:
+       - the prose before the marker (group 1) is empty or ends on a character the lead-in can't take (a minimal prefix always
+         does: one that ended on a space could give that space to the lead-in and be shorter);
+       - the lead-in is list marks, then an optional list number with its spaces, then optional decoration with its spaces;
+       - after the colon the decoration and spaces are taken whole (the question never starts inside them);
+       - the question (2) and the options (3) are empty or end on a non-space, the spaces before `||` and the line end go to
+         the spaces rule. test/fork-marker-perf.test.js checks this grammar against the old one on random text. */
+  const LEAD = '[ \\t>+-]*(?:\\d{1,2}[.)][ \\t]*)?(?:[*_`~]+[ \\t]*)?';
+  const PRE = '((?:[^\\n]*?[^\\n \\t>+-])??)';
   // a list number before the marker ("1. TASK_QUESTION: …") is decoration too — it must never stay behind as a dangling "1."
   function markerSource(key) {
-    return '^([^\\n]*?)[ \\t>+-]*(?:\\d{1,2}[.)])?[ \\t]*' + DECO + '[ \\t]*' + key + DECO + '[ \\t]*:' + DECO + '[ \\t]*([^\\n]*?)[ \\t]*' + DECO
-      + '[ \\t]*\\|\\|[ \\t]*([^\\n]*?)[ \\t]*$';
+    return '^' + PRE + LEAD + key + DECO + '[ \\t]*:' + DECO + '(?:[ \\t]+(?![ \\t])|(?![*_`~ \\t]))((?:[^\\n]*?[^\\n \\t])??)[ \\t]*(?:[*_`~]+[ \\t]*)?'
+      + '\\|\\|[ \\t]*((?:[^\\n]*?[^\\n \\t])??)[ \\t]*$';
   }
   /* ONE CASE RULE (rc review 2026-10-14). The keyword carries its own case, so every regex built from it — here, in the loop's
      "this reply waits on the Commander" check (sidecar/loop.js) and the phone push — agrees on what a marker is. FORK in
@@ -52,16 +65,29 @@
      in any case: the word is unmistakable. No regex built from these takes the `i` flag. */
   const FORK_KEY = '\\bF(?:ORK|ork)', TASK_KEY = '[Tt][Aa][Ss][Kk]_[Qq][Uu][Ee][Ss][Tt][Ii][Oo][Nn]';
   const MARKER_KEY = '(?:' + FORK_KEY + '|' + TASK_KEY + ')';
+  // every marker holds its keyword: text without one never runs a line grammar at all (a plain reply costs one scan)
+  const FORK_RE = new RegExp(FORK_KEY), TASK_RE = new RegExp(TASK_KEY), MARKER_RE = new RegExp(MARKER_KEY);
   const LINE = new RegExp(markerSource(FORK_KEY), 'm');
-  const undeco = s => String(s == null ? '' : s).replace(/^[\s*_`~]+|[\s*_`~]+$/g, '');
-  // remove every marker matched by `re` (global): the prose before a marker on its line stays; a line that was only the
-  // marker (plus decoration) goes. Byte-identical when nothing matched.
-  function stripWith(re, text) {
+  /* Trailing trims in one backward pass. `.replace(/[ \t]+$/, '')` retries from every space run INSIDE the text, not just the
+     last one — quadratic on a long padded line, and the half-typed-keyword trim runs over the whole live reply. Same result. */
+  function trimEnd(s, chars) { let e = s.length; while (e > 0 && chars.indexOf(s[e - 1]) >= 0) e--; return e === s.length ? s : s.slice(0, e); }
+  const DECO_CHAR = /[\s*_`~]/;
+  const undeco = v => {   // what .replace(/^[\s*_`~]+|[\s*_`~]+$/g, '') did, without retrying every inner run
+    const s = String(v == null ? '' : v);
+    let a = 0, e = s.length;
+    while (a < e && DECO_CHAR.test(s[a])) a++;
+    while (e > a && DECO_CHAR.test(s[e - 1])) e--;
+    return s.slice(a, e);
+  };
+  // remove every marker matched by `re` (global; `key` is its keyword): the prose before a marker on its line stays; a line
+  // that was only the marker (plus decoration) goes. Byte-identical when nothing matched.
+  function stripWith(re, key, text) {
     const s = String(text == null ? '' : text);
+    if (!key.test(s)) return s;
     re.lastIndex = 0;
     if (!re.test(s)) return s;
     re.lastIndex = 0;
-    return s.replace(re, (m, pre) => String(pre || '').replace(/[ \t]+$/, '')).replace(/\n{3,}/g, '\n\n').trim();
+    return s.replace(re, (m, pre) => trimEnd(String(pre || ''), ' \t')).replace(/\n{3,}/g, '\n\n').trim();
   }
 
   // is the fork instruction earned right now? `read` is the understanding read (UnderstandingStore.read()).
@@ -97,7 +123,8 @@
   // find the fork in an agent reply. Returns { question, options: [2..3] } or null (no marker / malformed /
   // too few options — a broken marker renders as plain text, never a broken chip row).
   function parse(text) {
-    const m = LINE.exec(String(text == null ? '' : text));
+    const s = String(text == null ? '' : text);
+    const m = FORK_RE.test(s) ? LINE.exec(s) : null;
     if (!m) return null;
     const question = undeco(m[2]).slice(0, Q_CHARS);
     const options = m[3].split('|').map(undeco).filter(Boolean).slice(0, MAX_OPTS)
@@ -109,21 +136,21 @@
   // strip the marker line from the rendered reply (the chips replace it; the raw FORK: line never shows).
   // EVERY marker line, not the first: a model that asks twice left the second one printed raw (first-hour walk).
   const LINE_ALL = new RegExp(LINE.source, 'gm');
-  function strip(text) { return stripWith(LINE_ALL, text).trim(); }
+  function strip(text) { return stripWith(LINE_ALL, FORK_RE, text).trim(); }
   /* Both choice markers — FORK: and TASK_QUESTION: — are machine lines for the chip row, never prose. The chat
      rendered them raw in three places (first-hour walk 2026-09-28): every FORK line live (nothing called strip),
      a second TASK_QUESTION line, and all of them again whenever history re-rendered from the server transcript.
      One remover for display, used by the live reply, the saved history row and the history render. */
   function stripMarkers(text) {
     const s = String(text == null ? '' : text);
-    const out = stripWith(TASK_LINE_ALL, stripWith(LINE_ALL, s));
+    const out = stripWith(TASK_LINE_ALL, TASK_RE, stripWith(LINE_ALL, FORK_RE, s));
     return out === s ? s : out;   // no marker: byte-identical (prose that merely says "FORK:" included)
   }
   /* THE LIVE REPLY NEVER SHOWS A MARKER BEING TYPED (rc walk 2026-10-14). The chat renders a reply while it streams, so a
      marker sat on screen raw until its run ended — and forever, in a paragraph a tool call had already closed. The live
      text drops every complete marker AND the marker still arriving on the last line (its keyword and colon are in, its
      `||` is not yet — or the keyword itself is half-typed). If it never becomes a marker it shows when its line completes. */
-  const OPEN_TAIL = new RegExp('(^|\\n)([^\\n]*?)[ \\t>+-]*(?:\\d{1,2}[.)])?[ \\t]*' + DECO + '[ \\t]*' + MARKER_KEY + DECO + '[ \\t]*:[^\\n]*$');
+  const OPEN_TAIL = new RegExp('(^|\\n)' + PRE + LEAD + MARKER_KEY + DECO + '[ \\t]*:[^\\n]*$');
   // a keyword still being typed: capitals ("TASK_QU", "FOR"), "Fork", or any case once it carries the underscore ("task_qu") —
   // never a plain lowercase or title-case word ("for", "For", "task"), which would hold back ordinary prose
   function halfKeyword(w) {
@@ -133,10 +160,13 @@
   }
   function liveText(text) {
     let s = stripMarkers(text);
-    const open = OPEN_TAIL.exec(s);
-    if (open) return s.slice(0, open.index) + open[1] + open[2].replace(/[ \t]+$/, '');
+    // OPEN_TAIL runs to the end of the text, so it can only sit on the LAST line: read that line alone (the whole reply was
+    // scanned on every frame), and only when it holds a keyword
+    const nl = s.lastIndexOf('\n'), last = nl < 0 ? s : s.slice(nl);
+    const open = MARKER_RE.test(last) ? OPEN_TAIL.exec(last) : null;
+    if (open) { const at = Math.max(0, nl) + open.index; return s.slice(0, at) + open[1] + trimEnd(open[2], ' \t'); }
     const half = /(^|[\s*_`~:>-])([A-Za-z_]{3,13})$/.exec(s);
-    if (half && halfKeyword(half[2])) s = s.slice(0, half.index + half[1].length).replace(/[ \t*_`~]+$/, '');
+    if (half && halfKeyword(half[2])) s = trimEnd(s.slice(0, half.index + half[1].length), ' \t*_`~');
     return s;
   }
   /* A marker nothing turned into a card (a group reply, a channel) still never shows machine syntax: the question reads
@@ -144,11 +174,12 @@
   const ANY_LINE_ALL = new RegExp(markerSource(MARKER_KEY), 'gm');
   function readable(text) {
     const s = String(text == null ? '' : text);
+    if (!MARKER_RE.test(s)) return s;
     ANY_LINE_ALL.lastIndex = 0;
     if (!ANY_LINE_ALL.test(s)) return s;
     ANY_LINE_ALL.lastIndex = 0;
     return s.replace(ANY_LINE_ALL, (m, pre, q, opts) => {
-      const head = String(pre || '').replace(/[ \t]+$/, '');
+      const head = trimEnd(String(pre || ''), ' \t');
       const list = String(opts || '').split('|').map(undeco).filter(Boolean).map(o => '- ' + o).join('\n');
       return (head ? head + '\n' : '') + undeco(q) + (list ? '\n' + list : '');
     });
@@ -214,7 +245,8 @@
     return seen;
   }
   function taskParse(text) {
-    const m = TASK_LINE.exec(String(text == null ? '' : text));
+    const src = String(text == null ? '' : text);
+    const m = TASK_RE.test(src) ? TASK_LINE.exec(src) : null;
     if (!m) return null;
     const question = taskClean(undeco(m[2]), TASK_Q_CHARS);
     const raw = m[3].split('|').map(undeco).join('|');
@@ -231,7 +263,7 @@
     return question && options.length >= 2 ? { question, options } : null;
   }
   const TASK_LINE_ALL = new RegExp(TASK_LINE.source, 'gm');
-  function taskStrip(text) { return stripWith(TASK_LINE_ALL, text).trim(); }
+  function taskStrip(text) { return stripWith(TASK_LINE_ALL, TASK_RE, text).trim(); }
   function taskDirective(contextBlock) {
     const lines = [
       'TASK CONTEXT — LISTEN BEFORE YOU BUILD:',

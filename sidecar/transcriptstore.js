@@ -191,6 +191,10 @@
 
     // in-memory mirror loaded once; append keeps RAM + disk in lockstep so history() is O(n) over RAM.
     let rows = [];
+    // Streams whose RAM rows can differ from their durable rows: RAM dropped some of them (trimmed), or an append to
+    // them failed in this process (a fail-open write keeps its row in RAM only; a failed rollback can leave one on
+    // disk only). history() answers those from disk, as it always did.
+    const ramGaps = new Set();
     try {
       const raw = typeof io.readRecent === 'function' ? io.readRecent({ perStream: ramPerStream, globalLimit: ramMax }) : io.readAll();
       if (Array.isArray(raw)) rows = raw.filter(r => r && typeof r === 'object');
@@ -201,7 +205,8 @@
     trimGlobalRam();
 
     function trimGlobalRam() {
-      if (rows.length > ramMax) rows.splice(0, rows.length - ramMax);
+      if (rows.length <= ramMax) return;
+      for (const r of rows.splice(0, rows.length - ramMax)) ramGaps.add(r.streamId);
     }
 
     // drop the OLDEST rows of `streamId` when that stream exceeds ramPerStream. Splices only that stream's rows,
@@ -214,6 +219,7 @@
         for (let i = 0; i < rows.length; i++) if (rows[i].streamId === sid) idxs.push(i);
         const over = idxs.length - ramPerStream;
         if (over <= 0) continue;
+        ramGaps.add(sid);
         const drop = new Set(idxs.slice(0, over));   // the oldest `over` rows of this stream
         rows = rows.filter((_, i) => !drop.has(i));
       }
@@ -260,7 +266,8 @@
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (!all && r.streamId !== want) continue;
-        const tf = {}; for (const t of tokenize(r.content)) tf[t] = (tf[t] || 0) + 1;
+        // a null-prototype map: `{}`['constructor'] is Object, so that query word "matched" every row with a string score
+        const tf = Object.create(null); for (const t of tokenize(r.content)) tf[t] = (tf[t] || 0) + 1;
         let distinct = 0, freq = 0;
         for (const t of terms) { if (tf[t]) { distinct++; freq += tf[t]; } }
         if (distinct) scored.push({ idx: i, streamId: r.streamId, role: r.role, content: r.content, ts: r.ts, score: distinct * 1000 + freq, taint: r.taint || '', taintKnown: r.taintKnown === true || !!r.taint });
@@ -377,6 +384,7 @@
         const persisted = writer.call(io, entry);
         if (persisted && typeof persisted === 'object') stored = persisted;
       } catch (e) {
+        ramGaps.add(entry.streamId);
         if (strict) throw e;
         /* ordinary transcript writes remain fail-open; recovery-owned finalization uses appendStrict below */
       }
@@ -522,6 +530,27 @@
       return null;
     }
 
+    /* RAM ANSWERS WHEN IT HOLDS THE WHOLE STREAM (perf review 2026-10-19, #5). Every row RAM holds is a durable row
+       (read back at boot, or the proven copy an append returned), in the same order. So when the count RAM holds for
+       a stream equals the count the durable summaries record for it (io.streamRows), RAM holds every one of them and
+       the segment scan would return exactly these rows. A stream RAM has trimmed, or whose append failed this process,
+       is never answered here; neither is a host that cannot count (no streamRows, or -1). null = ask the disk. */
+    function ramHistory(want, limit, sourceRunId, dispatchState) {
+      if (ramGaps.has(want) || typeof io.streamRows !== 'function') return null;
+      let held = 0;
+      const out = [];
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = rows[i];
+        if (r.streamId !== want) continue;
+        held++;
+        if (out.length < limit && (!sourceRunId || r.sourceRunId === sourceRunId) && (!dispatchState || r.dispatchState === dispatchState)) out.push(Object.assign({}, r));
+      }
+      let durable;
+      try { durable = io.streamRows(want); } catch (e) { failNote('transcript.io', e); return null; }
+      if (typeof durable !== 'number' || durable < 0 || durable !== held) return null;
+      return out.reverse();
+    }
+
     // the recent dialogue for ONE workstream, oldest-first (ready to replay back into COMMS). We keep the LAST
     // `limit` turns of that stream (the most recent), then return them in chronological order.
     function history(streamId, o) {
@@ -530,8 +559,13 @@
       const want = normStream(streamId);
       const sourceRunId = String(o.sourceRunId || '');
       // Segmented hosts retain lifetime rows outside the bounded RAM working set. Ask the
-      // durable index/segments first so an old, idle conversation still resumes exactly.
+      // durable index/segments first so an old, idle conversation still resumes exactly —
+      // unless RAM provably holds every durable row of this stream (ramHistory), which is the
+      // same answer without reading and parsing segments 2-4 times per run. A strict read
+      // always proves the bytes on disk.
       if (typeof io.history === 'function') {
+        const held = o.strict ? null : ramHistory(want, limit, sourceRunId, o.dispatchState);
+        if (held) return held;
         try {
           const found = io.history(want, { limit, sourceRunId, dispatchState: o.dispatchState, strict: o.strict, since: num(o.since) });
           if (Array.isArray(found)) return found.map(r => Object.assign({}, r));

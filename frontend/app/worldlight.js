@@ -217,10 +217,24 @@ const WorldLight = (() => {
     let geo = null, geometryOptions = {}, segments = [], width = 1, height = 1, ratio = 1;
     let interiorPath = null, interiorMask = null, surfaceMask = null, surfaceChunks = [];
     let baseDark = null, baseGlow = null, frameDark = null, frameGlow = null, baseKey = null, frameLift = null;
-    let fixtureKey = '', frameKey = '', fixtureLights = [], currentLights = [], stampPixels = 0, disposed = false;
+    let fixtureLights = [], currentLights = [], stampPixels = 0, disposed = false;
     let preparedFrame = null, preparedLights = [], preparedConfigRevision = -1;
     const stamps = new Map(), canvasWatches = new Map(), lostCanvases = new Set(), samples = new Map();
-    let sampleKey = null;
+    /* NUMERIC LIGHT KEYS (2026-10-20, "eats my PC's resources"). The composed maps and the sample cache were keyed on
+       strings rebuilt every frame (~12 KB of them on Andrew's station), and the map key rounded each alpha to a byte, so
+       a screen's ±1.5% flicker kept crossing a byte boundary and re-blitting the station-sized maps several times a
+       second. Each light now packs into a reused Float64Array, LIGHT_SLOTS numbers a light:
+         x y r c0 c1 c2 originX originY softness · beam? bx by bdx bdy blength bwidth bstrength · alpha
+       Geometry and config compare exactly. The MAPS hold each alpha inside a MAP_ALPHA_BAND (1.5 LSB) band around the
+       alpha they were built with: a wiggle that small is below what the map can show, while switching a light on, off
+       or to work moves far past it and rebuilds that very frame. The SAMPLE key keeps exact alpha (band 0): sprites and
+       shadows still follow sub-byte changes. */
+    const LIGHT_SLOTS = 18, ALPHA_SLOT = 17, MAP_ALPHA_BAND = 1.5;
+    const lightKey = () => ({ keys: new Float64Array(LIGHT_SLOTS * 16), n: -1 });   // n < 0: nothing recorded yet
+    const fixtureMap = lightKey(), propMap = lightKey(), fixtureSample = lightKey(), propSample = lightKey();
+    const STATIC_CONFIG = ['ambient', 'ambientLift', 'wallAmbient', 'fixtureTint', 'shafts', 'key', 'keyReach', 'shadeCool', 'cut'];
+    const staticConfig = new Array(STATIC_CONFIG.length), dynamicConfig = new Float64Array(4);
+    let sampleGeometry = -1, sampleConfig = -1, sampleQuality = '', sampleAmbient;   // what the cached samples were taken under
     let resourcesDirty = false, retryResourcesAt = 0;
     const metrics = { geometryRevision: 0, staticBuilds: 0, dynamicBuilds: 0, visibilityBuilds: 0,
       frames: 0, preparations: 0, beamBuilds: 0, lastBuildMs: 0, droppedSources: 0, supported: true, contextLosses: 0, contextRecoveries: 0,
@@ -280,7 +294,7 @@ const WorldLight = (() => {
       return v;
     }
     function invalidateSamples() {
-      samples.clear(); sampleKey = null; metrics.sampleCacheInvalidations++;
+      samples.clear(); fixtureSample.n = -1; metrics.sampleCacheInvalidations++;
     }
     /* LIGHT GRID + KERNELS (2026-10-10, "slower since the new textures"). A station with ~270 emitters re-samples every
        prop and body each frame (a flickering screen changes an alpha, which correctly clears the sample cache), and
@@ -412,7 +426,7 @@ const WorldLight = (() => {
       baseKey = null; frameLift = null;
       const w = Math.max(1, Math.ceil(width * ratio)), h = Math.max(1, Math.ceil(height * ratio));
       baseDark = makeCanvas(w, h); baseGlow = makeCanvas(w, h); frameDark = makeCanvas(w, h); frameGlow = makeCanvas(w, h);
-      clearStamps(); fixtureKey = ''; frameKey = ''; fixtureLights = []; currentLights = [];
+      clearStamps(); fixtureMap.n = -1; propMap.n = -1; fixtureLights = []; currentLights = [];
       preparedFrame = null; preparedLights = [];
       invalidateSamples();
       resourcesDirty = false; retryResourcesAt = 0; metrics.geometryRevision++; return metrics.supported;
@@ -484,7 +498,41 @@ const WorldLight = (() => {
 
     const keyOf = l => l.x + ',' + l.y + ',' + l.r + ',' + l.c.join(',') + ',' + finite(l.originX, l.x) + ',' + finite(l.originY, l.y) + ',' + l.softness;
     const beamKey = l => l.beam ? Object.values(l.beam).join(',') : '';
-    const signature = lights => lights.map(l => keyOf(l) + ',' + Math.round(l.a * 255) + ',' + beamKey(l)).join(';');
+    // true when `lights` differ from what `k` recorded: the count or any geometry exactly, an alpha by `band` LSB or more
+    // (band 0: any change at all). The slot order is LIGHT_SLOTS' above; a light without a shaft records zeros past its flag.
+    function lightsStale(k, lights, band) {
+      if (k.n !== lights.length) return true;
+      const a = k.keys;
+      for (let i = 0, o = 0; i < lights.length; i++, o += LIGHT_SLOTS) {
+        const l = lights[i], b = l.beam;
+        if (a[o] !== l.x || a[o + 1] !== l.y || a[o + 2] !== l.r || a[o + 3] !== l.c[0] || a[o + 4] !== l.c[1] || a[o + 5] !== l.c[2] ||
+          a[o + 6] !== finite(l.originX, l.x) || a[o + 7] !== finite(l.originY, l.y) || a[o + 8] !== l.softness || a[o + 9] !== (b ? 1 : 0)) return true;
+        if (b && (a[o + 10] !== b.x || a[o + 11] !== b.y || a[o + 12] !== b.dx || a[o + 13] !== b.dy ||
+          a[o + 14] !== b.length || a[o + 15] !== b.width || a[o + 16] !== b.strength)) return true;
+        if (band ? Math.abs(l.a - a[o + ALPHA_SLOT]) * 255 >= band : a[o + ALPHA_SLOT] !== l.a) return true;
+      }
+      return false;
+    }
+    function recordLights(k, lights) {
+      const need = lights.length * LIGHT_SLOTS;
+      if (k.keys.length < need) k.keys = new Float64Array(Math.max(need, k.keys.length * 2));
+      const a = k.keys;
+      for (let i = 0, o = 0; i < lights.length; i++, o += LIGHT_SLOTS) {
+        const l = lights[i], b = l.beam;
+        a[o] = l.x; a[o + 1] = l.y; a[o + 2] = l.r; a[o + 3] = l.c[0]; a[o + 4] = l.c[1]; a[o + 5] = l.c[2];
+        a[o + 6] = finite(l.originX, l.x); a[o + 7] = finite(l.originY, l.y); a[o + 8] = l.softness; a[o + 9] = b ? 1 : 0;
+        a[o + 10] = b ? b.x : 0; a[o + 11] = b ? b.y : 0; a[o + 12] = b ? b.dx : 0; a[o + 13] = b ? b.dy : 0;
+        a[o + 14] = b ? b.length : 0; a[o + 15] = b ? b.width : 0; a[o + 16] = b ? b.strength : 0;
+        a[o + ALPHA_SLOT] = l.a;
+      }
+      k.n = lights.length;
+    }
+    // a config value compares by value; NaN matches NaN, as it did inside the old string key
+    const sameValue = (a, b) => a === b || (a !== a && b !== b);
+    function staticConfigStale() {
+      for (let i = 0; i < STATIC_CONFIG.length; i++) if (!sameValue(staticConfig[i], config[STATIC_CONFIG[i]])) return true;
+      return false;
+    }
     function stamp(light, beamOnly) {
       if (beamOnly && (!light.beam || !(light.beam.strength > 0))) return null;
       const key = (beamOnly ? 'beam:' + beamKey(light) + ':' : '') + keyOf(light);
@@ -642,10 +690,12 @@ const WorldLight = (() => {
       for (const light of currentLights) { light.origins = originsOf(light, q.areaSamples); light.segsNear = segsNear(light); }
       // Sample energy must respond to even sub-byte changes. Raster map keys may
       // quantize alpha for reuse; this key deliberately retains its exact value.
-      const exact = lights => lights.map(l => keyOf(l) + ',' + l.a + ',' + beamKey(l)).join(';');
-      const nextSampleKey = metrics.geometryRevision + '/' + metrics.configRevision + '/' + quality + '/' + config.ambient +
-        '|fixtures:' + exact(fixtureLights) + '|props:' + exact(preparedLights);
-      if (nextSampleKey !== sampleKey) { invalidateSamples(); sampleKey = nextSampleKey; }
+      if (sampleGeometry !== metrics.geometryRevision || sampleConfig !== metrics.configRevision || sampleQuality !== quality ||
+        !sameValue(sampleAmbient, config.ambient) || lightsStale(fixtureSample, fixtureLights, 0) || lightsStale(propSample, preparedLights, 0)) {
+        invalidateSamples();
+        recordLights(fixtureSample, fixtureLights); recordLights(propSample, preparedLights);
+        sampleGeometry = metrics.geometryRevision; sampleConfig = metrics.configRevision; sampleQuality = quality; sampleAmbient = config.ambient;
+      }
       metrics.droppedSources = Math.max(0, sourceFixtures.length - fixtureLights.length) + Math.max(0, sourceProps.length - preparedLights.length);
       preparedConfigRevision = metrics.configRevision;
       metrics.preparations++; return true;
@@ -662,19 +712,23 @@ const WorldLight = (() => {
       // clears preparedFrame; explicit frames and config changes still refresh.
       if(frame !== undefined || !preparedFrame || preparedConfigRevision !== metrics.configRevision)prepare(nextFrame);
       const fixtures = fixtureLights, lights = preparedLights;
-      const fk = signature(fixtures) + '|' + config.ambient + ',' + config.ambientLift + ',' + config.wallAmbient + ',' + config.fixtureTint + ',' + config.shafts +
-        ',' + config.key + ',' + config.keyReach + ',' + config.shadeCool + ',' + config.cut;
-      if (fk !== fixtureKey) { rebuildStatic(fixtures); fixtureKey = fk; frameKey = ''; }
-      const dk = signature(lights) + '|' + finite(config.propLift, 0.65) + '|' + finite(config.propTint, 1) + '|' + finite(config.keyProps, 1) + '|' + finite(config.keyPropReach, 1.2);
-      if (dk !== frameKey) {
+      if (staticConfigStale() || lightsStale(fixtureMap, fixtures, MAP_ALPHA_BAND)) {
+        rebuildStatic(fixtures); recordLights(fixtureMap, fixtures);
+        for (let i = 0; i < STATIC_CONFIG.length; i++) staticConfig[i] = config[STATIC_CONFIG[i]];
+        propMap.n = -1;   // the frame maps start from the static ones
+      }
+      const lift = finite(config.propLift, 0.65), tint = finite(config.propTint, 1), keyProps = finite(config.keyProps, 1), keyPropReach = finite(config.keyPropReach, 1.2);
+      if (dynamicConfig[0] !== lift || dynamicConfig[1] !== tint || dynamicConfig[2] !== keyProps || dynamicConfig[3] !== keyPropReach ||
+        lightsStale(propMap, lights, MAP_ALPHA_BAND)) {
         const d = reset(frameDark), glow = reset(frameGlow);
         d.drawImage(baseDark, 0, 0, width, height); glow.drawImage(baseGlow, 0, 0, width, height);
-        paint(d, lights, finite(config.propLift, 0.65), 'destination-out'); paint(glow, lights, clamp(finite(config.propTint, 1), 0, 1), 'screen');
+        paint(d, lights, lift, 'destination-out'); paint(glow, lights, clamp(tint, 0, 1), 'screen');
         if (baseKey && frameLift) {
           const k = reset(frameLift); k.drawImage(baseKey, 0, 0, width, height);
-          paintKey(k, lights, 0.5 * clamp(finite(config.key, 0), 0, 2) * clamp(finite(config.keyProps, 1), 0, 4), config.keyPropReach);
+          paintKey(k, lights, 0.5 * clamp(finite(config.key, 0), 0, 2) * clamp(keyProps, 0, 4), config.keyPropReach);
         }
-        frameKey = dk; metrics.dynamicBuilds++;
+        recordLights(propMap, lights); dynamicConfig[0] = lift; dynamicConfig[1] = tint; dynamicConfig[2] = keyProps; dynamicConfig[3] = keyPropReach;
+        metrics.dynamicBuilds++;
       }
       ctx.save();
       ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.imageSmoothingEnabled = ratio < 1;
@@ -768,7 +822,7 @@ const WorldLight = (() => {
       config = Object.assign({}, config, next);
       metrics.configRevision++; invalidateSamples();
       if (QUALITY[next.quality] && next.quality !== quality) { quality = next.quality; if (geo) setGeometry(geo, geometryOptions); }
-      else { fixtureKey = ''; frameKey = ''; }
+      else { fixtureMap.n = -1; propMap.n = -1; }
     }
     function dispose() {
       disposed = true; for (const c of [baseDark, baseGlow, frameDark, frameGlow, baseKey, frameLift]) release(c);

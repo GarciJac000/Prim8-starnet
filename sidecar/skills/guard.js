@@ -77,12 +77,22 @@
     }
     return findings;
   }
+  /* Scan what the model is shown (sweep/skills 2026-10-20). The name, summary, description and category reach every
+     run through the prompt index, so they are scanned too (reported without a line number; the market already did
+     this). A support file stored base64-encoded is scanned as its decoded text, not as its encoding. */
+  function scanText64(file, f) {
+    if (!f || f.encoding !== 'base64') return scanText(file, f && f.content);
+    const bytes = Buffer.from(str(f.content), 'base64'), text = bytes.toString('utf8');
+    return Buffer.from(text, 'utf8').equals(bytes) ? scanText(file, text) : [];
+  }
   function scanSkillRecord(skill, opts) {
     opts = opts || {};
     const source = opts.source || skill.createdBy || 'agent-created';
     const files = Array.isArray(skill.files) ? skill.files : [];
-    let findings = scanText('SKILL.md', str(skill.body) + '\n' + str(skill.setup));
-    for (const f of files) findings = findings.concat(scanText(str(f.path || 'support-file'), f.content));
+    const meta = [skill.name, skill.summary, skill.description, skill.category].map(str).join('\n');
+    let findings = scanText('SKILL.md', meta).map(f => Object.assign(f, { line: 0 }));
+    findings = findings.concat(scanText('SKILL.md', str(skill.body) + '\n' + str(skill.setup)));
+    for (const f of files) findings = findings.concat(scanText64(str(f.path || 'support-file'), f));
     const verdict = verdictFor(findings);
     return {
       skillName: str(skill.name || skill.id || 'skill'),

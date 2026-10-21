@@ -17,6 +17,8 @@
        loadInbox(channel?)             -> [{id,channel,message,ts}] // admitted work not yet completed/queued
        pushInbox(entry)                -> item                   // idempotent durable intake receipt
        removeInbox(id)                 -> bool                   // completed (or durably queued)
+       liveInbox(id)                   -> promise | null         // the run processing this receipt in THIS process
+       holdInbox(id, promise)          -> promise                // claim a receipt live until the promise settles
      }
 
    Files live under WORKSPACES/channels/ — SIBLINGS of the notebook store, OUTSIDE the agent's fs jail
@@ -109,7 +111,8 @@
     const writeDurable = (typeof d.writeDurable === 'function') ? d.writeDurable : null;
     const onRecover = (typeof d.onRecover === 'function') ? d.onRecover : function () {};
 
-    function ensureRoot() { try { if (fs.mkdirSync) fs.mkdirSync(root, { recursive: true }); } catch (_) {} }
+    let rootReady = false;   // mkdir once, not before every write (a removed dir is re-made on the ENOENT retry in writeRaw)
+    function ensureRoot() { if (rootReady) return; try { if (fs.mkdirSync) fs.mkdirSync(root, { recursive: true }); rootReady = true; } catch (_) {} }
     function historyFile(agentId) {
       if (!AID_RE.test(String(agentId))) throw new Error('bad channel agentId: ' + agentId);
       return pathMod.join(root, agentId + '.history.json');
@@ -119,10 +122,46 @@
     const inboxFile = () => pathMod.join(root, 'inbox.json');
     const outboxLimits = Object.assign({}, OUTBOX_DEFAULTS, d.outboxLimits || {});
     const inboxLimits = Object.assign({}, INBOX_DEFAULTS, d.inboxLimits || {});
+    /* THE LIVE CLAIM BELONGS TO THE STORE, not to a hub. A reconnect (startTelegram) closes the old hub and builds a
+       new one over this same store while the old hub's run is still going; each hub's own in-flight map could not
+       see the other's, so the new hub's first 'up' replayed the running message — a second paid run and a second
+       reply. In memory on purpose: a receipt with no live claim after a crash is exactly what recovery replays. */
+    const liveClaims = new Map();   // inbox id -> the one processing promise in this process, whichever hub owns it
     let outboxSeq = 0;   // deterministic per-process id tail (clock.now() alone can collide within one ms)
 
+    /* PARSED-FILE CACHE (perf review 10-19: ~10 fsyncs + 14 whole-file parses per inbound DM). This store is its files'
+       only writer (one sidecar per WORKSPACES dir; channels/ sits outside every agent's fs jail), so what it last wrote
+       or read is still the truth on the next call — unless something else replaced the file. Every read therefore
+       still asks the DISK, with one statSync instead of open + read + close + parse: a hit needs the same size, mtime
+       AND inode, so an external replace (station recovery, a hand edit, a torn or zero-length main) always misses and
+       re-reads exactly as before. A written file is cached as the exact text written and parsed only if it is read
+       again. Callers mutate what they get back (saveChatRecord, bumpOutboxTry), so a hit hands out a deep copy and the
+       cache never holds a caller's object. An fs without statSync (the in-memory test facades) is never cached. */
+    const canStat = typeof fs.statSync === 'function';
+    const cache = new Map();   // file -> { key: 'size:mtimeMs:ino', value?, text? }
+    const clone = typeof structuredClone === 'function' ? structuredClone : function (v) { return JSON.parse(JSON.stringify(v)); };
+    function stampOf(file) { const st = fs.statSync(file); return st.size + ':' + st.mtimeMs + ':' + st.ino; }
+    function cachedHit(file) {   // the cache entry when the file on disk is still the one it describes, else null
+      if (!canStat) return null;
+      const hit = cache.get(file);
+      if (!hit) return null;
+      let key = null;
+      try { key = stampOf(file); } catch (_) { key = null; }
+      if (key !== hit.key) { cache.delete(file); return null; }
+      if (hit.value === undefined) { hit.value = JSON.parse(hit.text); hit.text = undefined; }
+      return hit;
+    }
     function readRaw(file) {   // parse-or-undefined for ONE file (missing / zero-length / corrupt -> undefined)
-      try { const raw = fs.readFileSync(file, 'utf8'); if (raw == null || String(raw).length === 0) return undefined; return JSON.parse(raw); }
+      const hit = cachedHit(file);
+      if (hit) return clone(hit.value);
+      try {
+        const key = canStat ? stampOf(file) : null;
+        const raw = fs.readFileSync(file, 'utf8');
+        if (raw == null || String(raw).length === 0) return undefined;
+        const value = JSON.parse(raw);
+        if (key) { cache.set(file, { key: key, value: value }); return clone(value); }
+        return value;
+      }
       catch (_) { return undefined; }
     }
     function readJson(file) {   // recovery-aware: try the main file, then the <file>.bak last-known-good
@@ -133,21 +172,58 @@
       return undefined;   // genuinely absent OR unrecoverable -> caller treats as empty (channels is fail-closed)
     }
     function writeRaw(file, value) {
+      const text = JSON.stringify(value);
+      const put = function () {
+        if (writeDurable) { writeDurable({ fs: fs, path: pathMod }, file, text); return; }
+        const tmp = file + '.' + (++tmpSeq) + '.tmp';
+        fs.writeFileSync(tmp, text);
+        fs.renameSync(tmp, file);   // atomic replace
+      };
+      cache.delete(file);
       ensureRoot();
-      if (writeDurable) { writeDurable({ fs: fs, path: pathMod }, file, JSON.stringify(value)); return; }
-      const tmp = file + '.' + (++tmpSeq) + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(value));
-      fs.renameSync(tmp, file);   // atomic replace
+      try { put(); }
+      catch (e) {
+        if (!(e && e.code === 'ENOENT' && rootReady)) throw e;
+        rootReady = false; ensureRoot(); put();   // the channels dir was removed since the last write
+      }
+      if (canStat) {
+        try { cache.set(file, { key: stampOf(file), text: text }); }
+        catch (e) { failNote('channels.store.cacheStamp', e); }
+      }
     }
     function writeJsonAtomic(file, value) {
-      // snapshot the current GOOD main to <file>.bak BEFORE overwriting it, so a torn replace can be recovered.
-      // A corrupt current main is NOT copied (never clobber a possibly-good .bak with garbage). The read-modify-
+      // keep the current GOOD main as <file>.bak BEFORE replacing it, so a torn replace can be recovered.
+      // A corrupt current main is NOT kept (never clobber a possibly-good .bak with garbage). The read-modify-
       // write in appendTurn/saveChatRecord is fully SYNCHRONOUS (no await between readJson and writeJsonAtomic),
       // so it is inherently serialized per file by the event loop — concurrent in-process writers cannot lose an
-      // update — and now it is durable + recoverable too.
-      const prev = readRaw(file);
-      if (prev !== undefined) { try { writeRaw(file + '.bak', prev); } catch (e) { failNote('channels.store.bak', e); } }
+      // update — and it is durable + recoverable too.
+      //
+      // The good main becomes the .bak by HARD LINK (two metadata ops: drop the old .bak, add a second name for the
+      // main's bytes), not by re-serializing it through a second durable write (a second fsync + temp + rename per
+      // mutation). Those bytes were made durable when they were written as the main; the main itself never goes
+      // missing, and the shared inode ends when the main's atomic tmp+rename replace lands (this store never writes a
+      // file in place). No hard links (FAT/exFAT, an fs facade without linkSync, a refused link) = the old copy path.
+      const bak = file + '.bak';
+      const good = cachedHit(file) ? true : readRaw(file) !== undefined;
+      if (good && !linkBak(file, bak)) {
+        const prev = readRaw(file);
+        if (prev !== undefined) { try { writeRaw(bak, prev); } catch (e) { failNote('channels.store.bak', e); } }
+      }
       writeRaw(file, value);
+    }
+    function linkBak(file, bak) {
+      if (typeof fs.linkSync !== 'function' || typeof fs.unlinkSync !== 'function') return false;
+      try {
+        try { fs.unlinkSync(bak); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+        cache.delete(bak);
+        fs.linkSync(file, bak);
+        const hit = cache.get(file);
+        if (hit) cache.set(bak, hit);   // one inode, one stamp: the entry describes both names
+        return true;
+      } catch (e) {
+        if (!e || (e.code !== 'EPERM' && e.code !== 'ENOTSUP' && e.code !== 'EXDEV' && e.code !== 'ENOSYS')) failNote('channels.store.bak.link', e);
+        return false;
+      }
     }
 
     return {
@@ -312,7 +388,17 @@
         return true;
       },
 
-      _internals: { trimTail, historyFile, chatMapFile, outboxFile, inboxFile, AID_RE, limits, outboxLimits, inboxLimits }
+      liveInbox(id) { return liveClaims.get(String(id)) || null; },
+
+      holdInbox(id, promise) {
+        const key = String(id);
+        liveClaims.set(key, promise);
+        const release = () => { if (liveClaims.get(key) === promise) liveClaims.delete(key); };
+        Promise.resolve(promise).then(release, release);
+        return promise;
+      },
+
+      _internals: { trimTail, historyFile, chatMapFile, outboxFile, inboxFile, AID_RE, limits, outboxLimits, inboxLimits, liveClaims }
     };
   }
 

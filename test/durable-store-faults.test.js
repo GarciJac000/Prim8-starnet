@@ -38,8 +38,19 @@ function check(fn) { checks++; try { fn(); } catch(e) { failures++; console.erro
     }
     const file=path.join(root,'backup-write.json'); fs.writeFileSync(file,'{"version":1}');
     const wd=(_deps,p,bytes)=>{if(p.endsWith('.bak')) throw Object.assign(new Error('disk full'),{code:'ENOSPC'});fs.writeFileSync(p,bytes);};
-    check(()=>assert.throws(()=>writeJsonResilient({fs,path,writeDurable:wd},file,{version:2}),{code:'ENOSPC'}));
+    // the .bak is a hard link when the filesystem allows one (perf 10-19); refuse the link so the COPY path runs
+    const noLink=new Proxy(fs,{get(t,k){if(k==='linkSync') return ()=>{throw Object.assign(new Error('not supported'),{code:'EPERM'});}; const v=t[k]; return typeof v==='function'?v.bind(t):v;}});
+    check(()=>assert.throws(()=>writeJsonResilient({fs:noLink,path,writeDurable:wd},file,{version:2}),{code:'ENOSPC'}));
     check(()=>assert.deepEqual(readJsonResilient({fs},file).value,{version:1},'failed backup must preserve the committed primary'));
+    // the link path: the .bak is the previous main's bytes, and no second durable write is made for it
+    const linked=path.join(root,'backup-link.json'); fs.writeFileSync(linked,'{"version":1}');
+    const writes=[]; const wd2=(deps,p,bytes)=>{writes.push(p); return require('../sidecar/durable-write.js').writeFileDurable(deps,p,bytes);};
+    writeJsonResilient({fs,path,writeDurable:wd2},linked,{version:2});
+    check(()=>assert.deepEqual(writes,[linked],'one durable write: the main (the .bak is a link, not a rewrite)'));
+    check(()=>assert.deepEqual(JSON.parse(fs.readFileSync(linked+'.bak','utf8')),{version:1},'.bak holds the previous committed main'));
+    check(()=>assert.deepEqual(readJsonResilient({fs},linked).value,{version:2},'main holds the new value'));
+    fs.writeFileSync(linked,'{torn'); writeJsonResilient({fs,path,writeDurable:wd2},linked,{version:3});
+    check(()=>assert.deepEqual(JSON.parse(fs.readFileSync(linked+'.bak','utf8')),{version:1},'a torn main never replaces the good .bak'));
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
   console.log(`durable-store faults: ${checks-failures}/${checks} checks passed`);
   process.exitCode=failures?1:0;

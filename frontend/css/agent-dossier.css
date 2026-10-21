@@ -71,6 +71,12 @@
 .agent-dossier .set-row input[type="checkbox"] { appearance: none; position: relative; width: 34px; height: 20px; flex: 0 0 34px; border-radius: 20px; border: 1px solid rgba(var(--ph-rgb),.4); background: rgba(var(--ph-rgb),.07); margin: 0; }
 .agent-dossier .set-row input[type="checkbox"]::after { content: ''; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--ph-dim); transform: none; }
 .agent-dossier .set-row input[type="checkbox"]:checked::after { left: 17px; transform: none; background: var(--ph-bright); }
+/* PERSONALITY › FINE-TUNE (EMOJI / BLUNT) toggles sit inline in a label.cf-desc, not a .set-row: the same station
+   switch, or the browser paints its own white box (sweep/world 2026-10-20; the control floor only tints a CHECKED tick). */
+.agent-dossier input[data-persona-toggle] { appearance: none; -webkit-appearance: none; position: relative; display: inline-block; vertical-align: middle; width: 34px; height: 20px; border-radius: 20px; border: 1px solid rgba(var(--ph-rgb),.4); background: rgba(var(--ph-rgb),.07); margin: 0 8px 0 0; cursor: pointer; }
+.agent-dossier input[data-persona-toggle]::after { content: ''; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--ph-dim); }
+.agent-dossier input[data-persona-toggle]:checked::after { left: 17px; background: var(--ph-bright); }
+.agent-dossier label:has(> input[data-persona-toggle]) { display: inline-flex; align-items: center; margin: 8px 22px 8px 0; cursor: pointer; }
 /* Progression and achievement shelf: earned state comes entirely from Xp. */
 .agent-dossier .ag-growth-hero { display: flex; align-items: center; gap: 24px; padding: 24px; margin-bottom: 18px; border: 1px solid rgba(var(--ph-rgb),.35); border-radius: 14px; background: radial-gradient(ellipse at 0% 50%,rgba(var(--ph-rgb),.19),transparent 65%),var(--menu-glass); }
 .agent-dossier .ag-level-badge { flex: 0 0 94px; height: 94px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 2px solid var(--ph); outline: 1px solid rgba(var(--ph-rgb),.2); outline-offset: 5px; border-radius: 22px; background: rgba(0,0,0,.2); box-shadow: inset 0 0 22px rgba(var(--ph-rgb),.16),0 0 20px rgba(var(--ph-rgb),.08); }

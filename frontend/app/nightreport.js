@@ -53,6 +53,8 @@
 
   // a stable, HONEST label for a binding we don't recognise (forward-compat: a new gate name renders as itself,
   // never a fabricated reason). Used by both the report's idle sentence and the panel's decision trail.
+  // gates no wall clock clears: until their cause is fixed, NEXT JOB EARLIEST has no honest time to show
+  const NO_CLOCK_BINDINGS = new Set(['budget', 'spend-unknown', 'no-provider', 'readiness', 'precheck-error', 'persist-failed']);
   function bindingPhrase(binding) {
     if (binding == null || binding === '') return 'nothing is blocking the next job right now';
     return BINDING_PHRASE[binding] || ('held back by the ' + String(binding) + ' gate');
@@ -246,6 +248,10 @@
       // binding 'posture' = the dial is on WAIT / SUGGEST, so NO job will run at any time: a cooldown clock here read as a
       // scheduled job the line under the grid says cannot happen (org pass P09-a). Same rule as the halted model above.
       nextEligibleText: s.binding === 'posture' ? 'not scheduled — ON ITS OWN is set to WAIT or SUGGEST'
+        // the cooldown clock does not clear these (sweep/autonomy 2026-10-20): a spent leash refills at the local
+        // midnight the station reports, and a budget/provider/readiness gate holds until its cause is fixed
+        : s.binding === 'leash' ? ((fmtLocalTime(s.leashResetsAt, tz) ? 'not before ' + fmtLocalTime(s.leashResetsAt, tz) : 'tomorrow') + ' — today’s job limit is used')
+        : NO_CLOCK_BINDINGS.has(String(s.binding || '')) ? 'not scheduled — held until the reason above is fixed'
         : (fmtLocalTime(s.nextEligibleAt, tz) || 'when the next window opens'),
       modeText: modeText(s),
       modeWarn: s.buildMode === 'draft' && s.draftReason === 'no-workshop-grant',

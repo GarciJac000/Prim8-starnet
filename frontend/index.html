@@ -25,9 +25,9 @@
 <link rel="stylesheet" href="css/settings.css?v=5">
 <link rel="stylesheet" href="css/commander.css">
 <link rel="stylesheet" href="css/channels.css?v=4">
-<link rel="stylesheet" href="css/quests.css?v=4">
+<link rel="stylesheet" href="css/quests.css?v=6">
 <link rel="stylesheet" href="css/tasks.css?v=1">
-<link rel="stylesheet" href="css/agent-dossier.css?v=7">
+<link rel="stylesheet" href="css/agent-dossier.css?v=8">
 <link rel="stylesheet" href="css/warroom.css">
 <link rel="stylesheet" href="css/safety.css">
 <link rel="stylesheet" href="css/tutorial.css">
@@ -823,6 +823,7 @@
 <script src="app/legacymigrate.js"></script>
 <script src="app/glass-boot.js"></script><!-- FIRST store-touching script: migrate starnet.* localStorage keys -> starnet.* before any store reads -->
 <script src="js/util.js"></script>
+<script src="app/pollgate.js"></script><!-- IDLE COST: the ONE owner of "is anyone looking?" for background polls (visible cadence unchanged, a 30 s floor while away, never a stop); MUST load before its consumers (queryspine, overseer, group-chat, stationui, world, widgets) -->
 <script src="app/asciifx.js"></script><!-- ASCII-motion kit (AsciiFX): decode/dissolve/typewriter primitives; must load before its consumers (chat.js, stationui.js) -->
 <script src="js/audio.js"></script>
 <script src="js/arcade.js"></script>

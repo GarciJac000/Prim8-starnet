@@ -237,6 +237,11 @@
     const renew = (typeof opts.renewToken === 'function') ? opts.renewToken : null;
     const baseUrl = (opts.baseUrl || BASE).replace(/\/$/, '');
     const reasoningEffort = normalizeCodexReasoningEffort(opts.reasoningEffort || DEFAULT_REASONING_EFFORT);
+    // WINDOW FACTS (providers/catalog-cache.js, attached by the factory). The account's live list reports each slug's
+    // context_window, and a run's adapter never lists: the window the dock's listing saw answers contextLimit instead of
+    // a flat 272000. No list is shared (a token is one account), only the window each slug REPORTED. Absent = as before.
+    const facts = (opts.catalogCache && typeof opts.catalogCache.bind === 'function')
+      ? opts.catalogCache.bind({ scope: null, endpoint: baseUrl }) : null;
 
     function buildBody(req) {
       // ONE pre-send normalization (provider.js prepareWireMessages) ahead of this wire's own pairing pass below
@@ -454,9 +459,15 @@
           guard.disarm();
         }
         if (res.ok && res.body) return res;
-        let detail = res.statusText || '', errBody = null;
-        try { const j = await res.json(); errBody = j; detail = (j && j.error && (j.error.message || j.error.code)) || JSON.stringify(j); }
-        catch (e) { try { detail = (await res.text()).slice(0, 300); } catch (_) {} }
+        // The body is read ONCE, as text, through the idle watchdog and the caller's Stop (provider.runtime.readErrorBody):
+        // a stalled error body ignored Stop for up to 300 s. Only a JSON error's own words are quoted. A non-JSON page (a
+        // proxy's 503 "... reset reason: connection reset") keeps the status text: the browser's error copy reads
+        // transport and policy words before the status (friendlyerror kindFromRaw), so its prose would be told as a
+        // dropped connection or a content block the harness cannot prove.
+        const eb = await provider.runtime.readErrorBody(res, { signal, url: baseUrl, tag: 'providers.codex' });
+        const errBody = eb.parsed ? eb.data : null;
+        let detail = eb.parsed ? ((errBody && errBody.error && (errBody.error.message || errBody.error.code)) || JSON.stringify(errBody)) : (res.statusText || '');
+        if (eb.stalled) detail += ' (error body did not finish)';
         const err = new Error('codex http ' + res.status + ' — ' + detail);
         err.status = res.status;
         err.headers = res.headers;
@@ -507,6 +518,7 @@
           const j = await res.json();
           const entries = (j && Array.isArray(j.models)) ? j.models : [];
           const out = [];
+          const reported = [];   // only the windows the backend stated (the row's 272000 stand-in teaches nothing)
           for (const it of entries) {
             if (!it || typeof it.slug !== 'string' || !it.slug.trim()) continue;
             const vis = String(it.visibility || '').toLowerCase();
@@ -534,7 +546,9 @@
               reasoningLevelDescriptions: Object.keys(effortDescriptions).length ? effortDescriptions : undefined,
               _rank: (typeof it.priority === 'number') ? it.priority : 10000
             });
+            reported.push({ id: it.slug.trim(), context_length: Number(it.context_window || it.max_context_window || 0) || 0 });
           }
+          if (facts && out.length) facts.noteWindows(reported);
           out.sort((a, b) => (a._rank - b._rank) || a.id.localeCompare(b.id));
           if (out.length) return out.map(({ _rank, ...m }) => m);
         }
@@ -544,7 +558,14 @@
       // hardcoded list, and the model dock can label the catalog offline.
       return STATIC_MODELS.map(m => Object.assign({}, m, { pricing: null, fallback: true }));
     }
-    function contextLimit(id) { const m = findModel(id); return (m && m.context_length) || 272000; }   // sane default for an unlisted Codex model
+    // the window the account's live list reported for this slug, else the curated row, else 272000 (the sane default for
+    // an unlisted Codex model)
+    function contextLimit(id) {
+      const live = facts ? facts.windowFact(id) : 0;
+      if (live) return live;
+      const m = findModel(id);
+      return (m && m.context_length) || 272000;
+    }
     function priceOf() { return null; }                  // flat-rate subscription -> no per-token price
     function supportsTools(id) { const m = findModel(id); return m ? !!m.supportsTools : true; }   // Codex models are tool-capable; never false-refuse
     // Which reasoning levels a codex model exposes — the static entry's list, or the four-level default.

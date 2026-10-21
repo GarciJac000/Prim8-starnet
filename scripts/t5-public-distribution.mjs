@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findCurrentNsisInstaller } from './lib/release-installer.mjs';
+import { resolvePubkeyText, verifySignature } from './minisign-verify.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const rawArgs = process.argv.slice(2);
@@ -214,6 +215,15 @@ function validateManifest(file, installerInfo, sigFile) {
     if (!String(platform.signature || '').trim()) errors.push('manifest signature is missing');
     if (sigText && String(platform.signature || '').trim() !== sigText) errors.push('manifest signature does not match installer .sig file');
   }
+  // A text match proves the manifest carries the .sig, not that the .sig signs THESE bytes with the key every installed
+  // app trusts. Run the installed updater's own check (minisign over the installer, baked pubkey). STARNET_T5_PUBKEY is
+  // a test-only override of the tauri.conf.json key, and the step records which key it trusted.
+  if (installerInfo && sigText) {
+    try {
+      const v = verifySignature(readFileSync(installerInfo.path), sigText, resolvePubkeyText(process.env.STARNET_T5_PUBKEY || '', ROOT));
+      if (!v.ok) errors.push('installer .sig does not verify against the updater public key: ' + v.reason);
+    } catch (e) { errors.push('installer .sig could not be verified against the updater public key: ' + ((e && e.message) || e)); }
+  }
   const endpoint = updaterEndpoint();
   if (endpoint && !hasHttpsUrl(endpoint)) errors.push('configured updater endpoint must be https');
   if (installerInfo && manifest.version && tauriVersion() && String(manifest.version).replace(/^v/, '') !== tauriVersion()) {
@@ -233,9 +243,9 @@ function checkArtifacts(loop) {
   if (!manifestInfo) return step('t5.2-signed-updater-artifacts', 'T5.2', 'Signed updater artifacts and manifest are valid', 'blocked', 'Production latest.json manifest is missing. Generate it with scripts/release-assemble-manifest.mjs after signing.', { loop, artifacts: { installer, signature: sig, manifest: null } });
   const validation = validateManifest(manifestFile, installer, sigFile);
   writeJson(join(OUT, 'validated-latest-json.json'), validation.manifest || { errors: validation.errors });
-  return step('t5.2-signed-updater-artifacts', 'T5.2', 'Signed updater artifacts and manifest are valid', validation.ok ? 'pass' : 'fail', validation.ok ? 'Installer .sig and latest.json are internally consistent.' : validation.errors.join('; '), {
+  return step('t5.2-signed-updater-artifacts', 'T5.2', 'Signed updater artifacts and manifest are valid', validation.ok ? 'pass' : 'fail', validation.ok ? 'Installer .sig verifies against the updater public key and matches latest.json.' : validation.errors.join('; '), {
     loop,
-    artifacts: { installer, signature: sig, manifest: manifestInfo, endpoint: updaterEndpoint(), version: tauriVersion() },
+    artifacts: { installer, signature: sig, manifest: manifestInfo, endpoint: updaterEndpoint(), version: tauriVersion(), pubkeySource: process.env.STARNET_T5_PUBKEY ? 'STARNET_T5_PUBKEY override' : 'src-tauri/tauri.conf.json' },
     errors: validation.errors
   });
 }

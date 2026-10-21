@@ -138,6 +138,15 @@ function boot(port, workspaces, attemptsLeft) {
     A.eq(badCronExpr.status, 400, 'invalid cron expr -> 400');
     const badAgent = await j('POST', '/api/cron', { name: 'x', prompt: 'y', schedule: 'every 1h', agentId: '../escape' });
     A.eq(badAgent.status, 400, 'malformed routine agentId -> 400');
+    // A ONE-SHOT WHOSE TIME HAS PASSED (sweep/autonomy 2026-10-20): it was stored and FIRED on the very next tick — a
+    // model a day/year off on the date ran the task immediately while saying "scheduled for <that date>", and the
+    // preview listed the past instant as the next fire. Refused at the one parse seam create/update/preview share.
+    const pastIso = new Date(Date.now() - 86400000).toISOString();
+    const pastOnce = await j('POST', '/api/cron', { name: 'past once', prompt: 'send the report', schedule: pastIso, agentId: 'cron_brief' });
+    A.eq(pastOnce.status, 400, 'a one-shot at a time that already passed -> 400, never stored to fire at once');
+    A.ok(/already passed/.test(String(pastOnce.body && pastOnce.body.error)), 'and it says the time already passed: ' + (pastOnce.body && pastOnce.body.error));
+    const pvPast = await j('POST', '/api/cron/preview', { schedule: pastIso });
+    A.eq(pvPast.status, 400, 'the preview never lists a past instant as the next fire');
 
     // ---- list: the snapshot the panel renders; enabled:false because SKYNET_CRON_ENABLED is unset ----
     const list = await j('GET', '/api/cron');

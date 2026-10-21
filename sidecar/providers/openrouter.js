@@ -33,11 +33,73 @@
   // throttle degrades to "at most one kick per provider instance" (instances are per-run -> at most once/run).
   let CATALOG_REWARM_AT = 0;
   const REWARM_MIN_MS = 5 * 60 * 1000;
+  /* CATALOG AGE (providers/catalog-cache.js, attached once at boot through the factory). A warm CATALOG was never
+     refreshed: a model OpenRouter listed after boot stayed unknown (window 0, unpriced) for the whole session. With the
+     process cache attached, its clock ages CATALOG: past the TTL, or when a warm list lacks an id asked for (once past
+     the failure back-off), ONE background refresh runs and the old list answers until a NON-empty one replaces it.
+     Every load also feeds the cache's window facts. Absent = exactly as before. */
+  let SHARED = null;
+  let CATALOG_AT = 0;          // when CATALOG last loaded, on SHARED's clock
+  let CATALOG_TRIED_AT = 0;    // when the last background refresh was kicked
+  let CATALOG_REFRESHING = null;
+  function attachCatalogCache(cache) {
+    SHARED = (cache && typeof cache.now === 'function' && typeof cache.isStale === 'function') ? cache : null;
+    return SHARED;
+  }
+  async function fetchCatalogList(doFetch, baseUrl) {
+    try {
+      const res = await doFetch(baseUrl + '/models', {});
+      const j = await res.json();
+      return (j.data || []).map(m => ({
+        id: m.id,
+        name: m.name || m.id,
+        context_length: m.context_length || 0,
+        max_completion_tokens: (m.top_provider && m.top_provider.max_completion_tokens) || null,
+        pricing: m.pricing,
+        supported_parameters: Array.isArray(m.supported_parameters) ? m.supported_parameters.slice() : [],
+        supportsTools: !!(m.supported_parameters && m.supported_parameters.indexOf('tools') >= 0),
+        supportsReasoning: !!(m.supported_parameters && (m.supported_parameters.indexOf('reasoning') >= 0 || m.supported_parameters.indexOf('reasoning_effort') >= 0 || m.supported_parameters.indexOf('include_reasoning') >= 0)),
+        reasoningEfforts: normalizeEffortList(m.reasoningEfforts || m.reasoning_efforts || m.supportedReasoningEfforts || m.supported_reasoning_efforts)
+      }));
+    } catch (e) { return []; }
+  }
+  function stampCatalog(baseUrl, list) {
+    if (!SHARED) return;
+    CATALOG_AT = SHARED.now();
+    SHARED.noteWindows(baseUrl, list);
+  }
+  let CATALOG_MISS_GAP = 0;    // a miss refresh's gap: the failure back-off, doubling per miss refresh up to the TTL
+  function maybeRefreshCatalog(doFetch, baseUrl, miss) {
+    if (!SHARED || !CATALOG || !CATALOG.length || CATALOG_REFRESHING) return;
+    const now = SHARED.now();
+    if (CATALOG_TRIED_AT && now - CATALOG_TRIED_AT < SHARED.failBackoffMs) return;
+    if (miss) {
+      const gap = CATALOG_MISS_GAP || SHARED.failBackoffMs;
+      if (now - Math.max(CATALOG_AT, CATALOG_TRIED_AT) < gap) return;   // an id OpenRouter never lists cannot keep re-fetching it
+      CATALOG_MISS_GAP = Math.min(SHARED.ttlMs, gap * 2);
+    } else if (!SHARED.isStale(CATALOG_AT)) return;
+    CATALOG_TRIED_AT = now;
+    CATALOG_REFRESHING = fetchCatalogList(doFetch, baseUrl).then(list => {
+      if (list.length) { CATALOG = list; stampCatalog(baseUrl, list); }
+    });
+    const done = () => { CATALOG_REFRESHING = null; };
+    CATALOG_REFRESHING.then(done, done);
+  }
 
   function isAbort(e, signal) {
     // ONLY a real cancellation — never a loose message match, which would mask a genuine provider
     // error (whose text happens to contain "abort") as a clean, empty, "successful" turn.
     return provider.runtime.isAbort(e, signal);
+  }
+
+  /* OpenRouter wraps an upstream refusal as "Provider returned error" and puts the upstream's OWN words in
+     error.metadata.raw. Keep them (bounded): they are what tells a region refusal or an upstream rate limit apart
+     from a rejected key. The message head stays error.message, so existing routing keeps matching. */
+  function errorDetail(e, fallback) {
+    const msg = String((e && e.message) || fallback || '');
+    const raw = e && e.metadata && e.metadata.raw;
+    const rawText = raw == null ? '' : (typeof raw === 'string' ? raw : JSON.stringify(raw));
+    return rawText && msg.indexOf(rawText) < 0 ? msg + ' — ' + rawText.slice(0, 400) : msg;
   }
 
   const RETRY_DELAYS = [400, 1200];   // up to 2 retries (no jitter -> determinism); retryability comes from classifyApiError
@@ -233,7 +295,7 @@
     // later run prices/compacts correctly. Fire-and-forget — the CURRENT run never waits on it (it uses whatever
     // is warm, exactly as before). Safe to call every run; the timestamp gate bounds the /models traffic.
     function maybeRewarmCatalog() {
-      if (CATALOG && CATALOG.length) return;               // already warm
+      if (CATALOG && CATALOG.length) { maybeRefreshCatalog(doFetch, baseUrl, false); return; }   // warm: refresh only past its TTL
       if (CATALOG_PROMISE) return;                         // a load is already in flight
       if (clock) {
         const now = clock.now();
@@ -300,7 +362,14 @@
       // one decoded chunk -> 0..n normalized HarnessEvents (shared by the loop + end-of-stream flush)
       function* emitFrom(j) {
         if (j.error) {
-          const err = new Error((j.error && j.error.message) || 'openrouter stream error');
+          /* IN-BAND ERROR. OpenRouter has already answered 200 (its keep-alives precede the upstream), so a numeric
+             error.code here IS the HTTP-equivalent status: say so in the adapter's own sentence, which classifyApiError
+             and the browser's friendlyerror both route on. Without it an in-band 401 read `unknown` and was retried for
+             ~100 s (sweep/providers 2026-10-20). A string code ('server_error') invents no status. */
+          const code = Number(j.error.code);
+          const http = Number.isInteger(code) && code >= 400 && code < 600;
+          const err = new Error((http ? 'openrouter http ' + code + ' (in-stream) — ' : '') + errorDetail(j.error, 'openrouter stream error'));
+          if (http) err.status = code;
           err.body = j;   // the structured error (code, metadata) — errorClass reads it
           err.ownMessage = true;
           throw err;
@@ -369,21 +438,9 @@
       if (CATALOG && CATALOG.length) return CATALOG;   // only a NON-empty catalog is a cache hit
       if (!CATALOG_PROMISE) {
         CATALOG_PROMISE = (async () => {
-          try {
-            const res = await doFetch(baseUrl + '/models', {});
-            const j = await res.json();
-            return (j.data || []).map(m => ({
-              id: m.id,
-              name: m.name || m.id,
-              context_length: m.context_length || 0,
-              max_completion_tokens: (m.top_provider && m.top_provider.max_completion_tokens) || null,
-              pricing: m.pricing,
-              supported_parameters: Array.isArray(m.supported_parameters) ? m.supported_parameters.slice() : [],
-              supportsTools: !!(m.supported_parameters && m.supported_parameters.indexOf('tools') >= 0),
-              supportsReasoning: !!(m.supported_parameters && (m.supported_parameters.indexOf('reasoning') >= 0 || m.supported_parameters.indexOf('reasoning_effort') >= 0 || m.supported_parameters.indexOf('include_reasoning') >= 0)),
-              reasoningEfforts: normalizeEffortList(m.reasoningEfforts || m.reasoning_efforts || m.supportedReasoningEfforts || m.supported_reasoning_efforts)
-            }));
-          } catch (e) { return []; }
+          const list = await fetchCatalogList(doFetch, baseUrl);
+          if (list.length) stampCatalog(baseUrl, list);
+          return list;
         })();
       }
       CATALOG = await CATALOG_PROMISE;
@@ -391,7 +448,13 @@
       return CATALOG;
     }
     async function listModels() { return (await loadCatalog()).map(m => Object.assign({}, m)); }
-    function findModel(id) { return CATALOG ? CATALOG.find(m => m.id === id) : null; }
+    // a run's setup asks for the window before its first request (catalog-cache.js runWindow bounds the wait): warm = at once
+    function warmCatalog() { return loadCatalog(); }
+    function findModel(id) {
+      const m = CATALOG ? CATALOG.find(x => x.id === id) : null;
+      if (!m && id) maybeRefreshCatalog(doFetch, baseUrl, true);   // a warm list without this id: a model listed after it loaded
+      return m;
+    }
     function contextLimit(id) { const m = findModel(id); return (m && m.context_length) || 0; }
     function priceOf(id) {
       // best-effort: null until the catalog is loaded — cost.js then relies on the provider's
@@ -439,9 +502,15 @@
           guard.disarm();
         }
         if (res.ok && res.body) return res;
-        let detail = res.statusText || '', errBody = null;
-        try { const j = await res.json(); errBody = j; detail = (j && j.error && j.error.message) || JSON.stringify(j); }
-        catch (e) { try { detail = (await res.text()).slice(0, 300); } catch (_) {} }
+        // The body is read ONCE, as text, through the idle watchdog and the caller's Stop (provider.runtime.readErrorBody):
+        // a stalled error body ignored Stop for up to 300 s. Only a JSON error's own words are quoted. A non-JSON page (a
+        // proxy's 503 "... reset reason: connection reset") keeps the status text: the browser's error copy reads
+        // transport and policy words before the status (friendlyerror kindFromRaw), so its prose would be told as a
+        // dropped connection or a content block the harness cannot prove.
+        const eb = await provider.runtime.readErrorBody(res, { signal, url: baseUrl, tag: 'providers.openrouter' });
+        const errBody = eb.parsed ? eb.data : null;
+        let detail = eb.parsed ? ((errBody && errBody.error && errorDetail(errBody.error, '')) || JSON.stringify(errBody)) : (res.statusText || '');
+        if (eb.stalled) detail += ' (error body did not finish)';
         // EFFORT SELF-HEAL (400): the model refused the reasoning rung we sent (effortRefusal). Learn what it takes and
         // resend at the nearest rung it keeps — before any token streams, so nothing is billed twice. Does not consume
         // a transient-retry attempt. A refusal that removes nothing new stands as the honest error.
@@ -489,8 +558,8 @@
       }
     }
 
-    return { stream, listModels, contextLimit, priceOf, supportsTools, reasoningEfforts };
+    return { stream, listModels, warmCatalog, contextLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
-  return { makeOpenRouterProvider, applyCacheControl, _internals: { normalizeReasoningEffort, reasoningEffortsForModel, clampReasoningEffortForModel, repairToolPairs } };
+  return { makeOpenRouterProvider, applyCacheControl, attachCatalogCache, _internals: { normalizeReasoningEffort, reasoningEffortsForModel, clampReasoningEffortForModel, repairToolPairs } };
 });

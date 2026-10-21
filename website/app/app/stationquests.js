@@ -35,6 +35,7 @@
   // folds through (so completion rides G1a's celebration for free). Sanitized so a hand-edited save or a
   // weird agentId can never inject a broken id.
   const clean = s => String(s == null ? '' : s).replace(/[^A-Za-z0-9_.\-]/g, '_').slice(0, 48);
+  const cut = (s, n) => String(s == null ? '' : s).slice(0, n).replace(/[\uD800-\uDBFF]$/, '');   // a label cap never ends on half an emoji (a lone surrogate)
   function gapId(agentId, cap) { return 'sq:' + clean(agentId) + ':' + clean(cap); }
 
   // defensively rebuild a persisted slice: every entry re-validated, junk dropped (never a crash on a bad save).
@@ -55,9 +56,9 @@
       const dis = r.dismissedAt == null ? NaN : Number(r.dismissedAt);
       s.gaps[id] = {
         agentId, cap,
-        capLabel: String(r.capLabel || cap).slice(0, 24),
-        propLabel: String(r.propLabel || '').slice(0, 24),
-        agentLabel: String(r.agentLabel || agentId).slice(0, 40),
+        capLabel: cut(r.capLabel || cap, 24),
+        propLabel: cut(r.propLabel || '', 24),
+        agentLabel: cut(r.agentLabel || agentId, 40),
         firstSeenAt: first,
         completedAt: Number.isFinite(comp) ? comp : null,
         dismissedAt: Number.isFinite(dis) ? dis : null
@@ -84,16 +85,16 @@
     if (existing && existing.dismissedAt != null) return null;   // dismissed = stop forever
     if (existing) {
       // refresh the human-facing labels (the catalog is the source of truth) but keep the history.
-      if (g.capLabel) existing.capLabel = String(g.capLabel).slice(0, 24);
-      if (g.propLabel) existing.propLabel = String(g.propLabel).slice(0, 24);
-      if (g.agentLabel) existing.agentLabel = String(g.agentLabel).slice(0, 40);
+      if (g.capLabel) existing.capLabel = cut(g.capLabel, 24);
+      if (g.propLabel) existing.propLabel = cut(g.propLabel, 24);
+      if (g.agentLabel) existing.agentLabel = cut(g.agentLabel, 40);
       return id;
     }
     state.gaps[id] = {
       agentId, cap,
-      capLabel: String(g.capLabel || cap).slice(0, 24),
-      propLabel: String(g.propLabel || '').slice(0, 24),
-      agentLabel: String(g.agentLabel || agentId).slice(0, 40),
+      capLabel: cut(g.capLabel || cap, 24),
+      propLabel: cut(g.propLabel || '', 24),
+      agentLabel: cut(g.agentLabel || agentId, 40),
       firstSeenAt: now,
       completedAt: null,
       dismissedAt: null

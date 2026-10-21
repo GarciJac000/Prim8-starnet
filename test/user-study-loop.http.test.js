@@ -65,7 +65,26 @@ const plan = status => ({
       run_tg_3: { agentId: 'agent', runId: 'run_tg_3', createdAt: 1000, proposals: [prop('s2', 'Wants readers in indie games'), prop('s3', 'Writes in the mornings')] },
       run_empty: { agentId: 'agent', runId: 'run_empty', createdAt: 3000, proposals: [] }
     }, latest: {}, lastAt: {}, declined: {} }));
+    // A LOST FOLD, RECOVERED; THEN AN IDLE POLL THAT WRITES NOTHING (2026-10-19). A quest completion is durable before
+    // its journey fold: a done quest the journey never recorded (a crash between the two) is folded by the next
+    // journey read. Once nothing is pending, the 4 s journey poll answers byte-identical bodies and never rewrites
+    // the journey or its backup (the reconcile replays only quests still to fold, over cached reads).
+    const fsx = require('node:fs'), px = require('node:path');
+    const qFile = px.join(host.workspace, '_station.quests.json'), jFile = px.join(host.workspace, '_station.journey.json');
+    const qLedger = JSON.parse(fsx.readFileSync(qFile, 'utf8'));
+    qLedger.quests.push({ id: 'q:lost-fold', title: 'Draft the welcome email', contract: { type: 'run', key: 'run_lost' }, status: 'done',
+      agentId: 'agent', completedBy: 'agent', domain: 'writing', createdAt: Date.now() - 5000, completedAt: Date.now() });
+    fsx.writeFileSync(qFile, JSON.stringify(qLedger));
     await host.start();
+    const recovered = await host.json('GET', '/api/journey');
+    assert.ok(recovered.body.journey.outcomes.some(o => o.questId === 'q:lost-fold' && o.verifiedBy === 'harness-contract'),
+      'the lost fold is recovered by the next journey read: ' + recovered.text.slice(0, 300));
+    const stampOf = f => { try { const s = fsx.statSync(f, { bigint: true }); return s.ino + ':' + s.size + ':' + s.mtimeNs; } catch (e) { return e.code; } };
+    const before = [stampOf(jFile), stampOf(jFile + '.bak')];
+    const idle = [];
+    for (let i = 0; i < 5; i++) idle.push((await host.json('GET', '/api/journey')).text);
+    assert.ok(idle.every(t => t === recovered.text), 'idle journey polls answer the same bytes');
+    assert.deepEqual([stampOf(jFile), stampOf(jFile + '.bak')], before, 'idle journey polls never rewrite the journey or its backup');
     const pending = (await host.json('GET', '/api/study/pending')).body.batches;
     assert.deepEqual(pending.map(b => [b.runId, b.agentId, b.count]), [['run_tg_3', 'agent', 2], ['run_cron_7', 'scout', 1]], 'every undecided away batch is listed, oldest first; empty batches are not');
     const perRun = (await host.json('GET', '/api/study/proposals?agent=scout&run=run_cron_7')).body.proposals;

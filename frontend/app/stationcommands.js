@@ -1199,6 +1199,13 @@ const StationCommands = (() => {
   };
 
   const reconciling = Object.create(null);
+  /* EVERY RECONCILE READ HAS A DEADLINE (idle CPU piece 3 fix round 4, 2026-10-20). A pass is memoized while it runs, so
+     a /api/runs or /api/transcript read the sidecar accepted and never answered held that pass — and every reconcile
+     that joined it — for good; the overseer's ledger beat awaited it too, and /api/overseer was never asked again. Past
+     the deadline the read fails like any other (fail-open: nothing is folded) and the next reconcile reads afresh. */
+  const RECONCILE_READ_MS = 15000;
+  const readInit = () => (typeof U !== 'undefined' && U && typeof U.timeoutSignal === 'function')
+    ? { cache: 'no-store', signal: U.timeoutSignal(RECONCILE_READ_MS) } : { cache: 'no-store' };
 
   /* Recover a station.deliver command that no page received (or that the wrong page acknowledged first).
      The completed answer is stored with the run itself; fold by runId exactly once, resolving a divergent
@@ -1210,10 +1217,10 @@ const StationCommands = (() => {
     reconciling[key] = (async () => {
       let rows = [];
       try {
-        const r = await fetch('/api/runs?agent=*&limit=500', { cache: 'no-store' });
-        if (!r.ok) return 0;
+        const r = await fetch('/api/runs?agent=*&limit=500', readInit());
+        if (!r.ok) return -1;
         rows = ((await r.json()) || {}).runs || [];
-      } catch (_) { return 0; }
+      } catch (_) { return -1; }   // -1 = the run list was never read: nothing was reconciled, a caller may retry
       let folded = 0, outcomes = 0;
       const rank = new Map(rows.filter(r => r && r.runId).map((r, i) => [String(r.runId), i]));
       // /api/runs is newest-first. Fold oldest-first so multiple missed answers preserve conversation order.
@@ -1247,7 +1254,7 @@ const StationCommands = (() => {
         // Read only the finalized delivery projection; exact execution transcripts may contain rejected output.
         if (delivery && (String(text || '').length >= 24000 || (delivery.textLength != null && delivery.textLength !== String(text || '').length))) {
           try {
-            const response = await fetch('/api/transcript?stream=' + encodeURIComponent(row.streamId || '') + '&runId=' + encodeURIComponent(row.runId || '') + '&delivery=1&limit=1', { cache: 'no-store' });
+            const response = await fetch('/api/transcript?stream=' + encodeURIComponent(row.streamId || '') + '&runId=' + encodeURIComponent(row.runId || '') + '&delivery=1&limit=1', readInit());
             if (!response.ok) continue;
             const result = await response.json();
             const full = await Workstreams.finalDeliveryText(row, result.turns);

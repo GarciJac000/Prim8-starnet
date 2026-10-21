@@ -210,8 +210,7 @@ const webBodyStamp = (async () => {
           const response = await undici.fetch(url, init);
           if (response.status === 200) {
             headersSeen++;
-            const text = response.text.bind(response);
-            response.text = () => { bodyReads++; return text(); };
+            countBodyReads(response, () => { bodyReads++; });
             if (releaseBody) releaseBody();
           }
           return response;
@@ -237,6 +236,18 @@ const webBodyStamp = (async () => {
     }
   }
 
+  /* A body READ is either Response.text() (the historic path) or a reader on response.body (the streaming
+     raw-body ceiling, 2026-10-20). Count whichever the tool uses, once per read, so this pins "the body was
+     read after the headers", not which API read it. */
+  function countBodyReads(response, inc) {
+    const text = response.text.bind(response);
+    response.text = () => { inc(); return text(); };
+    const body = response.body;
+    if (body && typeof body.getReader === 'function') {
+      const getReader = body.getReader.bind(body);
+      body.getReader = (...a) => { inc(); return getReader(...a); };
+    }
+  }
   const bodyError = (message, code, name) => Object.assign(new TypeError(message), {
     ...(name ? { name } : {}),
     ...(code === null ? {} : { cause: Object.assign(new Error('decoder-private SECRET https://secret.invalid/path'), {
@@ -259,8 +270,7 @@ const webBodyStamp = (async () => {
       fetchImpl: async () => {
         requests++;
         const response = new undici.Response(new ReadableStream({ start(c) { c.error(error); } }), { status: 200 });
-        const text = response.text.bind(response);
-        response.text = () => { reads++; return text(); }; return response;
+        countBodyReads(response, () => { reads++; }); return response;
       }, reader: { available: () => ({ ok: true }), fetchText: async () => { browserCalls++; return { ok: false }; } }
     });
     const out = await web.register(makeRegistry()).dispatch(call('https://api.body.example:8443/private-body?token=SECRET'));

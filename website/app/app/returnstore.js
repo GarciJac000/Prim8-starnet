@@ -17,12 +17,19 @@ const ReturnStore = (() => {
   let hbTimer = 0;
   let wired = false;    // unload stamp wired once
   let recoveryTimer = 0, recoveryGeneration = 0;
+  /* ONE WRITER (perf, 2026-10-20). The world asks pendingCount() on every drawn frame (the OUTBOX crate memo), and it
+     used to run Returns.hydrate(state) for it: a filter of the ledger, a Set and a filter of up to 10k digested ids,
+     60 times a second. Every write below goes through setState with a value a Returns.* call returned, so the state is
+     ALWAYS hydrated and the count is just its pending length. `rev` moves on every write — the world memoizes its
+     per-chute crate map on it (keyed on the count, a resolve + a fold between two frames left a stale map). */
+  let rev = 0;
+  function setState(next) { state = next; rev++; }
 
   function load() { try { const raw = localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch (_) { return null; } }
   function save() { try { if (state) localStorage.setItem(KEY, JSON.stringify(state)); return true; } catch (_) { return false; } }
   const ready = () => typeof Returns !== 'undefined' && !!state;
 
-  function beat() { if (!ready()) return; state = Returns.heartbeat(state, Date.now()); save(); }
+  function beat() { if (!ready()) return; setState(Returns.heartbeat(state, Date.now())); save(); }
 
   // fetch this station's run history (ALL agents — cron routines run on crew too) + the routine
   // A failed or partial history read must reject: empty work and unread work are different states.
@@ -80,7 +87,7 @@ const ReturnStore = (() => {
     if (generation !== recoveryGeneration || !ready()) return;
     // The API is newest-first, but the OUTBOX is FIFO. Crate every row oldest-first; only the visible
     // digest below is capped, so the other completed runs remain rateable instead of disappearing.
-    state = Returns.fold(state, rows.slice().sort((a, b) => (+a.ts || 0) - (+b.ts || 0)));
+    setState(Returns.fold(state, rows.slice().sort((a, b) => (+a.ts || 0) - (+b.ts || 0))));
     state.awayRanges = [];
     if (!save()) {
       state.awayRanges = ranges;
@@ -103,7 +110,7 @@ const ReturnStore = (() => {
   function init(opts) {
     opts = opts || {};
     if (state && hbTimer) return; // enterGame re-entry is not a second closed interval
-    state = (typeof Returns !== 'undefined') ? Returns.hydrate(load()) : null;
+    setState((typeof Returns !== 'undefined') ? Returns.hydrate(load()) : null);
     if (!state) return;
     const awaySince = state.lastSeenAt;             // 0 on the first-ever session -> engine digests nothing
     if (opts.enabled !== false && awaySince > 0) state.awayRanges.push({ since: awaySince, until: Date.now() });
@@ -133,7 +140,9 @@ const ReturnStore = (() => {
   function outboxLine() { return 'they wait in TO REVIEW until you rate them.'; }
 
   // ---- the OUTBOX crate surface (world.js renders from these; clicking the chute reviews) ----
-  function pendingCount() { return ready() ? Returns.pendingCount(state) : 0; }
+  function pendingCount() { return ready() ? state.pending.length : 0; }   // == Returns.pendingCount(state): state is always hydrated (ONE WRITER)
+  // moves on every state write — a cheap memo key for anything derived from the ledger (world.js outboxCrateMap)
+  function revision() { return rev; }
   // the full uncollected ledger, oldest first (crate order) — the OUTBOX window renders from this.
   // Copies, so a render can't mutate the durable state.
   function pendingRows() { return ready() ? Returns.hydrate(state).pending.map(r => Object.assign({}, r)) : []; }
@@ -194,7 +203,7 @@ const ReturnStore = (() => {
      TO REVIEW and the delivered result in WORKFLOWS — so a rating in one must not leave the other still asking for it). `from` names the
      caller, which repaints itself: TO REVIEW's own collected() fade would be cut short by a rebuild of its list. COMMS' away beats pass no
      `from`, so both windows catch up. */
-  function resolve(runId, from) { if (ready() && runId) { state = Returns.resolve(state, runId); save(); changed(from, [runId]); } }
+  function resolve(runId, from) { if (ready() && runId) { setState(Returns.resolve(state, runId)); save(); changed(from, [runId]); } }
   // `runIds` reaches WORKFLOWS so it repaints only when its delivered result shows the rate control for one of them: a full repaint
   // there closes every open drawer (How each step did it, Last time …), so a rating elsewhere must not snap the one being read shut
   function changed(from, runIds) {
@@ -204,7 +213,7 @@ const ReturnStore = (() => {
   // TO REVIEW's CLEAR ALL — collect every listed crate in ONE save (the runs stay in the library; only the reminder goes)
   function resolveAll(runIds) {
     if (!ready() || !Array.isArray(runIds)) return;
-    for (const id of runIds) if (id) state = Returns.resolve(state, id);
+    for (const id of runIds) if (id) setState(Returns.resolve(state, id));
     save();
     try { if (typeof OutboxView !== 'undefined' && OutboxView.refresh) OutboxView.refresh(); } catch (_) {}   // DELIVERABLES › TO REVIEW
     try { if (typeof WorkflowsWindow !== 'undefined' && WorkflowsWindow.refresh) WorkflowsWindow.refresh(runIds.filter(Boolean)); } catch (_) {}   // WORKFLOWS' rate control goes too (when it shows one of these)
@@ -218,7 +227,7 @@ const ReturnStore = (() => {
      crate through the identical path. Returns false when the store isn't live or the row carries no runId. */
   function foldRow(row) {
     if (!ready() || !row || !row.runId) return false;
-    state = Returns.fold(state, [{
+    setState(Returns.fold(state, [{
       runId: String(row.runId),
       agentId: String(row.agentId || 'agent'),
       title: String(row.title || '').replace(/\s+/g, ' ').trim().slice(0, 90),
@@ -227,7 +236,7 @@ const ReturnStore = (() => {
       turns: Math.max(0, row.turns | 0),
       ts: +row.ts || Date.now(),
       streamId: String(row.streamId || '')
-    }]);
+    }]));
     save();
     // an already-open OUTBOX window re-renders with the fresh crate (no-op when closed)
     try { if (typeof OutboxView !== 'undefined' && OutboxView.refresh) OutboxView.refresh(); } catch (_) {}   // DELIVERABLES › TO REVIEW
@@ -237,10 +246,10 @@ const ReturnStore = (() => {
   // S2/new-hero: a fresh Commander inherits no prior pending crates or attendance trail.
   function reset() {
     ++recoveryGeneration; clearTimeout(recoveryTimer); clearInterval(hbTimer); hbTimer = 0;
-    state = null; fired = false; try { localStorage.removeItem(KEY); } catch (_) {}
+    setState(null); fired = false; try { localStorage.removeItem(KEY); } catch (_) {}
   }
 
-  return { init, pendingCount, pendingRows, reviewNext, resolve, resolveAll, foldRow, reset, lastSeen, isAttended, outboxLine, openWork };
+  return { init, pendingCount, revision, pendingRows, reviewNext, resolve, resolveAll, foldRow, reset, lastSeen, isAttended, outboxLine, openWork };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { ReturnStore };

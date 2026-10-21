@@ -90,6 +90,15 @@ async function run() {
     const off = mkAdapter({ botUsername: 'starnetbot', requireMention: false });
     off.ad._internals.dispatch(groupMsg({ text: 'just chatting' }));
     A.eq(off.got.length, 1, 'requireMention:false restores the old answer-everything behaviour');
+    // live-caught 2026-10-20 (sweep/channels): in a room we answer in full, "/new@otherbot" reached the hub, whose parse
+    // strips the @suffix — it wiped THIS bot's history (and /stop@otherbot stopped our run). A command another bot is
+    // named for is never ours, mention gate or not.
+    off.ad._internals.dispatch(groupMsg({ text: '/new@otherbot', mentions: ['otherbot'] }));
+    A.eq(off.got.length, 1, 'with the mention gate off, a command @-addressed to ANOTHER bot is still not ours');
+    off.ad._internals.dispatch(groupMsg({ text: '/status@StarNetBot' }));
+    A.eq(off.got.length, 2, 'while a command @-addressed to US (any case) still runs');
+    off.ad._internals.dispatch(groupMsg({ text: '/status' }));
+    A.eq(off.got.length, 3, 'and a bare command still runs');
 
     const unknown = mkAdapter({});   // no botUsername configured
     unknown.ad._internals.dispatch(groupMsg({ text: 'just chatting' }));

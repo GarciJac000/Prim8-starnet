@@ -326,7 +326,73 @@ async function invokeTts(overrides, body) {
     assert.equal(fetches + edgeCalls, 0, 'without paying another provider or switching to Edge');
   }
 
-  console.log('media-service: OK (36 assertions)');
+  // Over the cap is REFUSED, never truncated (sweep/voice 2026-10-20): /api/tts spoke the first ~1200 characters of a
+  // longer script and answered 200 audio, so the caller had no way to know the rest was never said.
+  {
+    const said = [];
+    const edgeOn = { enabled: () => true, resolveVoice: () => 'en-US-ChristopherNeural', synth: async (t) => { said.push(t); return Buffer.from('edge-mp3'); } };
+    const long = 'A sentence that pads the script out. '.repeat(40).trim();
+    const over = await invokeTts({ edgetts: edgeOn }, { text: long });
+    let j = {}; try { j = JSON.parse(over.body.toString()); } catch (_) { j = { servedAudioBytes: over.body.length }; }
+    assert.equal(over.status, 200, 'the 200-always contract holds for a refusal');
+    assert.equal(j.fallback, true, 'a ' + long.length + '-character script is refused, not served');
+    assert.match(String(j.reason), /cap/, 'the refusal names the cap: ' + j.reason);
+    assert.equal(said.length, 0, 'no engine was asked to speak a truncated head of the script');
+    const atCap = await invokeTts({ edgetts: edgeOn }, { text: 'x'.repeat(1199) + '.' });
+    assert.match(String(atCap.headers['Content-Type']), /audio/, 'a script exactly at the cap is still spoken');
+    assert.equal(said[0].length, 1200, 'and spoken whole');
+  }
+
+  // One sentence, one paid synthesis (sweep/voice 2026-10-20): the desk gives up on a request at 30s and retries,
+  // while the sidecar's keyed call runs on for up to 60s — so a provider slower than 30s was paid TWICE for the same
+  // sentence (live: keyed calls at 19 ms and 30432 ms, sentence played at 61.6 s from the first call's cache). A
+  // request for a clip whose synthesis is already in flight joins it instead of buying another.
+  {
+    let calls = 0, release = null;
+    const gate = new Promise(r => { release = r; });
+    const slow = {
+      providerRuntimeKey: provider => provider === 'openrouter' ? 'key' : '',
+      fetch: async () => { calls++; await gate; return { ok: true, status: 200, headers: { get: () => 'audio/mpeg' }, arrayBuffer: async () => Buffer.from('keyed-mp3') }; }
+    };
+    const a = { status: 0, headers: {}, body: Buffer.alloc(0) }, b = { status: 0, headers: {}, body: Buffer.alloc(0) };
+    const res = r => ({ headersSent: false, writeHead(s, h) { r.status = s; r.headers = h || {}; this.headersSent = true; }, end(v) { r.body = Buffer.isBuffer(v) ? v : Buffer.from(String(v || '')); } });
+    const shared = await make(Object.assign({}, slow, { readBody: async () => JSON.stringify({ text: 'one slow sentence' }) }));
+    const first = shared.handleTts({}, res(a));
+    await new Promise(r => setTimeout(r, 20));
+    const second = shared.handleTts({}, res(b));   // the desk's retry, while the first synthesis is still running
+    await new Promise(r => setTimeout(r, 20));
+    release();
+    await Promise.all([first, second]);
+    assert.equal(calls, 1, 'a retry for a clip already being synthesized does not pay for it again (calls=' + calls + ')');
+    assert.equal(b.body.toString(), 'keyed-mp3', 'the retry is answered with the one synthesis');
+    assert.equal(a.body.toString(), 'keyed-mp3', 'and so is the original request');
+  }
+
+  // The offline (Kokoro) leg sweeps the voice cache like every other leg (memory lane 2026-10-20): its miss branch
+  // wrote a clip per new sentence and never called the sweep, so the folder grew ~120 MB a day at 500 sentences.
+  {
+    let n = 0;
+    const service = await make({
+      readBody: async () => JSON.stringify({ text: 'kokoro sentence ' + (++n), local: true, localVoice: 'af_heart', localEngine: 'local-kokoro' }),
+      localVoice: {
+        status: () => ({ available: true }), defaultVoice: () => 'af_heart', edgeVoiceFor: () => 'en-US-ChristopherNeural',
+        transcribe: async () => '', synthesize: async () => Buffer.from('kokoro-wav')
+      }
+    });
+    const dir = path.join(roots[roots.length - 1], 'voice-cache');
+    for (let i = 0; i < 640; i++) await fsp.writeFile(path.join(dir, 'seed-' + i + '.mp3'), 'x');   // over the 600-clip cap
+    let served = 0;
+    for (let i = 0; i < 32; i++) {
+      const r = { headers: {} };
+      await service.handleTts({}, { headersSent: false, writeHead(s, h) { r.headers = h || {}; }, end(v) { if (r.headers['X-Voice-Cache'] === 'miss' && String(v) === 'kokoro-wav') served++; } });
+    }
+    assert.equal(served, 32, 'every request was a Kokoro cache miss that served audio');
+    let files = (await fsp.readdir(dir)).length;
+    for (let i = 0; i < 100 && files > 480; i++) { await new Promise(r => setTimeout(r, 10)); files = (await fsp.readdir(dir)).length; }
+    assert.ok(files <= 480, 'the 32nd Kokoro miss sweeps the cache back under its cap (' + files + ' clips left of ' + (640 + 32) + ')');
+  }
+
+  console.log('media-service: OK (47 assertions)');
 })().finally(async () => {
   for (const root of roots) await fsp.rm(root, { recursive: true, force: true });
 }).catch(error => {

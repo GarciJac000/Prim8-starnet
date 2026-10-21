@@ -525,6 +525,9 @@
     const editMessage = typeof o.editMessage === 'function' ? o.editMessage : null;
     const askConsent = typeof o.askConsent === 'function' ? o.askConsent : null;
     const resolveConsent = typeof o.resolveConsent === 'function' ? o.resolveConsent : null;
+    //   consentOutcome(runId, promptId) -> how an already-settled prompt really ended ('once'|'session'|'always'|'full'|
+    //   'deny'|'timeout'|''): STARNET REMOTE answers the same waiter, so a lost race is not always an expiry (optional)
+    const consentOutcome = typeof o.consentOutcome === 'function' ? o.consentOutcome : null;
     const buttonsOk = !!(prompts && answerCallback);   // the minimum to render a tappable keyboard at all
     // Telegram truncates long inline-button labels on narrow phones, so the FULL option text always stays in the
     // message body and the button carries a short, numbered echo of it (reference-harness lesson). 30 chars fits
@@ -601,8 +604,10 @@
     if (!store || typeof store.loadHistory !== 'function') throw new Error('makeChannelHub: a channel store is required');
     if (typeof send !== 'function') throw new Error('makeChannelHub: a send(chatId,text) is required');
 
+    // The fallback factory is INVOKED: un-invoked, personaFor returned the inner arrow and every run without a configured
+    // system prompt reached the provider opening with the literal text "() => p" (2026-06-14 .. 2026-10-20).
     const personaFor = typeof o.persona === 'function' ? o.persona
-      : (() => { const p = (typeof o.persona === 'string' && o.persona) || DEFAULT_PERSONA; return () => p; });
+      : (() => { const p = (typeof o.persona === 'string' && o.persona) || DEFAULT_PERSONA; return () => p; })();
 
     const AID_RE = /^[A-Za-z0-9_-]{1,40}$/;   // notebook/fs-jail agentId grammar (a configured agentId must match)
     // chatId -> { runId, abort, superseded, agentId, startedAt } (one run per CONVERSATION, not per agent). The
@@ -1160,6 +1165,18 @@
           const rec = typeof store.getChatRecord === 'function' ? store.getChatRecord(chatId) : null;
           for (const k of (rec && Array.isArray(rec.hopKeys) ? rec.hopKeys : [])) if (typeof k === 'string' && AID_RE.test(k)) dropped += store.clearHistory(k) || 0;
         } catch (e) { failNote('channels.hub.hopKeys.clear', e); }
+        /* A RUN READS ITS HISTORY FROM THE CANONICAL STREAM (historyFor), not from the store file above: clearing only the
+           file answered "I no longer remember" while the next run replayed up to 100 turns of the old chat, taint and all
+           (2026-10-20). Move the chat onto a fresh stream, as /new does in COMMS; the old one stays in the station's
+           history, it is just never replayed again. */
+        const oldStream = (historyFor && typeof store.saveChatRecord === 'function') ? resolvedStreamId(chatId) : null;
+        if (oldStream && !streamIdFor) {
+          try { dropped = Math.max(dropped, (historyFor(oldStream, boundId) || []).length); } catch (e) { failNote('channels.hub.new.count', e); }
+          const tail = '_n' + String(newId()).replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+          const base = ('channel_' + channel + '_' + String(chatId)).replace(/[^A-Za-z0-9_-]/g, '_');
+          try { store.saveChatRecord(chatId, { streamId: base.slice(0, 64 - tail.length) + tail }); }
+          catch (e) { await deliver(chatId, '⚠ Could not start this chat fresh: ' + ((e && e.message) || 'the write failed') + '.', '', 'command'); return; }
+        }
         await deliver(chatId, dropped
           ? ('Cleared ' + dropped + ' message' + (dropped === 1 ? '' : 's') + ' — this chat starts fresh. I no longer remember what we discussed.')
           : 'Nothing to clear — this chat had no history yet.', '', 'command');
@@ -1474,7 +1491,9 @@
       // Older/test stores retain the original behavior. Production's store claim is synchronous and durable,
       // so returning from this function is the exact point the adapter may safely advance Telegram's offset.
       if (!id || typeof store.pushInbox !== 'function' || typeof store.removeInbox !== 'function') return routeInbound(msg, intake);
-      const live = activeInbox.get(id);
+      // this hub's own claim first, then the store's: a hub this one REPLACED (a reconnect) may still be running it
+      const shared = typeof store.liveInbox === 'function' && typeof store.holdInbox === 'function';
+      const live = activeInbox.get(id) || (shared ? store.liveInbox(id) : null);
       if (live) {
         if (intake && typeof intake.onAccepted === 'function') { try { intake.onAccepted({ id, durable: true, duplicate: true }); } catch (_) {} }
         return live;
@@ -1486,6 +1505,7 @@
         return value;
       }).finally(() => { activeInbox.delete(id); });
       activeInbox.set(id, running);
+      if (shared) store.holdInbox(id, running);
       return running;
     }
 
@@ -1505,6 +1525,13 @@
         const items = store.loadInbox(channel) || [];
         for (const it of items) {
           if (closed || !it || !it.message) break;
+          /* THE SNAPSHOT GOES STALE WHILE WE AWAIT. A live item's onInbound hands back its RUNNING promise, so this
+             loop can park behind a whole run while a later item (a follow-up steered into that run, a /routine add
+             typed meanwhile) finishes on its own path and leaves the inbox — replaying it from this list then ran it
+             a second time (2026-10-20). Replay only what is still durably pending right now. */
+          let pending = true;
+          try { pending = (store.loadInbox(channel) || []).some(x => x && x.id === it.id); } catch (_) { pending = true; }
+          if (!pending) continue;
           try { await onInbound(it.message, { recovered: true }); }
           catch (e) { try { console.error('[' + channel + '] durable inbox recovery failed for ' + String(it.id || '') + ':', (e && e.message) || e); } catch (_) {} break; }
         }
@@ -2336,14 +2363,22 @@
         try { done = !!resolveConsent(entry.meta.runId, entry.meta.promptId, opt.value); } catch (_) { done = false; }
         lostRace = !done;
       }
-      await ack(lostRace ? '⚠ Already expired — denied' : ((/^[\p{L}\p{N}]/u.test(shown) ? '✓ ' : '') + shown));
+      // A lost race is not always a denial: the same ask may have been ALLOWED on another surface (STARNET REMOTE) a moment
+      // before this tap — stamping that "expired — DENIED" contradicted an action that ran (2026-10-20).
+      let allowedAs = '';
+      if (lostRace && consentOutcome) {
+        try { const d = String(consentOutcome(entry.meta.runId, entry.meta.promptId) || ''); if (/^(once|session|always|full)$/.test(d)) allowedAs = d; } catch (_) { allowedAs = ''; }
+      }
+      await ack(allowedAs ? '✓ Already answered elsewhere — allowed' : lostRace ? '⚠ Already expired — denied' : ((/^[\p{L}\p{N}]/u.test(shown) ? '✓ ' : '') + shown));
 
       // Stamp the OUTCOME into the original message and strip the spent buttons. Cosmetic ONLY in the sense
       // that the decision is already recorded whether or not this edit lands (Telegram 400s a no-op edit, and
       // the message may have been deleted by the user) — which is why it is fired inside its own guard and its
       // result is not read. What it must never be is a different answer from the one the broker applied.
       if (editMessage && entry.messageId) {
-        const outcome = lostRace
+        const outcome = allowedAs
+          ? '▸ already answered in StarNet — ALLOWED (' + allowedAs + ')'
+          : lostRace
           ? '▸ ⚠ expired — DENIED, the run moved on'
           : '▸ ' + String(opt.display || opt.value);
         try { await editMessage(chatId, entry.messageId, String(entry.meta.text || '') + '\n\n' + outcome, {}); } catch (_) {}
@@ -2352,7 +2387,7 @@
       if (entry.kind === 'consent') {
         // The host had already settled it — the fail-closed timer fired, the run was superseded, or E-STOP hit.
         // Telling the user their tap landed would be a lie about what the harness actually did.
-        if (lostRace) { try { await deliver(chatId, '⚠ That permission request had already expired — the action was denied and the run moved on.', entry.meta.runId || '', 'prompt'); } catch (_) {} }
+        if (lostRace && !allowedAs) { try { await deliver(chatId, '⚠ That permission request had already expired — the action was denied and the run moved on.', entry.meta.runId || '', 'prompt'); } catch (_) {} }
         return;
       }
 

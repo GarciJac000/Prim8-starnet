@@ -8,7 +8,8 @@
    repairToolCallArguments(raw) -> string
      A pure, deterministic, bounded best-effort: returns a STRING that is guaranteed to JSON.parse
      (worst case '{}'). It NEVER invents argument VALUES — every pass is a mechanical syntactic fix
-     (strip trailing commas, escape in-string control chars, balance/append/strip delimiters); when no
+     (strip structural trailing commas, escape in-string control chars, balance/append/strip delimiters —
+     the comma strip and the rebalance are string-aware: neither touches a comma or bracket inside a value); when no
      pass yields parseable JSON it degrades to '{}'  (recovery of intent, NOT a schema bypass — a tool
      whose schema requires args still correctly fails validation downstream).
 
@@ -78,7 +79,31 @@
     return out;
   }
 
-  const stripTrailingCommas = (s) => s.replace(/,\s*([}\]])/g, '$1');
+  /* Drop a comma that only whitespace separates from a '}' or ']' — STRUCTURAL commas only. A comma inside a string
+     value is content: the old regex (/,\s*([}\]])/g) could not tell, so a call that also had a real trailing comma
+     wrote `s.split(/[\s,]+/)` as `s.split(/[\s]+/)` and `xs = [1, 2, 3,]` as `xs = [1, 2, 3]` into the file it
+     created, and an fs.edit's old_string no longer matched. Same escape-aware string state as balanceDelimiters /
+     endsInsideString; outside strings the output is byte-identical to the regex (the comma AND its whitespace run go,
+     the closer stays). One linear pass. */
+  const WS = /\s/;   // the same class the regex's \s matched
+  function stripTrailingCommas(s) {
+    let out = '', from = 0, inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch !== ',') continue;
+      let j = i + 1;
+      while (j < s.length && WS.test(s[j])) j++;
+      if (j < s.length && (s[j] === '}' || s[j] === ']')) { out += s.slice(from, i); from = j; i = j - 1; }
+    }
+    return from ? out + s.slice(from) : s;
+  }
 
   // Ordered repair ladder — each pass is tried on the trimmed input; the first to yield parseable JSON wins.
   // The final pass composes the cheap transforms (escape in-string controls -> rebalance -> strip the commas

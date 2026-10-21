@@ -25,7 +25,7 @@ const relSrc = /  const REL_PATH = [^\n]*;/.exec(src);
 A.ok(relSrc, 'chat.js still defines REL_PATH (relative file links)');
 const renderMarkdown = new Function(
   escSrc[0] + '\n' + relSrc[0] + '\n' + extract('escapeHtml') + '\n' + extract('linkify') + '\n' +
-  extract('mdInline') + '\n' + extract('hostOf') + '\n' + extract('linkHostNote') + '\n' + extract('fileRefLink') + '\n' + extract('fileRefImage') + '\n' + extract('reportInline') + '\n' + extract('renderFence') + '\n' + extract('renderMarkdown') +
+  extract('mdInline') + '\n' + extract('hostOf') + '\n' + extract('linkHostNote') + '\n' + extract('appFileRef') + '\n' + extract('fileRefLink') + '\n' + extract('fileRefImage') + '\n' + extract('reportInline') + '\n' + extract('renderFence') + '\n' + extract('renderMarkdown') +
   '\nreturn renderMarkdown;'
 )();
 

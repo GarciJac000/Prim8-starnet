@@ -72,6 +72,10 @@ const SpaceBG = (() => {
   const NEB_HUES = [[150, 90, 255], [255, 90, 190], [90, 200, 255], [90, 255, 200]];
 
   const rgba = (c, a) => 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (+a).toFixed(3) + ')';
+  /* a three-step near twinkler's fillStyle strings, made on its first draw and kept on the star (2026-10-20): the near
+     loops built one rgba() per star per frame out of three values. Each loop passes its own level literals, so every
+     string is the one it used to build (test/spacebg-void-strings.test.js pins each sky's draw stream). */
+  const twinkleStyles = (s, lo, mid, hi) => s.tw || (s.tw = [rgba(s.c, lo), rgba(s.c, mid), rgba(s.c, hi)]);
   // linear blend of two [r,g,b] triples — for ramps written straight into an ImageData buffer
   const mix3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
   const px1 = () => Math.max(1, Math.round((typeof window !== 'undefined' && window.devicePixelRatio) || 1));
@@ -437,7 +441,27 @@ const SpaceBG = (() => {
       const spark = [];
       for (let i = 0, n = Math.min(400, Math.round(area / 6000)); i < n; i++) spark.push({ x: rnd(), y: rnd(), ph: rnd() * 10, rate: 500 + rnd() * 1200, c: pickTint(rnd()) });
 
-      return { nebCv, nebPlates, nebJobs, dustCv, mid, near, spark };
+      const built = { nebCv, nebPlates, nebJobs, dustCv, mid, near, spark };
+      VOID_BG.levels(built);
+      return built;
+    },
+
+    /* LEVEL STRINGS (2026-10-20, "eats my PC's resources"). Every twinkling star steps between the same three levels,
+       yet draw() built its rgba() string afresh per star per frame: ~470 throwaway strings a frame at 1920x1080, from
+       only 34 distinct values. Each star now carries its three strings (s.f, and s.g for a glint), made here from the
+       SAME arithmetic the loops used, so every fillRect paints with the identical fillStyle (law 1 holds, byte for
+       byte: test/spacebg-void-strings.test.js). Draws no random number, so the seeded build is untouched. A state built
+       without them (an older bake) gets them on its first draw. */
+    LEVELS: [0.15, 0.55, 1],
+    levels(st) {
+      const L = VOID_BG.LEVELS;
+      for (const s of st.spark) s.f = L.map(lv => s.c + (lv * 0.6).toFixed(3) + ')');
+      for (const s of st.mid) s.f = L.map(lv => s.c + (lv * VOID_BG.DIM_MID).toFixed(3) + ')');
+      for (const s of st.near) {
+        s.f = L.map(lv => s.c + (lv * VOID_BG.DIM_NEAR).toFixed(3) + ')');
+        if (s.glint) s.g = L.map(lv => s.c + (lv * VOID_BG.DIM_NEAR * 0.30).toFixed(3) + ')');
+      }
+      st.levels = true;
     },
 
     draw(ctx, w, h, now, cam, st) {
@@ -477,25 +501,29 @@ const SpaceBG = (() => {
       /* TWINKLE (2026-09-05, Andrew: "have the stars twinkle"): the old smooth 0.35-1 sine read as
          steady after the CRT pass. Stars now STEP between three levels and go much darker at the
          bottom, so each one visibly blinks; the sparkle set does the same in the far field. */
-      const step = ph => ph > 0.45 ? 1 : ph > -0.35 ? 0.55 : 0.15;
+      // step() is the level's INDEX into VOID_BG.LEVELS (0.15 / 0.55 / 1); each star's strings come from levels().
+      // fillStyle is assigned only when the string changes — the same style is in force at every fillRect.
+      const step = ph => ph > 0.45 ? 2 : ph > -0.35 ? 1 : 0;
+      if (!st.levels) VOID_BG.levels(st);
+      let fill = null;
       for (const s of st.spark) {
-        const lv = step(Math.sin(now / s.rate + s.ph));
-        if (lv < 0.2) continue;
-        ctx.fillStyle = s.c + (lv * 0.6).toFixed(3) + ')';
+        const i = step(Math.sin(now / s.rate + s.ph));
+        if (!i) continue;                              // the bottom step (0.15) is off for the sparkle set
+        if (s.f[i] !== fill) ctx.fillStyle = fill = s.f[i];
         ctx.fillRect((s.x * w + now / 1000 * S.dust) % w, s.y * h, 1, 1);
       }
       for (const s of st.mid) {
-        const tw = step(Math.sin(now / (900 + s.ph * 300) + s.ph)) * VOID_BG.DIM_MID;
-        ctx.fillStyle = s.c + tw.toFixed(3) + ')';
+        const f = s.f[step(Math.sin(now / (900 + s.ph * 300) + s.ph))];
+        if (f !== fill) ctx.fillStyle = fill = f;
         ctx.fillRect((s.x * w + now / 1000 * S.mid) % w, s.y * h, s.r, s.r);
       }
       for (const s of st.near) {
-        const tw = step(Math.sin(now / (900 + s.ph * 300) + s.ph)) * VOID_BG.DIM_NEAR;
+        const i = step(Math.sin(now / (900 + s.ph * 300) + s.ph));
         const x = (s.x * w + now / 1000 * S.near) % w, y = s.y * h;
-        ctx.fillStyle = s.c + tw.toFixed(3) + ')';
+        if (s.f[i] !== fill) ctx.fillStyle = fill = s.f[i];
         ctx.fillRect(x, y, s.r, s.r);
-        if (s.glint && tw > 0.9) {                     // the brightest few flare into a 4-point glint at twinkle peak
-          ctx.fillStyle = s.c + (tw * 0.30).toFixed(3) + ')';
+        if (s.glint && VOID_BG.LEVELS[i] * VOID_BG.DIM_NEAR > 0.9) {   // the brightest few flare into a 4-point glint at twinkle peak
+          if (s.g[i] !== fill) ctx.fillStyle = fill = s.g[i];
           ctx.fillRect(x - s.r * 2, y + (s.r >> 1), s.r * 5, 1);
           ctx.fillRect(x + (s.r >> 1), y - s.r * 2, 1, s.r * 5);
         }
@@ -822,10 +850,11 @@ const SpaceBG = (() => {
           if (Math.abs(yy) <= R - 1) { ctx.fillStyle = rgba(P.WHITE, 1); ctx.fillRect(x - core, y + yy, 2 * core + 1, 1); }
         }
       }
+      let fill = null;   // three steps: each star keeps its strings (twinkleStyles), fillStyle set only on a change
       for (const s of st.near) {
         const ph = Math.sin(now / s.rate + s.ph);
-        const lv = ph > 0.45 ? 0.9 : ph > -0.4 ? 0.52 : 0.22;
-        ctx.fillStyle = rgba(s.c, lv);
+        const f = twinkleStyles(s, 0.22, 0.52, 0.9)[ph > 0.45 ? 2 : ph > -0.4 ? 1 : 0];
+        if (f !== fill) ctx.fillStyle = fill = f;
         ctx.fillRect(fl(((s.x * w + nx0) % w + w) % w), fl(((s.y * h + ny0) % h + h) % h), s.r, s.r);
       }
 
@@ -1021,10 +1050,11 @@ const SpaceBG = (() => {
 
       /* the near twinklers: THREE brightness steps, snapped — a pixel star does not fade */
       const nx0 = parX(cam, D.near) + t * S.near * dx, ny0 = parY(cam, D.near) + t * S.near * dy;
+      let fill = null;
       for (const s of st.near) {
         const ph = Math.sin(now / s.rate + s.ph);
-        const lv = ph > 0.45 ? 0.85 : ph > -0.4 ? 0.5 : 0.22;
-        ctx.fillStyle = rgba(s.c, lv);
+        const f = twinkleStyles(s, 0.22, 0.5, 0.85)[ph > 0.45 ? 2 : ph > -0.4 ? 1 : 0];
+        if (f !== fill) ctx.fillStyle = fill = f;
         ctx.fillRect(fl(((s.x * w + nx0) % w + w) % w), fl(((s.y * h + ny0) % h + h) % h), s.r, s.r);
       }
 
@@ -1270,10 +1300,11 @@ const SpaceBG = (() => {
         ctx.fillStyle = rgba(P.HOT, 0.9); ctx.fillRect(x, y, 1, 1);
       }
       const nx0 = parX(cam, D.near) + t * S.near * dx, ny0 = parY(cam, D.near) + t * S.near * dy;
+      let fill = null;
       for (const s of st.near) {
         const ph = Math.sin(now / s.rate + s.ph);
-        const lv = ph > 0.45 ? 0.9 : ph > -0.4 ? 0.55 : 0.25;
-        ctx.fillStyle = rgba(s.c, lv);
+        const f = twinkleStyles(s, 0.25, 0.55, 0.9)[ph > 0.45 ? 2 : ph > -0.4 ? 1 : 0];
+        if (f !== fill) ctx.fillStyle = fill = f;
         ctx.fillRect(Math.floor(((s.x * w + nx0) % w + w) % w), Math.floor(((s.y * h + ny0) % h + h) % h), s.r, s.r);
       }
 

@@ -87,7 +87,9 @@
     if (FRAMING.test(c)) return true;
     return false;
   }
-  const clip = (s, n) => { s = String(s == null ? '' : s).trim(); return s.length > n ? s.slice(0, n) : s; };
+  // a cap counts UTF-16 units (bounded storage) but never ends on half an emoji: a lone high surrogate renders as a
+  // broken glyph and was written into the goal store and the station's journey (qa/bugs/d1d77332 sibling, 2026-10-21)
+  const clip = (s, n) => { s = String(s == null ? '' : s).trim(); return (s.length > n ? s.slice(0, n) : s).replace(/[\uD800-\uDBFF]$/, ''); };
 
   /* THE DECOMPOSITION DIRECTIVE — the self-assigned task the agent runs to break a goal into a path. The agent
      already carries the COMMANDER dossier block in its system prompt, so this tells it to USE what it knows, not

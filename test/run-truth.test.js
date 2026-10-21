@@ -54,6 +54,9 @@ const wld = F('frontend/app/world.js');
 {
   A.ok(/setInterval\(\(\) => \{ if \(!bridgePaused\) fetchSnapshot\(\); \}, 30000\)/.test(wld),
     'world: the authoritative snapshot is polled every 30s (paused bridge stays silent)');
+  // idle CPU piece 3 (2026-10-20): in the app the same poll runs through PollGate (30 s on screen and away, a catch-up on return)
+  A.ok(/PollGate\.every\(\(\) => \{ if \(!bridgePaused\) fetchSnapshot\(\); \}, \{ ms: 30000, immediate: false \}\)/.test(wld),
+    'world: through PollGate the snapshot poll keeps its 30s cadence and its paused-bridge silence');
 }
 
 /* ---------- 4 · world: an orphan (snapshot-restored) run drives the body — no truthful-label-over-idle-sprite ---------- */

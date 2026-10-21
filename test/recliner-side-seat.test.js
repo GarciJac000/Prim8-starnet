@@ -132,7 +132,8 @@ const lp = src.slice(src.indexOf('function loungePair('), src.indexOf('function 
 A.ok(/const side = sideSeat\(couch\);\s*\n\s*if \(side && dirToward\(cx, cy, best\.tv\.cx, best\.tv\.cy\) !== side\.face\) continue;/.test(lp),
   'a profile seat is only a TV lounge when the screen is on the side it faces (never light a TV a body has its back to)');
 
-const draw = src.slice(src.indexOf('const sitter = (agent && agent.seated'), src.indexOf('// the COVERS, after the body'));
+const draw = src.slice(src.indexOf('const sitter = occupants.sitter.get(p.id);'), src.indexOf('// the COVERS, after the body'));
+A.ok(draw.length > 0 && draw.length < 8000, 'the y-sort pass slice starts at the sitter lookup (scene-index.test.js locks its semantics)');
 A.ok(/const sitterSide = sitter \? sideSeat\(p\) : null;/.test(draw), 'the y-sort pass knows whether the prop under the sitter is a profile seat');
 A.ok(/sitter\.seatPy \+ \(sitterUse && sitterUse\.kind === 'couch' && !remasteredCouch\(p\) && !sitterSide \? 1 : -1\)/.test(draw),
   'a profile seat sorts BEHIND its sitter (a stool\'s rule); classic couches still sort in front; remastered couch uses a foreground layer');

@@ -723,10 +723,10 @@ export function inspectClaimsAuthority(options = {}) {
 
 function render(selected, mode, summary) {
   const lines = [];
-  lines.push(selected.status + ' claims ' + mode + ' authority Â· ' + summary.claims + ' claims Â· ' + summary.releaseSurfaceFiles + ' locked surface files');
+  lines.push(selected.status + ' claims ' + mode + ' authority · ' + summary.claims + ' claims · ' + summary.releaseSurfaceFiles + ' locked surface files');
   const limit = 12;
   for (const reason of selected.reasons.slice(0, limit)) lines.push('  - ' + reason);
-  if (selected.reasons.length > limit) lines.push('  - â€¦ +' + (selected.reasons.length - limit) + ' more');
+  if (selected.reasons.length > limit) lines.push('  - … +' + (selected.reasons.length - limit) + ' more');
   return lines.join('\n');
 }
 

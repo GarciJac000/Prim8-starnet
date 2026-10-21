@@ -141,27 +141,53 @@
       .sort((a, b) => (parseInt(/(\d+)\.xml$/.exec(a)[1], 10) - parseInt(/(\d+)\.xml$/.exec(b)[1], 10)));
     if (!sheets.length) throw new Error('not an Excel workbook (no xl/worksheets/sheet*.xml)');
     const out = [];
+    // `open` is the cell's own start tag: the type lives THERE. Read from the whole cell, a formula's
+    // <f t="shared"> counted as the cell type.
+    function cellValue(c, open) {
+      const type = (/\st="([^"]*)"/.exec(open) || [])[1] || 'n';
+      if (type === 'inlineStr') {
+        const runs = c.match(/<t\b[^>]*>([\s\S]*?)<\/t>/g) || [];
+        return runs.map(t => unescapeXml(t.replace(/^<t\b[^>]*>/, '').replace(/<\/t>$/, ''))).join('');
+      }
+      const v = /<v>([\s\S]*?)<\/v>/.exec(c);
+      if (!v) return '';
+      if (type === 's') { const i = parseInt(v[1], 10); return (i >= 0 && i < shared.length) ? shared[i] : ''; }
+      return unescapeXml(v[1]);   // numbers, dates-as-serials, booleans, cached formula results
+    }
+    // "C2" / "$AB$7" -> 0-based column index; -1 when there is no usable ref
+    function colIndex(ref) {
+      const m = /^\$?([A-Za-z]{1,3})\$?\d*$/.exec(String(ref || ''));
+      if (!m) return -1;
+      let n = 0;
+      for (const ch of m[1].toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+      return n - 1;
+    }
     sheets.forEach((sheetName, si) => {
       const xml = readText(buf, entries, sheetName, inflateRaw) || '';
-      const rows = xml.match(/<row\b[\s\S]*?<\/row>|<row\b[^>]*\/>/g) || [];
+      // self-closing FIRST: tried second, an empty <row/> or <c .../> matched up to the NEXT element's close tag
+      const rows = xml.match(/<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g) || [];
       const lines = [];
+      let colsCut = false;
       for (const row of rows.slice(0, MAX_SHEET_ROWS)) {
-        const cells = (row.match(/<c\b[\s\S]*?<\/c>|<c\b[^>]*\/>/g) || []).slice(0, MAX_ROW_CELLS).map(c => {
-          const type = (/\bt="([^"]*)"/.exec(c) || [])[1] || 'n';
-          if (type === 'inlineStr') {
-            const runs = c.match(/<t\b[^>]*>([\s\S]*?)<\/t>/g) || [];
-            return runs.map(t => unescapeXml(t.replace(/^<t\b[^>]*>/, '').replace(/<\/t>$/, ''))).join('');
-          }
-          const v = /<v>([\s\S]*?)<\/v>/.exec(c);
-          if (!v) return '';
-          if (type === 's') { const i = parseInt(v[1], 10); return (i >= 0 && i < shared.length) ? shared[i] : ''; }
-          return unescapeXml(v[1]);   // numbers, dates-as-serials, booleans, cached formula results
-        });
+        /* SPARSE ROWS (2026-10-20). Excel omits blank cells, so a row is often A2, D2. Cells were placed by match
+           order, and 900 in D2 landed under column B: every sheet with a blank cell read with numbers under the
+           wrong header. Each cell now goes to the column its r="..." names; a missing or out-of-order ref falls
+           back to the next column (the historic order). */
+        const cells = [];
+        for (const c of (row.match(/<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g) || [])) {
+          const open = /^<c\b[^>]*>/.exec(c)[0];
+          let col = colIndex((/\sr="([^"]*)"/.exec(open) || [])[1]);
+          if (col < cells.length) col = cells.length;
+          if (col >= MAX_ROW_CELLS) { colsCut = true; break; }
+          while (cells.length < col) cells.push('');
+          cells.push(cellValue(c, open));
+        }
         // A row that is entirely empty carries nothing a reader would see.
         if (cells.some(c => c !== '')) lines.push(cells.join('\t'));
       }
       const label = names[si] || ('sheet' + (si + 1));
-      out.push('### ' + label + (rows.length > MAX_SHEET_ROWS ? ' (first ' + MAX_SHEET_ROWS + ' of ' + rows.length + ' rows)' : '') + '\n' + lines.join('\n'));
+      out.push('### ' + label + (rows.length > MAX_SHEET_ROWS ? ' (first ' + MAX_SHEET_ROWS + ' of ' + rows.length + ' rows)' : '')
+        + (colsCut ? ' (columns past ' + MAX_ROW_CELLS + ' not shown)' : '') + '\n' + lines.join('\n'));
     });
     return out.join('\n\n').trim();
   }

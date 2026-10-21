@@ -179,7 +179,7 @@ const QuestLedgerStore = (() => {
   }
   function surfaceAttestBeat(q) {
     const ev = String((q.attest && q.attest.evidence) || '').replace(/\s+/g, ' ').trim();
-    const evShort = ev.length > 120 ? ev.slice(0, 117) + '…' : ev;
+    const evShort = ev.length > 120 ? ev.slice(0, 117).replace(/[\uD800-\uDBFF]$/, '') + '…' : ev;   // never half an emoji
     const title = String(q.title || q.id).toUpperCase();
     // the moment is claimed when a run is live OR any ask beat / unanswered task question holds the COMMS slot
     // (Chat.beatBusy) — a confirm nudge stacked over a pending clarifying question wiped its answer chips

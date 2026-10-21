@@ -1095,19 +1095,22 @@ const VoiceLive = (() => {
      untouched, because the dictation engine still owns its own capture. */
   async function openMeterTap(seq) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-    let acquired = null;
+    let acquired = null, asked = null;
     try {
       // A DISMISSED WebView2 permission prompt never settles getUserMedia (voice.js learned this as a
       // wedged mic button) — race it so an unanswered prompt degrades to a flat half, not a hung tap.
+      asked = navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+      });
       acquired = await Promise.race([
-        navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
-        }),
+        asked,
         new Promise((_, reject) => setTimeout(() => {
           const err = new Error('meter tap prompt timed out'); err.name = 'TimeoutError'; reject(err);
         }, 12000))
       ]);
     } catch (error) {
+      // A grant that lands AFTER the timeout still opens the microphone, and nothing would ever stop that stream.
+      if (asked) asked.then(late => { try { late.getTracks().forEach(track => track.stop()); } catch (_) {} }, () => {});
       console.warn('[voice-live] level meter tap unavailable:', (error && error.name) || error);
       return;
     }

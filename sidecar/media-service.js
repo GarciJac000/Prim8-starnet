@@ -169,6 +169,7 @@ function makeMediaService(options) {
     localVoice, now, monotonicNow: typeof o.monotonicNow === 'function' ? o.monotonicNow : now, uuid: randomUUID
   });
   const voiceCacheDir = path.join(o.workspaces, 'voice-cache');
+  const keyedInFlight = new Map();   // voice-cache key -> the one keyed synthesis running for that clip
   const sttModels = String(env('STT_MODELS') || 'google/gemini-3.1-flash-lite-preview,google/gemini-2.5-flash')
     .split(',').map(s => s.trim()).filter(Boolean);
   const sttGroqBase = String(env('GROQ_BASE') || '').trim();
@@ -442,12 +443,10 @@ function makeMediaService(options) {
     };
     let body;
     try { body = JSON.parse(await readBody(req, 1 << 16)); } catch (_) { return fallback('bad json'); }
-    let text = String((body && body.text) || '').replace(/\s+/g, ' ').trim();
-    if (text.length > 1200) {
-      const head = text.slice(0, 1200);
-      const sentence = head.match(/[\s\S]*[.!?]["')\]]?(?=\s|$)/);
-      text = (sentence && sentence[0].length > 600 ? sentence[0] : head).trim();
-    }
+    const text = String((body && body.text) || '').replace(/\s+/g, ' ').trim();
+    // Over the cap is REFUSED, never truncated: speaking only the first ~1200 characters and answering 200 audio
+    // told the caller the whole script was said (voice_generate refuses the same way; the desk splits at 1000).
+    if (text.length > 1200) return fallback('text is ' + text.length + ' characters; the per-request cap is 1200 — split it into sentences');
     const model = String((body && body.model) || TTS_DEFAULT_MODEL).trim();
     const voice = String((body && body.voice) || 'Umbriel').trim();
     const style = String((body && body.style) || '').replace(/\s+/g, ' ').trim().slice(0, 500);
@@ -495,7 +494,9 @@ function makeMediaService(options) {
         const buf = await localVoice.synthesize(text, { voice: localVoiceId, speed: localSpeed });
         try { const tmp = cachePath + '.' + randomUUID() + '.tmp'; await fsp.writeFile(tmp, buf); await fsp.rename(tmp, cachePath); } catch (_) {}
         res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Voice-Provider': 'local-kokoro', 'X-Voice-Cache': 'miss' });
-        return res.end(buf);
+        // A Kokoro miss writes a clip to the same cache every other leg sweeps; skipping the sweep here let the
+        // offline voice grow the folder without bound (~120 MB a day at 500 sentences).
+        res.end(buf); sweepMaybe(); return;
       } catch (error) {
         const why = 'local voice engine: ' + ((error && error.message) || error);
         if (localEngine === 'local-kokoro') return fallback(why);
@@ -531,12 +532,26 @@ function makeMediaService(options) {
           return res.end(cached);
         } catch (_) {}
       }
-      const keyed = await ttsSynthKeyed(ttsProvider, { model, voice, input, text, style, key: ttsKey });
+      // ONE paid synthesis per clip: the desk abandons a request at 30s and retries while this call may run to 60s,
+      // so a retry bought the same sentence a second time. A request whose clip is already in flight joins that call.
+      let pending = keyedInFlight.get(cacheKey);
+      if (!pending) {
+        pending = ttsSynthKeyed(ttsProvider, { model, voice, input, text, style, key: ttsKey })
+          .catch(error => ({ ok: false, reason: (error && error.message) || String(error) }))
+          .then(async result => {
+            if (result.ok) {
+              try {
+                const tmp = path.join(voiceCacheDir, cacheKey + '.' + result.ext + '.' + randomUUID() + '.tmp');
+                await fsp.writeFile(tmp, result.buf); await fsp.rename(tmp, path.join(voiceCacheDir, cacheKey + '.' + result.ext));
+              } catch (_) {}
+            }
+            return result;
+          })
+          .finally(() => keyedInFlight.delete(cacheKey));
+        keyedInFlight.set(cacheKey, pending);
+      }
+      const keyed = await pending;
       if (keyed.ok) {
-        try {
-          const tmp = path.join(voiceCacheDir, cacheKey + '.' + keyed.ext + '.' + randomUUID() + '.tmp');
-          await fsp.writeFile(tmp, keyed.buf); await fsp.rename(tmp, path.join(voiceCacheDir, cacheKey + '.' + keyed.ext));
-        } catch (_) {}
         res.writeHead(200, { 'Content-Type': keyed.outType, 'Cache-Control': 'no-store', 'X-Voice-Cache': 'miss' });
         res.end(keyed.buf); sweepMaybe(); return;
       }

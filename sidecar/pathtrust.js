@@ -129,8 +129,10 @@
       // UNC / network path — off-host, never blessable. Check the RAW string (P.resolve can mangle it).
       if (/^[\\/]{2}/.test(rawAbs)) return 'network paths (UNC) are not permitted: ' + rawAbs;
       const probe = resolvedAbs || rawAbs;
-      if (/(^|[\\/])\.env(\.|$)/i.test(probe)) return 'reading ' + probe + ' is blocked by the protected-file floor (.env)';
-      if (/(^|[\\/])\.git([\\/]|$)/i.test(probe)) return 'reading ' + probe + ' is blocked by the protected-file floor (.git)';
+      // `:` too: NTFS stream syntax (`.env::$DATA`, `.git::$INDEX_ALLOCATION\hooks`) opens the protected file itself, and the
+      // realpath re-proof below only canonicalizes a target that already exists
+      if (/(^|[\\/])\.env(\.|:|$)/i.test(probe)) return 'reading ' + probe + ' is blocked by the protected-file floor (.env)';
+      if (/(^|[\\/])\.git([\\/:]|$)/i.test(probe)) return 'reading ' + probe + ' is blocked by the protected-file floor (.git)';
       const cred = credentialFloor(probe);
       if (cred) return 'reading ' + probe + ' is blocked by the credential floor (' + cred + ') — only Full Power reaches it';
       return null;
@@ -222,6 +224,10 @@
         if (!R) continue;
         if (pathInside(real, R)) { touch(R, norm, { user: userTouch }); return { base: R, abs: norm }; }
       }
+      // 1b. …or under a root the Commander approved "for this session" earlier in THIS run (o.sessionRoots: a Set the
+      // caller owns per run, so it dies with the run and is never a standing grant)
+      const sessionRoots = (o.sessionRoots && typeof o.sessionRoots.add === 'function') ? o.sessionRoots : null;
+      if (sessionRoots) for (const R of sessionRoots) if (R && pathInside(real, R)) return { base: R, abs: norm };
 
       // 2. not blessed. In ASK mode only a watched, prompt-wired run may approve a new root. Full Access is
       // already the operator's authority for every non-hardline path, so it must never manufacture a prompt.
@@ -270,6 +276,10 @@
       }
       // "once": allow THIS access only, without persisting a root — the next access asks again, as promised.
       if (decision === 'once') return { base: proposedReal, abs: norm };
+      /* "session" (ACP's "Allow for the rest of this session", a paired phone's "for this session") is a legal consent
+         word: it used to fall through to the deny below while the answering surface was told it was applied. It approves
+         this access and the rest of THIS run under the same root — never a standing grant. No session store wired = once. */
+      if (decision === 'session') { if (sessionRoots) sessionRoots.add(proposedReal); return { base: proposedReal, abs: norm }; }
       throw new Error('access to ' + norm + ' was denied');
     }
 

@@ -82,6 +82,7 @@
   'use strict';
 
   const MIN = 60000, HOUR = 3600000, DAY = 86400000;
+  const REWIND_SLACK_MS = 5 * MIN;                 // lastRunAt this far past now = the wall clock went backwards
   const CRON_SEARCH_LIMIT_MS = 5 * 366 * DAY;       // enough to cover leap-day schedules
   const UNIT_MS = { s: 1000, m: MIN, h: HOUR, d: DAY };
 
@@ -345,6 +346,22 @@
     // when a fall-back repeats an hour, suppress matches whose local minute-of-day is <= this watermark
     // on the day the repeat began, until the clock climbs past it (we've exited the doubled window).
     let repeatBand = -1, repeatDay = -1;
+    /* ANCHOR ALREADY INSIDE THE REPEAT (sweep/autonomy 2026-10-20): the band below is armed only when the scan
+       CROSSES the fall-back, so an advance computed from an anchor in the second pass (a late wake at 01:10 EST, a
+       transient retry landing there) re-matched the day's 01:30 and fired it twice. If the UTC offset dropped in
+       the last 2h (a fall-back; the repeat lasts <= 1h), find the transition minute and pre-arm the same band. */
+    if (zone !== 'UTC') {
+      const offOf = ms => { const f = localFieldsOf(ms, zone); return Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute) - Math.floor(ms / MIN) * MIN; };
+      let lo = t - MIN - 2 * HOUR, hi = t - MIN;
+      const offLo = offOf(lo);
+      if (offOf(hi) < offLo) {
+        while (hi - lo > MIN) { const mid = lo + Math.floor((hi - lo) / 2 / MIN) * MIN; if (offOf(mid) === offLo) lo = mid; else hi = mid; }
+        const before = localFieldsOf(hi - MIN, zone), after = localFieldsOf(hi, zone);
+        if (before.day === after.day && before.month === after.month && prev.day === after.day && prev.minOfDay <= before.minOfDay) {
+          repeatBand = before.minOfDay; repeatDay = after.year * 10000 + after.month * 100 + after.day;
+        }
+      }
+    }
     for (; t <= stop; t += MIN) {
       const lf = localFieldsOf(t, zone);
       if (zone !== 'UTC') {
@@ -772,6 +789,17 @@
       }
 
       const dueAt = dueAtOf(job, now, defaultTz);
+      /* CLOCK REWOUND (sweep/autonomy 2026-10-20): a recurring job that last ran in the FUTURE was advanced by a wall
+         clock that jumped ahead and was then corrected back — its nextRunAt is a period past a time that never
+         happened, and waiting for it silenced the routine for the whole jump. Re-anchor from the real now (no fire). */
+      if (isRecurring(sched) && job.lastRunAt && dueAt != null && dueAt > now) {
+        const lr = Date.parse(job.lastRunAt);
+        if (isFinite(lr) && lr > now + REWIND_SLACK_MS) {
+          const re = sched.kind === 'interval' ? now + periodMs(sched) : nextRecurringAt(sched, now, defaultTz);
+          if (re != null && isFinite(re) && re < dueAt) next.push({ jobId: job.id, nextAt: re, prevAt: dueAt });
+          continue;
+        }
+      }
       if (dueAt == null || isNaN(dueAt) || dueAt > now) continue;   // not due yet (or no computable fire)
 
       if (sched.kind === 'once') {

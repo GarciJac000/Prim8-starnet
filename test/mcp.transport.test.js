@@ -359,6 +359,74 @@ const rpc = (id, result) => JSON.stringify({ jsonrpc: '2.0', id, result });
     A.eq(got[1].result.ok, true, 'the reply split mid-JSON across reads reassembled');
   }
 
+  // INCREMENTAL EVENT SCAN. drainComplete ran /\r?\n\r?\n/ over the whole open buffer from index 0 on every
+  // chunk, so a big event cost quadratic CPU: a 16 MB reply in 16 KB reads (a TLS record) took seconds. Only the
+  // new chunk is searched now; the same blank line ends the same event.
+  {
+    const big = 'data: ' + rpc(21, { content: [{ type: 'text', text: 'q'.repeat(16 * 1024 * 1024) }] }) + '\n\n';
+    const chunks = []; for (let i = 0; i < big.length; i += 16384) chunks.push(big.slice(i, i + 16384));
+    const stream = streamBody(chunks, { hang: true });
+    const tp = makeHttpTransport({ url: 'https://mcp.big.example/mcp', fetchImpl: sseFetch(stream), timeoutMs: 60000 });
+    const got = []; tp.onMessage(m => got.push(m));
+    const t0 = Date.now();
+    await tp.send({ jsonrpc: '2.0', id: 21, method: 'tools/call', params: {} });
+    const ms = Date.now() - t0;
+    A.eq(got.length === 1 && got[0].result.content[0].text.length, 16 * 1024 * 1024, 'a 16 MB SSE event in 16 KB reads arrives whole');
+    A.ok(ms < 1500, 'a 16 MB SSE event parses in linear time (' + ms + ' ms; the rescanning parser took ~7 s)');
+  }
+  // the same events end in the same places: CRLF blank lines split across reads, a multi-line data field, a
+  // keepalive comment, and an unterminated final event flushed at stream end.
+  {
+    const stream = streamBody([
+      ': keepalive\r\n\r', '\n',
+      'data: {"jsonrpc":"2.0",\r\ndata: "method":"notifications/a"}\r', '\n\r\n',
+      'data: {"jsonrpc":"2.0","method":"notifications/b"}\n', '\n',
+      'event: message\ndata: ' + rpc(22, { last: true })
+    ]);
+    const tp = makeHttpTransport({ url: 'https://mcp.big.example/mcp', fetchImpl: sseFetch(stream), timeoutMs: 5000 });
+    const got = []; tp.onMessage(m => got.push(m));
+    await tp.send({ jsonrpc: '2.0', id: 22, method: 'tools/call', params: {} });
+    A.eq(got.map(m => m.method || (m.result && m.result.last && 'reply')), ['notifications/a', 'notifications/b', 'reply'], 'CRLF and LF framing split across reads deliver the same events in order');
+    A.ok(!got.some(m => m.error), 'an unterminated final event still answers the request');
+  }
+
+  // THE OPEN EVENT IS CAPPED. An SSE event that never ends (no blank line) used to be buffered without limit until
+  // the request timeout: at full read speed that filled the heap and crashed the sidecar out of memory well inside
+  // it. Past the cap the stream is cancelled, the call fails with the reason, and the connection is reported dead —
+  // for one endless line AND for an endless run of short data: lines (the open event's finished lines count too).
+  A.eq(T.MAX_EVENT_CHARS, 64 * 1024 * 1024, 'the default open-event cap is 64 MiB, the stdio line cap');
+  for (const shape of ['one endless line', 'endless data: lines']) {
+    const piece = shape === 'one endless line' ? 'x'.repeat(65536) : 'data: ' + 'y'.repeat(1018) + '\n';
+    const enc = new TextEncoder().encode(piece.repeat(shape === 'one endless line' ? 1 : 64));
+    let fed = 0, cancelled = false;
+    // endless for this transport's purposes: it ends at 8 MiB only so a regression fails here instead of filling the heap
+    const body = { getReader: () => ({ read: async () => (cancelled || fed >= 8 * 1024 * 1024 ? { done: true } : (fed += enc.length, { done: false, value: enc })), cancel: () => { cancelled = true; } }) };
+    const errs = [];
+    const tp = makeHttpTransport({ url: 'https://mcp.flood.example/mcp', fetchImpl: sseFetch({ body }), timeoutMs: 30000, maxEventChars: 1024 * 1024, onError: e => errs.push(e.message) });
+    const got = []; tp.onMessage(m => got.push(m));
+    await tp.send({ jsonrpc: '2.0', id: 31, method: 'tools/call', params: {} });
+    A.ok(cancelled && fed <= 1024 * 1024 + 2 * enc.length, shape + ': the stream is cancelled at the cap (' + fed + ' bytes read; it buffered all of it, an endless one until the heap ran out)');
+    A.ok(got.length === 1 && got[0].id === 31 && /^connector kept an SSE event open past the 1 MiB limit \(each line or chunk held counts its characters plus 48\): stream closed$/.test(got[0].error && got[0].error.message), shape + ': the call fails with the reason: ' + (got[0] && got[0].error && got[0].error.message));
+    A.eq(errs, [got[0].error.message], shape + ': the connection is reported dead once, with the same reason');
+  }
+  // SHORT LINES COUNT AS MEMORY (review 2026-10-21). Counting characters alone, an endless event of 2-character
+  // lines kept one string per line: 32M of them under the 64 MiB cap, ~1.7 GB for one call (a few calls at once
+  // ran the sidecar out of memory). Every kept line now costs its fixed overhead too, so the cap bounds what it holds.
+  {
+    const enc = new TextEncoder().encode('ab\n'.repeat(1024));
+    let fed = 0, cancelled = false;
+    const body = { getReader: () => ({ read: async () => (cancelled || fed >= 8 * 1024 * 1024 ? { done: true } : (fed += enc.length, { done: false, value: enc })), cancel: () => { cancelled = true; } }) };
+    const errs = [];
+    const tp = makeHttpTransport({ url: 'https://mcp.flood.example/mcp', fetchImpl: sseFetch({ body }), timeoutMs: 30000, maxEventChars: 1024 * 1024, onError: e => errs.push(e.message) });
+    const got = []; tp.onMessage(m => got.push(m));
+    await tp.send({ jsonrpc: '2.0', id: 32, method: 'tools/call', params: {} });
+    const held = Math.round(fed / 3);   // lines read before the cut, every one of them kept
+    A.ok(cancelled && held <= (1024 * 1024) / 32 + 1024, 'an endless run of 2-character lines is cut off by what it holds: ' + held + ' lines kept under a 1 MiB cap (counting characters alone it kept 524288, ~27x the cap in memory)');
+    A.ok(!/over the 1 MiB limit/.test(got[0] && got[0].error && got[0].error.message), 'short lines: the reason does not claim the event itself passed 1 MiB (' + Math.round(fed / 1024) + ' KiB were read)');
+    A.ok(got.length === 1 && got[0].id === 32 && /^connector kept an SSE event open past the 1 MiB limit \(each line or chunk held counts its characters plus 48\): stream closed$/.test(got[0].error && got[0].error.message), 'short lines: the call fails with the reason: ' + (got[0] && got[0].error && got[0].error.message));
+    A.eq(errs, [got[0].error.message], 'short lines: the connection is reported dead once, with the same reason');
+  }
+
   // a stream that ENDS without answering the request synthesizes a prompt JSON-RPC error (no hang, no silence).
   {
     const stream = streamBody(['data: {"jsonrpc":"2.0","method":"notifications/x"}\n\n']);

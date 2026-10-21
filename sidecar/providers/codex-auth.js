@@ -194,7 +194,9 @@
     if (resp.status === 429) {
       // Quota exhausted on the token endpoint — the refresh token is still valid, so re-auth would not help.
       // Classify distinctly so the UI says "retry later" instead of a misleading "sign in again".
-      throw authError('Codex provider quota exhausted (429). Credentials are still valid; retry after the limit resets.', 'codex_rate_limited', false);
+      // A 429 HERE is the auth service throttling refreshes — quota lives at the inference API — so no 'quota' word: the
+      // browser read it as an empty wallet ("out of credit") on a subscription that has none (sweep/providers 2026-10-20).
+      throw authError('The OpenAI sign-in service is rate-limiting token refresh (HTTP 429). Your credentials are still valid; wait a minute and try again.', 'codex_rate_limited', false);
     }
     if (resp.status !== 200) {
       let code = 'codex_refresh_failed', message = 'Codex token refresh failed with status ' + resp.status + '.', relogin = false;

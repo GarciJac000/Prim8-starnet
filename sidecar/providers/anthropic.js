@@ -18,7 +18,6 @@
   const ANTHROPIC_VERSION = '2023-06-01';
   const RETRY_DELAYS = [400, 1200];
   const REWARM_MIN_MS = 5 * 60 * 1000;
-  const DEFAULT_CONTEXT = 200000;
   const FALLBACK_MAX_TOKENS = 32000;   // Anthropic requires max_tokens; when the model's real ceiling is unknown, cap here
                                        // (well above the old 4096 so long deliverables aren't silently truncated) — decided 2026-07-04.
   // resolve the env override once, tolerant of a garbage value (a typo must never wedge generation).
@@ -403,7 +402,9 @@
     return {
       id,
       name: m.display_name || m.name || id,
-      context_length: Number(m.context_length || m.input_token_limit || DEFAULT_CONTEXT) || DEFAULT_CONTEXT,
+      // The Models API reports the window as max_input_tokens (1M on every Claude 4.6+; no context_window field). A row
+      // that reports none stays unknown (0): an invented 200000 hid the real 1M window from the run on every Claude.
+      context_length: Number(m.context_length || m.input_token_limit || m.max_input_tokens || 0) || 0,
       max_completion_tokens: m.max_output_tokens || m.output_token_limit || null,
       // /v1/models reports no pricing, so this comes from the dated list-rate table (prices.js) rather than
       // the wire. Same {prompt, completion} per-token shape every other adapter publishes, so listModels()
@@ -425,7 +426,8 @@
     if (!doFetch) throw new Error('anthropic provider requires fetch (Node 18+) or opts.fetch');
     const key = opts.key || '';
     const baseUrl = cleanBaseUrl(opts.baseUrl);
-    const defaultContext = Number(opts.defaultContext || DEFAULT_CONTEXT) || DEFAULT_CONTEXT;
+    // an explicit caller default only: an unknown window is 0, so a run's setup waits briefly for the real one
+    const defaultContext = Number(opts.defaultContext || 0) || 0;
     // The composition root already resolves this (registry profile `defaultReasoningEffort: 'medium'` for
     // anthropic) and has been handing it to this adapter since the provider seam existed — the adapter simply
     // dropped it on the floor. 'medium' is the fallback for a caller that passes nothing, matching the profile.
@@ -441,8 +443,23 @@
     // and the error of the last /models request that never got an answer (DNS, refused connection, proxy): the key
     // check names THAT cause (#62 wording) instead of blaming the key. null once anything answered.
     let catalogError = null;
+    // SHARED CATALOG (providers/catalog-cache.js, attached by the factory): the list this key last loaded from this
+    // endpoint (any instance) answers this one synchronously, so a run is sized from max_input_tokens instead of a
+    // guess, and a fresh adapter no longer re-fetches /models. The key check's refusal status stays per instance: only
+    // this instance's own live read sets it. Absent = as before.
+    const shared = (opts.catalogCache && typeof opts.catalogCache.bind === 'function')
+      ? opts.catalogCache.bind({ scope: opts.catalogScope, endpoint: baseUrl, fetchList: sharedList }) : null;
+    let adoptedVersion = 0;
+    function adoptShared() {
+      if (!shared || !shared.shared) return;
+      const hit = shared.peek();
+      if (!hit || hit.version === adoptedVersion) return;
+      adoptedVersion = hit.version;
+      catalog = hit.models.slice();
+    }
 
     function maybeRewarmCatalog() {
+      if (shared && shared.shared) { adoptShared(); shared.ensure(); return; }
       if (catalog && catalog.length) return;
       if (catalogPromise) return;
       if (clock) {
@@ -838,9 +855,15 @@
           guard.disarm();
         }
         if (res.ok && res.body) return res;
-        let detail = res.statusText || '', errBody = null;
-        try { const j = await res.json(); errBody = j; detail = (j && j.error && (j.error.message || j.error.type)) || JSON.stringify(j); }
-        catch (_) { try { detail = (await res.text()).slice(0, 300); } catch (_) {} }
+        // The body is read ONCE, as text, through the idle watchdog and the caller's Stop (provider.runtime.readErrorBody):
+        // a stalled error body ignored Stop for up to 300 s. Only a JSON error's own words are quoted. A non-JSON page (a
+        // proxy's 503 "... reset reason: connection reset") keeps the status text: the browser's error copy reads
+        // transport and policy words before the status (friendlyerror kindFromRaw), so its prose would be told as a
+        // dropped connection or a content block the harness cannot prove.
+        const eb = await provider.runtime.readErrorBody(res, { signal, url: baseUrl, tag: 'providers.anthropic' });
+        const errBody = eb.parsed ? eb.data : null;
+        let detail = eb.parsed ? ((errBody && errBody.error && (errBody.error.message || errBody.error.type)) || JSON.stringify(errBody)) : (res.statusText || '');
+        if (eb.stalled) detail += ' (error body did not finish)';
         const err = new Error('anthropic http ' + res.status + ' - ' + detail);
         err.status = res.status;
         err.headers = res.headers;
@@ -865,26 +888,60 @@
       if (catalog && catalog.length) return catalog;
       if (!catalogPromise) {
         catalogPromise = (async () => {
-          let res = null;
-          try {
-            catalogStatus = 0; catalogError = null;
-            res = await doFetch(baseUrl + '/models', { headers: headerBag(key, 'application/json') });
-            if (!res.ok) { catalogStatus = Number(res.status) || 0; return []; }
-            const j = await res.json();
-            const raw = Array.isArray(j.data) ? j.data : (Array.isArray(j.models) ? j.models : []);
-            return raw.map(normalizeModel).filter(Boolean);
-          } catch (e) { if (!res) catalogError = e; return []; }
+          const list = await fetchList(true);
+          const version = shared ? shared.share(list) : 0;   // a live list: kept for this key, its windows noted
+          if (version) adoptedVersion = version;
+          return list;
         })();
       }
       catalog = await catalogPromise;
       if (!catalog.length) catalogPromise = null;
       return catalog;
     }
+    // One live /models read. `own` = this instance's read, which keeps the refusal status / network error the key check
+    // reports; the cache's background read leaves them alone. [] on any failure.
+    async function fetchList(own) {
+      let res = null;
+      try {
+        if (own) { catalogStatus = 0; catalogError = null; }
+        res = await doFetch(baseUrl + '/models', { headers: headerBag(key, 'application/json') });
+        if (!res.ok) { if (own) catalogStatus = Number(res.status) || 0; return []; }
+        const j = await res.json();
+        const raw = Array.isArray(j.data) ? j.data : (Array.isArray(j.models) ? j.models : []);
+        return raw.map(normalizeModel).filter(Boolean);
+      } catch (e) { if (!res && own) catalogError = e; return []; }
+    }
+    function sharedList() { return fetchList(false); }   // the cache's background load
     async function listModels() { return (await loadCatalog()).map(m => Object.assign({}, m)); }
     function catalogHttpStatus() { return catalogStatus; }
     function catalogFetchError() { return catalogError; }
-    function findModel(id) { return catalog ? catalog.find(m => m.id === id) : null; }
-    function contextLimit(id) { const m = findModel(id); return (m && m.context_length) || defaultContext; }
+    function findModel(id) {
+      adoptShared();
+      const m = catalog ? catalog.find(x => x.id === id) : null;
+      // a warm list without this id (a model released after it loaded): one throttled refresh can find it
+      if (!m && id && shared && catalog && catalog.length) shared.ensure({ miss: true });
+      return m;
+    }
+    // Learn the window before a run is built (catalog-cache.js runWindow bounds the wait): this key's shared list, else
+    // ONE deduped load of it (none while the endpoint is in its failure back-off). Resolves to the catalog it has.
+    async function warmCatalog() {
+      adoptShared();
+      if (catalog && catalog.length) { maybeRewarmCatalog(); return catalog; }
+      if (shared && shared.shared) {
+        if (shared.inBackoff()) return catalog || [];
+        await shared.load();
+        adoptShared();
+        return catalog || [];
+      }
+      return loadCatalog();
+    }
+    // First known source wins, none invented: the catalog row, what this endpoint reported to any instance, an explicit
+    // default, 0 (unknown).
+    function contextLimit(id) {
+      const m = findModel(id);
+      if (m && m.context_length) return m.context_length;
+      return (shared && shared.windowFact(id)) || defaultContext;
+    }
     // Anthropic's API never reports a price, and returning null here left spentUsd at 0.00 for the whole run
     // — which silently disabled the per-run spend ceiling and the day/global pools (loop.js only stops when
     // spentUsd crosses the cap). Resolved off the dated list-rate table, independent of catalog warm state so
@@ -895,7 +952,7 @@
     // dock asks this before a catalog fetch has necessarily landed.
     function reasoningEfforts(id) { return effortsFor(id); }
 
-    return { stream, listModels, catalogHttpStatus, catalogFetchError, contextLimit, priceOf, supportsTools, reasoningEfforts };
+    return { stream, listModels, warmCatalog, catalogHttpStatus, catalogFetchError, contextLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
   return { makeAnthropicProvider, _internals: { messagesToAnthropic, toAnthropicTools, normalizeUsage, normalizeModel, cleanBaseUrl, headerBag } };

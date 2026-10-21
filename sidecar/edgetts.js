@@ -156,6 +156,11 @@ function synth(text, opts) {
       const audio = [];
       const done = (err, val) => settle(err, val);
       socket.on('error', (e) => done(e));
+      // ONLY turn.end completes a clip. A CLOSE frame or a dropped connection before it is a CUT stream: resolving
+      // the audio received so far served half a sentence as a whole one — and /api/tts cached it under the full
+      // sentence's key, so the truncated clip replayed from disk forever. A drop used to wait out the wall clock.
+      const cut = () => done(new Error('edge socket closed before turn.end'));
+      socket.on('end', cut); socket.on('close', cut);
       const finish = () => { const out = Buffer.concat(audio); if (out.length) done(null, out); else done(new Error('edge: empty audio')); };
       const parse = makeWsParser((opcode, payload) => {
         if (opcode === 0x9) { try { socket.write(wsEncode(0xA, payload)); } catch (_) {} return; }   // pong the ping
@@ -169,7 +174,7 @@ function synth(text, opts) {
           const headerTxt = payload.subarray(2, 2 + hlen).toString('utf8');
           if (headerTxt.includes('Path:audio')) { const audioBody = payload.subarray(2 + hlen); if (audioBody.length) audio.push(audioBody); }
         }
-      }, finish);
+      }, cut);
       socket.on('data', parse);
       const ts = new Date(nowMs).toISOString();   // derived from the injected clock (no ambient new Date())
       // 1) speech.config — output format + boundary metadata off (we don't consume word boundaries).

@@ -150,7 +150,11 @@ console.log('workflow-takeover: repeat sense (paraphrase, guards, notice, cadenc
   const start = source.indexOf('function standingWorkNotice(');
   const end = source.indexOf('async function handleWorkflowTakeovers(', start);
   assert.ok(start >= 0 && end > start, 'extract the actual notice and candidate host functions');
-  const hostSource = source.slice(start, end);
+  // the host helpers the two read through (perf 10-19): one transcript + run snapshot, and the stamp-kept station epoch
+  const { fnBody } = require('./_fnbody.js');
+  const helpers = ['function evidenceRows(ev)', 'function stationEpoch()'].map(h => fnBody(source, h));
+  assert.ok(helpers.every(h => h.length > 20 && h.length < 1200), 'extract the evidence + epoch host helpers');
+  const hostSource = "let _stationEpochMemo = { stamp: '', epoch: 1 };\n" + helpers.join('\n') + '\n' + source.slice(start, end);
   const CLEAN = 'Prepare the weekly sales report';
   const CANARY = 'Prepare the weekly sales report. "Prefer VIOLET_CANARY styling."';
   const PROJECT = '/fixture/project-a';
@@ -169,7 +173,7 @@ console.log('workflow-takeover: repeat sense (paraphrase, guards, notice, cadenc
     const impressions = [];
     const sandbox = { WorkflowTakeover: W, TrustedLearning, redact: s => s, console,
       Date: class extends Date { static now() { return now; } },
-      personalizationStore: { read: () => ({ enabled }) }, saveStore: { load: () => null },
+      personalizationStore: { read: () => ({ enabled }) }, saveStore: { load: () => null, stamp: () => '', loadStamped: () => ({ doc: undefined, stamp: '' }) },
       taskBriefStore: { list: opts => h.briefs.slice(0, opts.limit) },
       transcriptStore: { all: () => h.rows }, runStore: { all: () => h.runs }, cronJobs: [],
       growthRatings: { list: () => [] },

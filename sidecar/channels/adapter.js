@@ -316,9 +316,18 @@
       if (allowedUsers.size && !allowedUsers.has(String(m.userId == null ? '' : m.userId))) return 'drop';
       if (m.chatType === 'dm') return 'run';
       if (!chatAllowed(m.chatId)) return admissionCommand(m) ? 'admit' : 'drop';
+      // a command another bot is NAMED for is never ours, even in a room we answer in full: the hub's parse strips the
+      // @suffix, so with /mention off "/new@otherbot" wiped THIS bot's history and "/stop@otherbot" stopped our run (2026-10-20)
+      if (commandForAnotherBot(m)) return observeUnmentionedFor(m.chatId) ? 'observe' : 'drop';
       if (!requireMentionFor(m.chatId)) return 'run';
       if (addressesUs(m)) return 'run';
       return observeUnmentionedFor(m.chatId) ? 'observe' : 'drop';
+    }
+    function commandForAnotherBot(m) {
+      const hit = /^\/[A-Za-z0-9_-]+@([A-Za-z0-9_]+)(?:\s|$)/.exec(String(m.text == null ? '' : m.text).trim());
+      if (!hit) return false;
+      const me = botUsernameNow();
+      return !!me && hit[1].toLowerCase() !== me;   // our own name still unknown: cannot tell, keep the old behaviour
     }
     // DM-only first cut: a direct message is always admitted; a group/channel message only if whitelisted.
     function admitted(m) { return admission(m) === 'run'; }
@@ -469,21 +478,33 @@
     // the fetch hanging FAR past that (no bytes ever arrive). Race the poll against a hard wall-clock =
     // pollTimeoutSec*1000 + 15s slack so a stall aborts in seconds, not the ~5min default socket timeout. The
     // disconnect abort (ac.signal) still wins — we compose both so either fires; a deadline-fire is NOT a disconnect
-    // (we distinguish by ac.signal.aborted below) so it just backs off and re-polls. Degrades gracefully on old
-    // platforms without AbortSignal.any/timeout (then only ac.signal governs, as before).
+    // (we distinguish by ac.signal.aborted below) so it just backs off and re-polls.
+    // ONE SHORT-LIVED CONTROLLER PER POLL, released when the poll settles. `AbortSignal.any([ac.signal, timeout])`
+    // per poll leaked: the connection-lifetime ac.signal keeps every composite it ever fed reachable (~1.8 KB per
+    // poll retained after GC on Node 22.23 — ~225 MB/day for a ~1.25/s Discord/Slack poll, freed only on reconnect).
     const POLL_DEADLINE_MS = pollTimeoutSec * 1000 + 15000;
-    function pollSignal() {
-      if (typeof AbortSignal === 'undefined' || typeof AbortSignal.timeout !== 'function') return ac.signal;
-      const deadline = AbortSignal.timeout(POLL_DEADLINE_MS);
-      return (typeof AbortSignal.any === 'function') ? AbortSignal.any([ac.signal, deadline]) : deadline;
+    function pollScope() {
+      const parent = ac && ac.signal;
+      if (typeof AbortController === 'undefined' || !parent || typeof parent.addEventListener !== 'function') return { signal: parent, done: function () {} };
+      const pc = new AbortController();
+      const timer = setTimeout(function () {
+        // the same reason AbortSignal.timeout gave, so transports keep classifying a deadline the way they did
+        pc.abort(typeof DOMException === 'function' ? new DOMException('The operation was aborted due to timeout', 'TimeoutError') : undefined);
+      }, POLL_DEADLINE_MS);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+      const forward = function () { pc.abort(parent.reason); };
+      if (parent.aborted) forward(); else parent.addEventListener('abort', forward, { once: true });
+      return { signal: pc.signal, done: function () { clearTimeout(timer); parent.removeEventListener('abort', forward); } };
     }
 
     async function loop() {
       let attempt = 0;
       while (!stopped) {
         let raw;
+        const poll = pollScope();
         try {
-          raw = await transport.getUpdates({ offset: offset, timeoutSec: pollTimeoutSec, signal: pollSignal() });
+          try { raw = await transport.getUpdates({ offset: offset, timeoutSec: pollTimeoutSec, signal: poll.signal }); }
+          finally { poll.done(); }
         } catch (e) {
           // Only a REAL disconnect (stopped / the disconnect signal aborted) exits the loop. A deadline-timeout
           // abort has stopped=false and ac.signal.aborted=false, so it falls through to backoff+retry (a stalled

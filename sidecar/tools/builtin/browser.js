@@ -2999,11 +2999,21 @@
        click or type on whatever page took its place - one the agent never snapshotted (a signed-in checkout or SSO popup)
        - and report a bare "clicked". A tab mark is { driver, epoch }; only the SAME driver's epochs compare (a fresh
        driver already bumped version and navEpoch). syncTab turns a change the session has not seen yet into a document
-       change (version + navEpoch), so role+text recovery can never re-find the "same" control on the new tab. */
-    let seenTab = { d: null, e: 0 };
+       change (version + navEpoch), so role+text recovery can never re-find the "same" control on the new tab.
+       The mark names its driver by a small id (0 = none), never the object: refs and old marks outlive the driver they
+       were minted on, and holding the driver itself kept every replaced browser alive for the life of the session. */
+    const driverIds = new WeakMap();
+    let driverIdSeq = 0;
+    function driverId(d) {
+      if (!d || (typeof d !== 'object' && typeof d !== 'function')) return 0;
+      let id = driverIds.get(d);
+      if (!id) { id = ++driverIdSeq; driverIds.set(d, id); }
+      return id;
+    }
+    let seenTab = { d: 0, e: 0 };
     function tabMark() {
       const d = driver;
-      return { d, e: (d && typeof d.tabEpoch === 'function') ? d.tabEpoch() : 0 };
+      return { d: driverId(d), e: (d && typeof d.tabEpoch === 'function') ? d.tabEpoch() : 0 };
     }
     function syncTab() {
       const m = tabMark();
@@ -3015,7 +3025,7 @@
        and another tab was promoted, browser.press Enter went to that tab - which could submit a form the agent never
        read. lookedAt is the tab mark of the last snapshot, find, navigate or tab_select; a ref-less input refuses when
        the same driver has moved to another tab since (a fresh driver starts a fresh page: nothing to compare). */
-    let lookedAt = { d: null, e: 0 };
+    let lookedAt = { d: 0, e: 0 };
     function requireReadTab(what) {
       const now = syncTab();
       if (now.d && now.d === lookedAt.d && now.e !== lookedAt.e) {
@@ -3025,21 +3035,82 @@
         throw err;
       }
     }
+    /* RETIRED REFS. `refs` holds the refs of the current document's last few DOM reads only. A ref minted before the
+       document changed can never act again (version moves with navEpoch) and is never recovered (recovery refuses
+       across navEpoch), so its node is dead weight - and the map used to keep every one, for the life of the station
+       browser. A click that navigates moves no navEpoch, so the plain snapshot-click loop never changed "document"
+       either (review 2026-10-21: 2000 pages = 160 000 entries, +35 MB): refs of the same document older than its last
+       KEEP_REF_READS reads retire too - recovery re-finds a renumbered ref from a recent read, not one many reads ago.
+       All a later use of a retired ref still needs is WHICH refusal it gets: its tab mark (a closed tab) and whether it
+       was minted on THIS document (the plain stale refusal) or an earlier one (the page navigated). So retired entries
+       collapse into seq ranges per tab mark and document (refs are numbered in order, one read shares one mark), and
+       every earlier document shares epoch -1: a handful of ranges, however long the session runs.
+       ONLY READS THE AGENT SEES MINT REFS (review 2026-10-21). Stale-ref recovery re-reads the page itself. Counted as
+       a read, every recovered action pushed one more version through the window, so after ~7 recoveries the refs the
+       agent was actually holding retired and recovery refused them; minted uncounted, a session that recovers on every
+       click (a pagination "Next" clicked over and over) added a whole read of refs per click that nothing ever retired
+       (2000 clicks = 160 000 entries again). So recovery mints NO refs for its re-read: it acts on the re-found node
+       directly. Only an ambiguity refusal, which names its candidates for the agent to pick from, mints theirs - a
+       read the agent sees, counted like any other. */
+    const KEEP_REF_READS = 8;
+    const retiredRefs = [];   // [{ lo, hi, tab, epoch }] ascending, inclusive seq ranges; epoch -1 = an earlier document
+    const refReads = [];      // the versions of the agent's reads that minted the live refs, oldest first (at most KEEP_REF_READS)
+    function addRetired(lo, hi, epoch, tab) {
+      const last = retiredRefs[retiredRefs.length - 1];
+      if (last && last.hi === lo - 1 && last.epoch === epoch && last.tab.d === tab.d && last.tab.e === tab.e) last.hi = hi;
+      else retiredRefs.push({ lo, hi, epoch, tab: { d: tab.d, e: tab.e } });
+    }
+    function retireOld() {
+      // a range retired on a document the session has since left is now "earlier" too, and joins its neighbour
+      const left = retiredRefs[retiredRefs.length - 1];
+      if (left && left.epoch !== -1 && left.epoch !== navEpoch) { retiredRefs.pop(); addRetired(left.lo, left.hi, -1, left.tab); }
+      const keepFrom = refReads[0];
+      // insertion order is seq order, and version and navEpoch only grow along it: the first kept entry ends the sweep
+      for (const [ref, r] of refs) {
+        if (r.navEpoch === navEpoch && r.version >= keepFrom) break;
+        const n = Number(ref.slice(1));
+        addRetired(n, n, r.navEpoch === navEpoch ? navEpoch : -1, r.tab);
+        refs.delete(ref);
+      }
+    }
+    function refEntry(ref) {
+      const key = String(ref || '');
+      const live = refs.get(key);
+      if (live) return live;
+      const m = /^b([1-9]\d*)$/.exec(key);
+      if (!m) return null;
+      const n = Number(m[1]);
+      for (let i = retiredRefs.length - 1; i >= 0; i--) {
+        const g = retiredRefs[i];
+        if (n > g.hi) return null;
+        if (n >= g.lo) return { version: -1, navEpoch: g.epoch, tab: g.tab, node: null };   // minted here, its node released
+      }
+      return null;
+    }
     function refFor(node, mark) {
+      if (refReads[refReads.length - 1] !== version) {   // the first ref of a new read
+        refReads.push(version);
+        if (refReads.length > KEEP_REF_READS) refReads.shift();
+        retireOld();
+      }
       const ref = 'b' + (++seq);
       refs.set(ref, { version, navEpoch, tab: mark || tabMark(), node });
       return ref;
     }
-    function requireRef(ref) {
-      const r = refs.get(String(ref || ''));
-      if (!r) throw new Error('unknown browser ref: ' + ref + ' (take a fresh browser.snapshot)');
+    // the tab a read was taken on (its mark) has been closed since: anything from that read would land on another page
+    function tabClosedSince(mark, ref) {
       const now = syncTab();
-      if (r.tab && r.tab.d && r.tab.d === now.d && r.tab.e !== now.e) {
-        const err = new Error('stale browser ref: ' + ref + ' - the tab that snapshot was taken on was closed, so it would '
-          + 'land on a different page. Take a fresh browser.snapshot.');
-        err.code = 'REF_TAB_CLOSED';   // never recovered: there is no "same element" on another tab
-        throw err;
-      }
+      if (!(mark && mark.d && mark.d === now.d && mark.e !== now.e)) return null;
+      const err = new Error('stale browser ref: ' + ref + ' - the tab that snapshot was taken on was closed, so it would '
+        + 'land on a different page. Take a fresh browser.snapshot.');
+      err.code = 'REF_TAB_CLOSED';   // never recovered: there is no "same element" on another tab
+      return err;
+    }
+    function requireRef(ref) {
+      const r = refEntry(ref);
+      if (!r) throw new Error('unknown browser ref: ' + ref + ' (take a fresh browser.snapshot)');
+      const closed = tabClosedSince(r.tab, ref);
+      if (closed) throw closed;
       if (r.version !== version) throw new Error('stale browser ref: ' + ref + ' (refs expire after each browser.snapshot)');
       return r.node;
     }
@@ -3064,17 +3135,18 @@
         // Only a STALE ref is recoverable - an unknown one was never minted here, so there is nothing to
         // re-find, and a genuine failure thrown by act() must propagate untouched.
         if (!/^stale browser ref/.test(String(e && e.message)) || (e && e.code === 'REF_TAB_CLOSED')) throw e;
-        const known = list.map(r => refs.get(String(r || '')));
+        const known = list.map(refEntry);
         if (known.some(k => !k)) throw e;
         if (known.some(k => k.navEpoch !== navEpoch)) {
           throw new Error('stale browser ref: ' + list.join('/') + ' - the page navigated since that snapshot, '
             + 'so it points at the previous page. Take a fresh browser.snapshot.');
         }
+        if (known.some(k => !k.node)) throw e;   // a retired ref of this page: its node was released, nothing to re-find
         const wants = known.map(k => nodeIdentity(k.node));
         if (wants.some(w => !w.replace(/ /g, '').trim())) throw e;   // an unlabelled node: nothing to match on
         /* ONE re-snapshot resolves EVERY ref in the call. Snapshotting per-ref would invalidate the refs
            resolved by the previous pass - which is exactly what makes a two-ref drag unrecoverable. */
-        const fresh = await snapshot(SNAP_DEFAULT);
+        const { nodes: fresh, mark } = await readNodes(SNAP_DEFAULT);
         const nodes = [];
         for (let i = 0; i < list.length; i++) {
           const hits = fresh.filter(n => nodeIdentity(n) === wants[i]);
@@ -3083,11 +3155,15 @@
               + ', which is no longer on the page. Take a fresh browser.snapshot.');
           }
           if (hits.length > 1) {
+            // the refusal names the candidates, so the agent now holds them: they are minted, like any read it sees
             throw new Error('stale browser ref: ' + list[i] + ' - ' + hits.length + ' elements now match '
-              + describeNode(known[i].node) + ' (' + hits.map(h => h.ref).join(', ') + '), so which one you '
+              + describeNode(known[i].node) + ' (' + hits.map(h => refFor(h, mark)).join(', ') + '), so which one you '
               + 'meant is ambiguous. Take a fresh browser.snapshot and pick one.');
           }
-          nodes.push(requireRef(hits[0].ref));
+          // the mark was taken before the re-read: a tab that went away during it leaves the re-found node dead
+          const closed = tabClosedSince(mark, list[i]);
+          if (closed) throw closed;
+          nodes.push(hits[0]);
         }
         return { out: await act(nodes), recovered: true };
       }
@@ -3189,15 +3265,19 @@
       const d = driver;
       return (d && typeof d.lastResponse === 'function') ? d.lastResponse() : null;
     }
-    async function snapshot(limit) {
+    // a fresh DOM read: every earlier ref is now stale. Stale-ref recovery reads through this alone (see RETIRED REFS).
+    async function readNodes(limit) {
       const d = ensureDriver();
       // the mark is taken BEFORE the read: a tab that goes away mid-snapshot leaves these refs dead, never re-aimed
       const mark = syncTab();
       const nodes = await d.snapshot(limit);
       version++;
       lookedAt = mark;
-      const out = (nodes || []).map(n => Object.assign({}, n, { ref: refFor(n, mark) }));
-      return out;
+      return { nodes: nodes || [], mark };
+    }
+    async function snapshot(limit) {
+      const { nodes, mark } = await readNodes(limit);
+      return nodes.map(n => Object.assign({}, n, { ref: refFor(n, mark) }));
     }
     /* Every ref-taking ACTION runs through recovery. The disclosure is appended to the driver's own answer
        rather than swallowed: the agent asked to act on ref b7 and we acted on a node we re-found, so it has

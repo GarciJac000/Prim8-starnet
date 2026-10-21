@@ -130,17 +130,23 @@ const Save = (() => {
   // writeError() names why the last write failed (null after a success), so the UI only says "full" when the
   // browser said quota (QuotaExceededError / NS_ERROR_DOM_QUOTA_REACHED / "exceeded the quota").
   let lastWriteError = null;
+  /* SERIALIZE ONCE (idle CPU piece 3, 2026-10-20): the exact string this write produced — kept even when the cache refused
+     it — so persist() can hand it to CloudSave instead of CloudSave re-serializing the same multi-MB save to clone it.
+     takeWriteRaw() hands it over once and forgets it; it is the same bytes the cache was given. */
+  let lastRaw = null;
   function write(state) {
     const doc = envelope(state);
-    try { localStorage.setItem(KEY, JSON.stringify(doc)); lastWriteError = null; return doc; }
+    lastRaw = null;
+    try { lastRaw = JSON.stringify(doc); localStorage.setItem(KEY, lastRaw); lastWriteError = null; return doc; }
     catch (e) { lastWriteError = String((e && (e.name || e.code)) || 'error') + (e && e.message ? ': ' + e.message : ''); console.warn('[save] write failed:', e); return null; }
   }
+  function takeWriteRaw() { const raw = lastRaw; lastRaw = null; return raw; }
   function writeError() { return lastWriteError; }
   function writeQuotaFull() { return /quota/i.test(String(lastWriteError || '')); }
 
   function clear() { try { localStorage.removeItem(KEY); } catch (e) {} }
   function has() { try { return !!localStorage.getItem(KEY); } catch (e) { return false; } }
 
-  return { load, loadStatus, isFuture, write, writeError, writeQuotaFull, envelope, fromDoc, clear, has, CURRENT, PRE_MIGRATE_BACKUP_KEY };
+  return { load, loadStatus, isFuture, write, takeWriteRaw, writeError, writeQuotaFull, envelope, fromDoc, clear, has, CURRENT, PRE_MIGRATE_BACKUP_KEY };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = Save;

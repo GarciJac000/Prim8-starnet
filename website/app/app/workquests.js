@@ -30,7 +30,7 @@
 
   function fresh() { return { v: 1, seq: 0, quests: {} }; }
 
-  const clip = (s, n) => String(s == null ? '' : s).slice(0, n);
+  const clip = (s, n) => String(s == null ? '' : s).slice(0, n).replace(/[\uD800-\uDBFF]$/, '');   // never half an emoji (a lone surrogate)
 
   // defensively rebuild a persisted slice: every entry re-validated, junk dropped (never a crash on a bad save).
   function hydrate(raw) {

@@ -194,7 +194,8 @@
         throw authError(providerId, 'Token refresh failed: ' + ((e && e.message) || e), 'oauth_refresh_failed', false);
       }
       if (resp.status === 429) {
-        throw authError(providerId, 'Provider quota exhausted (429). Credentials are still valid; retry after the limit resets.', 'oauth_rate_limited', false);
+        // a token-endpoint 429 is the auth service throttling refreshes, never a spent quota or an empty wallet
+        throw authError(providerId, 'The sign-in service is rate-limiting token refresh (HTTP 429). Your credentials are still valid; wait a minute and try again.', 'oauth_rate_limited', false);
       }
       if (resp.status === 403 && forbiddenIsAllowlist) {
         // xAI's OAuth API surface enforces a server-side allowlist and can 403 an ACTIVE subscriber. This is NOT a

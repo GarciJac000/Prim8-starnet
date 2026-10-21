@@ -110,6 +110,29 @@ function localHM(ms, tz) {
   A.ok(after > U(2026, 11, 1, 6, 30), 'the doubled 06:30Z occurrence is NOT a second fire');
 }
 
+// ---- 4b. AMBIGUOUS, anchor INSIDE the repeated hour (sweep/autonomy 2026-10-20) ----
+// The fall-back watermark was only armed when the SCAN crossed the transition. An advance computed from an anchor
+// already in the second pass (01:00–01:59 EST) saw no transition, matched 01:30 EST and fired the day's 01:30 a
+// SECOND time: a machine asleep through 01:30 EDT and woken at 01:10 EST ran the late catch-up AND the repeat.
+{
+  const sched = cron.parseSchedule('30 1 * * *', U(2026, 10, 30, 0, 0), { tz: NY });
+  const inRepeat = U(2026, 11, 1, 6, 10);                          // 01:10 EST — the SECOND pass of 01:xx
+  A.eq(cron._internals.nextCronFireAt(sched, inRepeat, NY), U(2026, 11, 2, 6, 30), 'an anchor inside the repeated hour never re-matches that day\'s 01:30 (next is 11-02)');
+  // the whole scheduler path: 01:30 EDT due, noticed late at 01:10 EST (within grace) -> one catch-up, then tomorrow
+  const job = { id: 'j', enabled: true, schedule: sched, nextRunAt: new Date(U(2026, 11, 1, 5, 30)).toISOString(), lastRunAt: new Date(U(2026, 10, 31, 5, 30)).toISOString() };
+  const late = cron.planTick([job], inRepeat, {});
+  A.eq(late.fire.length, 1, 'the late wake still runs the missed 01:30 once (fire_once inside grace)');
+  A.eq(late.next[0] && late.next[0].nextAt, U(2026, 11, 2, 6, 30), 'and advances to TOMORROW, not to the 01:30 EST repeat 20 minutes later');
+  // a transient-retry instant that lands in the second pass (markRun backoff) is the same anchor shape
+  A.eq(cron._internals.nextCronFireAt(sched, U(2026, 11, 1, 6, 3), NY), U(2026, 11, 2, 6, 30), 'a retry at 01:03 EST does not schedule the 01:30 repeat either');
+  // outside the repeat the ordinary answers are unchanged
+  A.eq(cron._internals.nextCronFireAt(sched, U(2026, 11, 1, 7, 10), NY), U(2026, 11, 2, 6, 30), '02:10 EST (past the repeat) -> tomorrow');
+  A.eq(cron._internals.nextCronFireAt(sched, U(2026, 11, 1, 5, 10), NY), U(2026, 11, 1, 5, 30), '01:10 EDT (first pass) -> the first occurrence today');
+  // an every-15-min cron follows the same policy: nothing inside the repeat, next at 02:00 EST
+  const q = cron.parseSchedule('*/15 * * * *', U(2026, 10, 30, 0, 0), { tz: NY });
+  A.eq(cron._internals.nextCronFireAt(q, U(2026, 11, 1, 6, 10), NY), U(2026, 11, 1, 7, 0), '*/15 anchored in the repeat resumes at 02:00 EST, like a scan that crossed the transition');
+}
+
 // ---- 5. a tz TYPO fails parse — never a silent UTC fall-back ----
 {
   A.eq(cron.parseSchedule('0 9 * * *', 0, { tz: 'America/New_Yrok' }), null, 'an IANA typo -> null (no silent UTC fallback)');

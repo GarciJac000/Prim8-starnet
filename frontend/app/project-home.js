@@ -10,7 +10,7 @@ const ProjectHome = (() => {
     try {
       const response = await fetch(url, { signal: controller.signal, cache: 'no-store', ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
       const data = await response.json();
-      if (!response.ok || data.ok === false) throw new Error(data.error || data.reason || 'Request could not be completed.');
+      if (!response.ok || data.ok === false) throw Object.assign(new Error(data.error || data.reason || 'Request could not be completed.'), { status: response.status });
       return data;
     } finally { clearTimeout(timeout); }
   }
@@ -159,7 +159,12 @@ const ProjectHome = (() => {
       if (token !== epoch) return;
       if (homeId && Workstreams.activeId() !== homeId) { close(); return; }
       try { const data = await request('/api/projects/workspace?root=' + encodeURIComponent(root)); if (token !== epoch) return; render(data); }
-      catch (_) { if (token === epoch) notice('Activity could not refresh. Showing the last confirmed state; reconnecting…'); }
+      catch (error) {
+        // 404 is the station's answer, not an outage: the project was forgotten under this open home (PROJECTS › Forget).
+        // Hand COMMS back instead of polling forever under a "reconnecting…" the station already answered.
+        if (token === epoch && error && error.status === 404) { close(); return; }
+        if (token === epoch) notice('Activity could not refresh. Showing the last confirmed state; reconnecting…');
+      }
       if (token === epoch) poll(token);
     }, 2500);
   }

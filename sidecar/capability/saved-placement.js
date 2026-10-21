@@ -1,12 +1,17 @@
 'use strict';
 const { makeStationStore } = require('../station-store.js');
+// The saved floor as a station model, validated through the same path the router's station store uses; null
+// when there is none or it does not validate. Shared with cap-scope.js so a run that needs both reads validates once.
+function checkedStation(save) {
+  if (!save || !save.station) return null;
+  const checked = makeStationStore().validateStationDoc(save.station);
+  return checked.ok ? checked.station : null;
+}
 // The same room scope World.heroCaps uses. A missing client snapshot may use the
 // durable floor; an explicitly empty snapshot must never resurrect removed gear.
 function savedPlacement(save, agentId) {
-  if (!save || !save.station) return [];
-  const checked = makeStationStore().validateStationDoc(save.station);
-  if (!checked.ok) return [];
-  const station = checked.station;
+  const station = checkedStation(save);
+  if (!station) return [];
   const scoped = !!station.agentRoomId(agentId);
   const types = scoped
     ? station.bayObjects(agentId)
@@ -22,4 +27,4 @@ function savedPlacement(save, agentId) {
   for (const pluginId of new Set(plugins)) out.push({ objectType: 'plugin', pluginId });
   return out;
 }
-module.exports = { savedPlacement };
+module.exports = { savedPlacement, checkedStation };

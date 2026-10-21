@@ -158,6 +158,25 @@ function build(over) {
     A.ok(/Nothing to clear/.test(sends[0]), 'an already-empty chat says so rather than claiming a clear');
   }
 
+  /* ---- /new must forget what the RUN replays, not just the store file (live-caught 2026-10-20, sweep/channels) ----
+     A real host hands the hub historyFor (the canonical transcript stream, transcriptStore.reconstruct) and every run
+     reads its history from THAT. /new cleared only the store file: it answered "I no longer remember what we
+     discussed" and the very next run replayed the whole old conversation (101 messages on the wire), taint and all. */
+  {
+    const transcripts = new Map([['channel_telegram_555', [{ role: 'user', content: 'OLD SECRET PLAN' }, { role: 'assistant', content: 'noted the old plan' }]]]);
+    const seen = [];
+    const runOnce = async (o) => { seen.push({ streamId: o.streamId, messages: o.messages.map(m => String(m.content)) }); o.emit('agent.run.start', { runId: o.runId }); o.emit('agent.token', { delta: 'ok' }); o.emit('agent.run.end', { reason: 'done' }); };
+    const store = fakeStore();
+    const { hub, sends } = build({ runOnce, store, historyFor: (sid) => (transcripts.get(sid) || []).slice() });
+    await hub.onInbound(dm('/new'));
+    A.ok(/Cleared 2 messages/.test(sends[0]) && /no longer remember/.test(sends[0]), '/new counts the turns a run would have replayed: ' + sends[0]);
+    await hub.onInbound(dm('what was the plan?'));
+    A.eq(seen.length, 1, 'fixture: the next message ran');
+    A.ok(!seen[0].messages.some(c => /OLD SECRET PLAN|old plan/.test(c)), 'the next run after /new replays none of the forgotten conversation');
+    A.ok(seen[0].streamId && seen[0].streamId !== 'channel_telegram_555', 'it runs on a fresh stream (' + seen[0].streamId + ')');
+    A.ok(transcripts.get('channel_telegram_555').length === 2, 'the old transcript is kept in the station history, only no longer replayed');
+  }
+
   {
     // clearing under a live run would strand it mid-conversation
     let release = null;

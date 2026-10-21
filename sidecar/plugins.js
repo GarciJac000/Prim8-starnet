@@ -39,6 +39,8 @@
   const MAX_TREE_BYTES = 16 << 20;
   const MAX_TREE_DEPTH = 12;
   const RECHECK_MS = 2000;             // exec-time re-verification is re-hashed at most this often per plugin
+  const STAMP_TRUST_MS = 5 * 60 * 1000; // a QUICK re-verify may trust an unchanged stat stamp this long, then re-hashes
+  const RACY_MS = 2000;                 // a file touched this close to the hash may hide a same-size rewrite from its stamp
   const CODE_EXT = /\.(?:c|m)?js$/i;
 
   const idOk = (s) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(s || ''));
@@ -139,6 +141,38 @@
       return { digest, files: entries.map(e => ({ rel: e.rel, text: e.text })) };
     }
 
+    /* treeStamp(base) -> { stamp } | { error } — the CHEAP half of a re-verify: the same lstat walk as treeDigest
+       (same order, same refusals) but no reads and no hashing. Every file contributes its path, size, mtime, ctime
+       and inode, so an edit, an add, a delete or a rename anywhere in the folder moves the stamp. It proves only
+       "nothing on disk was touched since the stamp", never that the bytes are approved — that is still the digest's
+       job, which is why approvedRecord takes the stamp BEFORE it hashes (a write racing the hash moves the stamp).
+       `newest` is the latest mtime/ctime in the folder: approvedRecord's racy-clean rule (git's) reads it. */
+    async function treeStamp(base) {
+      let st;
+      try { st = await fsp.lstat(base); } catch (e) { return { error: 'cannot read the plugin folder' }; }
+      if (st.isSymbolicLink() || !st.isDirectory()) return { error: 'the plugin folder is a link, not a real folder' };
+      const rows = [];
+      let newest = 0;
+      async function walk(dirAbs, rel, depth) {
+        if (depth > MAX_TREE_DEPTH) throw new Error('the plugin folder nests too deep to gate safely');
+        const names = (await fsp.readdir(dirAbs)).sort();
+        for (const name of names) {
+          const abs = P.join(dirAbs, name);
+          const r = rel ? rel + '/' + name : name;
+          const l = await fsp.lstat(abs);
+          if (l.isSymbolicLink()) throw new Error('contains a link (' + r + ')');
+          if (l.isDirectory()) { await walk(abs, r, depth + 1); continue; }
+          if (!l.isFile()) throw new Error('contains a non-file entry (' + r + ')');
+          if (rows.length >= MAX_TREE_FILES) throw new Error('has too many files to gate safely');
+          newest = Math.max(newest, l.mtimeMs, l.ctimeMs);
+          rows.push(r + '\0' + l.size + '\0' + l.mtimeMs + '\0' + l.ctimeMs + '\0' + l.ino);
+        }
+      }
+      try { await walk(base, '', 0); }
+      catch (e) { return { error: (e && e.message) || String(e) }; }
+      return { stamp: rows.join('\n'), newest };
+    }
+
     /* discover() -> { plugins, errors }
        A plugin is identified by its folder; a broken one is REPORTED and skipped rather than aborting the
        scan, because one bad plugin must not disable the others. */
@@ -212,9 +246,24 @@
     /* approvedRecord(id) -> plugin | null — the SERVING gate. A plugin's files are only ever served while the
        Commander's approval covers the exact bytes on disk: the allowlist digest must equal a fresh hash of the
        folder. Re-hashed at most every RECHECK_MS per plugin (a window's page pulls many assets at once); without
-       an injected clock every call re-hashes — the check never fails open for want of a clock. */
+       an injected clock every call re-hashes — the check never fails open for want of a clock.
+
+       QUICK RE-VERIFY (2026-10-19, idle-CPU piece 2). opts.quick is the background JOB timer's mode (plugin-runtime
+       asks every 10 s per running plugin with jobs; nothing else would ever notice an edit to it). The 2 s window is
+       shorter than that interval, so every tick used to re-read, sha256 and guard-scan the WHOLE folder (up to 512
+       files / 16 MB) to learn nothing had changed. Now each full hash records a stat stamp of the folder taken
+       BEFORE the hash, and a quick check whose fresh stamp equals it trusts the cached approval — for at most
+       STAMP_TRUST_MS since that hash, then it re-hashes anyway (the safety net for a filesystem whose timestamps are
+       too coarse to see a same-size rewrite). Any touched, added, removed or renamed file moves the stamp, so an edit
+       is still caught on the NEXT tick and the plugin still stops; the allowlist is still re-read every call, so a
+       revoke still wins at once. Every other caller (tool/window calls, restarts, the serving gate) never passes
+       quick and keeps the exact old rule. No clock → no quick path: it never fails open for want of a clock.
+       RACY-CLEAN (git's rule): a timestamp is only as fine as its filesystem (2 s FAT, 1 s HFS+, a jiffy on older Linux),
+       so a same-size rewrite in the same tick as an approved write leaves every stat field equal. A stamp whose newest
+       file time is within RACY_MS of the hash is therefore never stored: the next quick check re-hashes instead. Only
+       quick callers take the stamp at all — a full check would otherwise walk the folder twice for nothing. */
     const serveCache = new Map();
-    async function approvedRecord(id) {
+    async function approvedRecord(id, opts) {
       const pid = String(id || '');
       if (!idOk(pid)) return null;
       const a = (await allowedMap())[pid];
@@ -223,10 +272,16 @@
       if (c && now && c.rec.digest === a.digest) {
         const t = now();
         if (t - c.at < RECHECK_MS && t >= c.at) return c.rec;
+        if (opts && opts.quick && c.stamp && t >= c.hashedAt && t - c.hashedAt < STAMP_TRUST_MS) {
+          const s = await treeStamp(P.join(dir, pid));
+          if (!s.error && s.stamp === c.stamp) return c.rec;
+        }
       }
+      const hashedAt = now ? now() : 0;
+      const before = (now && opts && opts.quick) ? await treeStamp(P.join(dir, pid)) : null;   // BEFORE the hash: a racing write moves it
       const r = await inspect(pid);
       if (r.error || r.plugin.digest !== a.digest) { serveCache.delete(pid); return null; }
-      serveCache.set(pid, { rec: r.plugin, at: now ? now() : 0 });
+      serveCache.set(pid, { rec: r.plugin, at: now ? now() : 0, hashedAt: hashedAt, stamp: (before && !before.error && before.newest < hashedAt - RACY_MS) ? before.stamp : null });
       return r.plugin;
     }
 
@@ -423,7 +478,7 @@
       return { loaded, pending, errors };
     }
 
-    return { discover, inspect, approvedRecord, load, allow, revoke, scaffold, destroy, listPending, _internals: { idOk, treeDigest } };
+    return { discover, inspect, approvedRecord, load, allow, revoke, scaffold, destroy, listPending, _internals: { idOk, treeDigest, treeStamp } };
   }
 
   return { makePluginLoader, parseScreens, _internals: { idOk, relPathOk } };

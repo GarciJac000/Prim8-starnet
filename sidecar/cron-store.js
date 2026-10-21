@@ -480,6 +480,23 @@
     }));
   }
 
+  /* markInterrupted — a RECURRING routine's run whose process died between fire and settlement (advance-before-run
+     already moved nextRunAt; markRun never ran). Honest abandonment: the record names THAT run instead of still
+     reporting the previous occurrence's ok. Nothing is re-armed, finalized or counted toward auto-pause — the run may
+     have acted, and its review/continuation lives in run recovery. A one-shot keeps its own fire-claim reclaim (G4.5);
+     a record that already settled this run or a LATER occurrence is left exactly as it is (idempotent per boot). */
+  function markInterrupted(jobs, id, info) {
+    info = info || {};
+    const runId = String(info.runId || ''), startedAt = Number(info.startedAt) || 0;
+    return mapJob(jobs, id, (job) => {
+      if (!runId || !startedAt || job.lastRunId === runId || !(job.schedule && (job.schedule.kind === 'interval' || job.schedule.kind === 'cron'))) return job;
+      const last = job.lastRunAt ? Date.parse(job.lastRunAt) : NaN;
+      if (isFinite(last) && last >= startedAt) return job;
+      return Object.assign({}, job, { lastRunId: runId, lastRunAt: iso(startedAt), lastStatus: 'error', lastReason: 'interrupted',
+        lastError: String(info.error || 'interrupted: StarNet stopped before this run finished'), state: job.enabled === false ? job.state : 'error' });
+    });
+  }
+
   function setNotepad(jobs, id, text, ctx) {
     ctx = ctx || {};
     return mapJob(jobs, id, (job) => Object.assign({}, job, {
@@ -633,6 +650,7 @@
     markMonitorCheck: markMonitorCheck,
     setNotepad: setNotepad,
     markUnfireable: markUnfireable,
+    markInterrupted: markInterrupted,
     UNFIREABLE_ERROR: UNFIREABLE_ERROR,
     DEFAULT_MAX_CONSECUTIVE_FAILURES: DEFAULT_MAX_CONSECUTIVE_FAILURES,
     removeJob: removeJob,

@@ -34,7 +34,7 @@
   const GOAL_CHARS = 2000, SUB_CHARS = 400, REASON_CHARS = 300;   // caps on stored/echoed strings (bound the prompt)
   const RESP_SNIPPET = 4000;                     // how much of the last reply we hand the judge
 
-  const clamp = (s, n) => { s = String(s == null ? '' : s).trim(); return s.length > n ? s.slice(0, n) : s; };
+  const clamp = (s, n) => { s = String(s == null ? '' : s).trim(); return (s.length > n ? s.slice(0, n) : s).replace(/[\uD800-\uDBFF]$/, ''); };   // never half an emoji
 
   /* ============================ VERDICT PARSE (pure, fail-open) ============================
      Read the judge's reply into { verdict:'done'|'continue', reason, parseFailed }. parseFailed is true ONLY

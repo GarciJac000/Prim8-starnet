@@ -132,7 +132,7 @@ A.eq(O.successPrior(null, 'x'), null, '…and leans nothing');
   const idx = fs.readFileSync(path.join(__dirname, '..', 'sidecar', 'index.js'), 'utf8');
   A.ok(/function stationTrackRecord\(\)/.test(idx) && /personalizationStore\.read\(\)\.enabled\) return null/.test(A.fnBody(idx, 'function stationTrackRecord()')),
     'the shared read exists and the personalization PAUSE returns null before any fold');
-  A.ok(/const trackRecord = stationTrackRecordLines\(\);/.test(A.fnBody(idx, 'function commanderEvidenceInputs()')),
+  A.ok(/const trackRecord = stationTrackRecordLines\(\);/.test(A.fnBody(idx, 'function commanderEvidenceInputs(evidence)')),
     'the evidence composer consumes the shared read (every evidence:true generator now sees the record)');
   A.ok(/learn, trackRecord, redact \}, \{ now \}\);/.test(idx),
     'the night-shift context pack consumes the SAME read');

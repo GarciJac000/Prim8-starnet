@@ -482,6 +482,29 @@ async function opensWithin(t, ms) {
     A.ok(requests.length > before, 'dead provider: the NEXT reply asks again');
   }
 
+  // --- a SHORT outage must not spend every in-flight chunk's whole retry budget ------------------
+  // sweep/voice 2026-10-20, live in the seeded station: the two retries fired INSTANTLY, so all three attempts of
+  // every chunk in flight landed inside the same blip. A 300 ms 429 window failed the opening two chunks (prefetch
+  // runs them together), MID_REPLY_GIVEUP then marked the remaining three 'cooldown' without a single request,
+  // and a five-sentence reply played NOTHING although the provider was healthy again 300 ms in.
+  {
+    const spoken = []; let requests = 0;
+    const t0 = Date.now();
+    const t = boot({ Audio: AutoEndAudio, fetch: (url, o) => {
+      if (!String(url).includes('/api/tts')) return Promise.resolve({ ok: true, json: async () => ({}) });
+      requests++;
+      if (Date.now() - t0 < 300) return Promise.resolve({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ fallback: true, reason: 'edge: edge upgrade refused: HTTP 429' }) });
+      spoken.push(JSON.parse(o.body).text);
+      return Promise.resolve({ ok: true, headers: { get: () => 'audio/mpeg' }, blob: async () => ({ size: 128 }) });
+    } });
+    t.Voice.setSpeakReplies(true);
+    for (let i = 1; i <= 5; i++) t.Voice.speakChunk('Blip sentence number ' + i + ' of the reply.', 'agent');
+    t.Voice.endReply();
+    await until(() => !t.Voice.isReplyPending(), 6000);
+    A.eq(spoken.length, 5, 'short blip: every sentence of the reply is still spoken (' + requests + ' requests, spoken ' + spoken.length + ')');
+    A.ok(!/rest of this reply/.test(t.nodes['voice-toggle'].title), 'short blip: the reply is never declared voice-dead');
+  }
+
   // --- a recognizer that fails every time PAUSES the Live mic and says why ----------------------
   // Live dictation re-armed a failing engine forever (~every 150ms) while the panel read LISTENING and the
   // status showed a raw 'mic: network'. Three hard errors in a row pause the mic with plain words — and the
@@ -669,7 +692,7 @@ async function opensWithin(t, ms) {
     t.Voice.speakChunk('This is the second sentence. ', 'agent'); await tick(20);
     t.Voice.speakChunk('Third sentence lands here. ', 'agent'); await tick(20);
     t.Voice.speakChunk('And a fourth to close it out. ', 'agent'); await tick(20);
-    t.Voice.endReply(); await tick(80);
+    t.Voice.endReply(); await until(() => state.spoken.some(s => /fourth to close/.test(s)), 5000);   // retries are spaced (RETRY_GAP_MS)
     A.ok(state.tts > 3, 'blip: a failed chunk does NOT stop the reply — later chunks still attempt their round-trip');
     A.ok(state.spoken.some(s => /fourth to close/.test(s)), 'blip: the LAST sentence of the reply is still synthesized (reply spoken through to the end)');
     A.ok(state.spoken.some(s => /second sentence/.test(s)), 'blip: the sentence after the failure is spoken (cold-off never guillotines a live reply)');
@@ -725,7 +748,7 @@ async function opensWithin(t, ms) {
     }});
     t.Voice.setSpeakReplies(true);const token=t.Voice.replyToken();
     t.Voice.speakChunk('The failed sentence.', 'agent', {replyToken:token});
-    t.Voice.endReply();await tick(30);
+    t.Voice.endReply();await until(()=>requests.length===3&&/couldn.t be spoken/.test(t.nodes['voice-toggle'].title),5000);   // retries are spaced (RETRY_GAP_MS)
     A.eq(requests.length,3,'continuity: synthesis exhaustion bounded to three attempts');
     A.ok(/couldn.t be spoken/.test(t.nodes['voice-toggle'].title),'continuity: exhaustion is visible immediately');
     t.Voice.speakChunk('Late text from the same failed reply.', 'agent', {replyToken:token});
@@ -946,7 +969,7 @@ async function opensWithin(t, ms) {
     t.Voice.setSpeakReplies(true);
     t.Voice.speakChunk('Right, ', 'agent'); await tick(20);
     t.Voice.speakChunk('here is the first full sentence. ', 'agent'); await tick(20);
-    t.Voice.endReply(); await tick(80);
+    t.Voice.endReply(); await until(() => state.spoken.some(s => /first full sentence/.test(s)), 5000);   // retries are spaced (RETRY_GAP_MS)
     A.ok(state.spoken.some(s => /first full sentence/.test(s)), 'retry: a transient failure is retried once, so the blipped sentence is still spoken');
     A.ok(!/real voice/i.test(String(t.nodes['voice-toggle'].title || '')), 'retry: a blip that the retry rescued does NOT pin an outage banner on the toggle');
   }
@@ -962,7 +985,7 @@ async function opensWithin(t, ms) {
     let now = Date.now();
     const t = boot({ now: () => now, fetch: countingFetch(state, 'no key; edge: edge timeout') });
     t.Voice.setSpeakReplies(true);
-    t.Voice.speak('first line on a keyless station', 'agent'); await tick(40);
+    t.Voice.speak('first line on a keyless station', 'agent'); await until(() => state.tts >= 3 && !t.Voice.isReplyPending(), 5000);   // retries are spaced (RETRY_GAP_MS)
     A.eq(state.tts, 3, 'keyless + edge blip: two bounded retries retain the chunk');
     A.ok(!/needs an OpenRouter, Gemini, or OpenAI credential/.test(String(t.nodes['voice-toggle'].title || '')),
       'keyless + edge blip: the tooltip does NOT demand a credential for a network blip');
@@ -990,7 +1013,7 @@ async function opensWithin(t, ms) {
     const state = { tts: 0 };
     const t = boot({ ttsKey: true, fetch: countingFetch(state, 'gemini 429 — {"message":"Quota exceeded for quota metric"}') });
     t.Voice.setSpeakReplies(true);
-    t.Voice.speak('a line during a rate limit', 'agent'); await tick(40);
+    t.Voice.speak('a line during a rate limit', 'agent'); await until(() => state.tts >= 3 && !t.Voice.isReplyPending(), 5000);   // retries are spaced (RETRY_GAP_MS)
     A.ok(!/out of credits/.test(String(t.nodes['voice-toggle'].title || '')), 'a per-minute 429 is NOT reported as "out of credits"');
     A.eq(state.tts, 3, 'a per-minute 429 is retried twice');
   }
@@ -999,8 +1022,38 @@ async function opensWithin(t, ms) {
     const state = { tts: 0 };
     const t = boot({ ttsKey: true, fetch: countingFetch(state, 'openai 429 — {"code":"insufficient_quota"}') });
     t.Voice.setSpeakReplies(true);
-    t.Voice.speak('a line with a spent account', 'agent'); await tick(40);
+    t.Voice.speak('a line with a spent account', 'agent'); await until(() => !t.Voice.isReplyPending(), 5000);
     A.ok(/out of credits/.test(String(t.nodes['voice-toggle'].title || '')), 'insufficient_quota IS the billing class, 429 or not');
+  }
+
+  // sweep/voice 2026-10-20: the two questions were asked of the WHOLE ladder string, so (a) the HTTP 429 OpenAI
+  // sends with insufficient_quota bought two retries and only the 4s cold-off for an empty wallet, and (b) Gemini's
+  // standard per-minute 429 text ("...check your plan and billing details... Please retry in 23s") read 'billing'
+  // and pinned "voice provider out of credits" on a rate limit. Each ';'-joined leg is judged on its own now.
+  {
+    const state = { tts: 0 };
+    const t = boot({ ttsKey: true, fetch: countingFetch(state, 'openai 429 — {"error":{"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}') });
+    t.Voice.setSpeakReplies(true);
+    t.Voice.speak('a line with an empty openai wallet', 'agent'); await until(() => !t.Voice.isReplyPending(), 5000);
+    A.eq(state.tts, 1, 'insufficient_quota at HTTP 429 is NOT retried — an empty wallet will not refill in 1.6s');
+    A.ok(/out of credits/.test(String(t.nodes['voice-toggle'].title || '')), 'and it still reads out of credits');
+    t.Voice.speak('the next reply while the wallet is empty', 'agent'); await tick(40);
+    A.eq(state.tts, 1, 'insufficient_quota arms the long cold-off — the next reply does not re-ask');
+  }
+  {
+    const state = { tts: 0 };
+    const t = boot({ ttsKey: true, fetch: countingFetch(state, 'gemini 429 — {"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 10 Please retry in 23s.","status":"RESOURCE_EXHAUSTED"}}; edge: edge timeout') });
+    t.Voice.setSpeakReplies(true);
+    t.Voice.speak('a line during a gemini rate limit', 'agent'); await until(() => state.tts >= 3 && !t.Voice.isReplyPending(), 5000);
+    A.eq(state.tts, 3, 'a Gemini per-minute 429 is retried (it clears in seconds)');
+    A.ok(!/out of credits/.test(String(t.nodes['voice-toggle'].title || '')), 'a rate-limit body that merely MENTIONS billing is not "out of credits"');
+  }
+  {
+    const state = { tts: 0 };
+    const t = boot({ ttsKey: true, fetch: countingFetch(state, 'openai 400 — {"error":{"message":"Billing hard limit has been reached","code":"billing_hard_limit_reached"}}') });
+    t.Voice.setSpeakReplies(true);
+    t.Voice.speak('a line past the billing hard limit', 'agent'); await until(() => !t.Voice.isReplyPending(), 5000);
+    A.eq(state.tts, 1, 'a billing leg with no rate-limit signal stays terminal (not retried)');
   }
 
   // --- the pinned degrade reason survives Voice.init (agent focus / persona / dossier apply) -----

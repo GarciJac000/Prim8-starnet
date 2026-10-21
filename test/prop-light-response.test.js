@@ -80,11 +80,11 @@ class Context {
   measureText() { return { width: 0 }; }
   createLinearGradient() { return { addColorStop() {} }; }
 }
-function harness() {
+function harness(src = source) {
   const env = { reads: 0, canvases: [] };
   const document = { createElement(tag) { assert.equal(tag, 'canvas'); const cv = new Canvas(env); env.canvases.push(cv); return cv; } };
   const context = vm.createContext({ module: { exports: {} }, document, console, U: { hash, shade: c => c } });
-  vm.runInContext(source, context);
+  vm.runInContext(src, context);
   const props = context.module.exports, target = new Canvas(env, 220, 180);
   props.setCtx(target.ctx); props.setNow(1400);
   return { props, target, env };
@@ -155,16 +155,194 @@ test('decals, dynamic silhouettes, missing samples and oversized footprints have
   assert.equal(env.canvases.length, 0); assert.equal(target.ctx.draws.length, 0); assert.equal(props.lightResponseStats().bytes, 0);
 });
 
+// 418 distinct quantized lights on one mask: past any entry budget up to 4096 keys.
+const nth = i => ({ ...east, color: [(i%16)*16,(Math.floor(i/16)%16)*16,Math.floor(i/256)*16] });
+
+test('the budget is 384 overlays / 1 Mi px (4 MiB RGBA), and the stats report the bounds the cache enforces', () => {
+  const { props, target } = harness(); target.ctx.drawImage = () => {};
+  const limits = source.match(/const RESPONSE_LIMIT = (\d+), RESPONSE_PIXELS = (\d+), RESPONSE_SINGLE = (\d+);/);
+  assert.ok(limits, '(the budget line is found)');
+  let stats = props.lightResponseStats();
+  assert.deepEqual([stats.maxEntries, stats.maxPixels, stats.maxBytes, stats.maxSinglePixels], [384, 1048576, 4194304, 65536]);
+  assert.deepEqual(limits.slice(1).map(Number), [stats.maxEntries, stats.maxPixels, stats.maxSinglePixels], 'the stats are the real constants');
+  // The pixel bound the stats report is the one the cache fills to and holds. (It binds first: the smallest overlay, a
+  // 1x1 footprint's, is 44 x 68 px, so at most 350 fit under 384 entries.) A 2x1 crate's is 56 x 68: 275 fit.
+  for (let i=0;i<stats.maxEntries+34;i++) assert.equal(props.drawLightResponse(f(), nth(i)), true);
+  stats = props.lightResponseStats();
+  assert.deepEqual([stats.entries, stats.pixels, stats.builds, stats.evictions], [275, 275*56*68, 418, 418-275]);
+  assert.equal(Math.floor(stats.maxPixels / (56*68)), 275); assert.ok(stats.entries <= stats.maxEntries);
+  // a 30x3 footprint's overlay is 392 x 92 px, so exactly floor(1 Mi / 36064) = 29 fit
+  props.invalidateLightResponse();
+  for (let i=0;i<40;i++) assert.equal(props.drawLightResponse(f({ w: 30, h: 3 }), nth(i)), true);
+  stats = props.lightResponseStats();
+  assert.deepEqual([stats.entries, stats.pixels, stats.bytes], [29, 29*392*92, 29*392*92*4]);
+  assert.equal(Math.floor(stats.maxPixels / (392*92)), 29);
+});
+
 test('entry and pixel budgets evict old responses while steady repeats remain cached', () => {
   const { props } = harness();
-  for (let i=0;i<130;i++) props.drawLightResponse(f(), { ...east, color: [(i%16)*16,Math.floor(i/16)*16,128] });
+  const cap = props.lightResponseStats().maxEntries;
+  for (let i=0;i<cap+34;i++) props.drawLightResponse(f(), nth(i));
   let stats = props.lightResponseStats(); assert.ok(stats.evictions > 0); assert.ok(stats.entries <= stats.maxEntries); assert.ok(stats.pixels <= stats.maxPixels);
   assert.equal(stats.bytes, stats.pixels*4); assert.ok(stats.bytes <= stats.maxBytes);
-  for (let i=0;i<12;i++) props.drawLightResponse(f({ w: 30, h: 3 }), { ...east, color: [i*16,64,128] });
+  for (let i=0;i<40;i++) props.drawLightResponse(f({ w: 30, h: 3 }), nth(i));
   stats = props.lightResponseStats(); assert.ok(stats.pixels <= stats.maxPixels, 'large authored footprints obey the pixel budget too');
-  const builds = stats.builds; props.drawLightResponse(f({ w: 30, h: 3 }), { ...east, color: [11*16,64,128] });
+  assert.ok(stats.entries <= stats.maxEntries);
+  const builds = stats.builds; props.drawLightResponse(f({ w: 30, h: 3 }), nth(39));
   assert.equal(props.lightResponseStats().builds, builds);
   props.invalidateLightResponse(); stats = props.lightResponseStats(); assert.equal(stats.entries, 0); assert.equal(stats.bytes, 0);
+});
+
+// THE LRU CLIFF (2026-10-20): a frame's on-screen props are a cyclic working set, and an LRU smaller than one misses
+// on every lookup. 80 crates, each its own light, overflow the old 96-entry / 256 Ki px budget by pixels: under it they
+// rebuilt (and read the mask back) 80 times a frame. Under the 4x budget they build once.
+test('a frame working set past the old budget is built once, then every repeat draw hits the cache', () => {
+  const { props, target, env } = harness(); target.ctx.drawImage = () => {};
+  const N = 80, crates = Array.from({ length: N }, (_, i) => f({ x: 1 + (i % 10) * 3, y: 1 + Math.floor(i / 10) * 2, id: 'c' + i }));
+  const perFrame = [];
+  for (let fr = 0; fr < 6; fr++) {
+    props.setNow(1000 + fr * 16.7);
+    const s0 = props.lightResponseStats(), reads = env.reads;
+    for (let i = 0; i < N; i++) assert.equal(props.drawLightResponse(crates[i], nth(i)), true);
+    const s1 = props.lightResponseStats();
+    perFrame.push([s1.builds - s0.builds, s1.hits - s0.hits, s1.evictions - s0.evictions, env.reads - reads]);
+  }
+  assert.ok(props.lightResponseStats().pixels > 262144, '(setup: this working set is past the old 256 Ki px budget)');
+  assert.deepEqual(perFrame[0], [N, 0, 0, 1], 'a cold frame builds each response, reading the shared mask back once');
+  assert.deepEqual(perFrame.slice(1), Array(5).fill([0, N, 0, 0]), 'every later frame hits: no build, eviction or readback');
+});
+
+test("a mask's opaque flags are read back once, whatever lights land on it", () => {
+  const { props, target, env } = harness(); target.ctx.drawImage = () => {};
+  for (let i=0;i<48;i++) assert.equal(props.drawLightResponse(f(), nth(i % 16)), true);
+  assert.deepEqual([props.lightResponseStats().builds, env.reads], [16, 1], 'sixteen overlays from one readback');
+  assert.equal(props.drawLightResponse(f({ w: 3 }), east), true);
+  assert.equal(env.reads, 2, 'another footprint is another mask: its own one readback');
+  props.invalidateLightResponse();   // the overlays go; the masks (and their flags) stay
+  for (let i=0;i<16;i++) props.drawLightResponse(f(), nth(i));
+  props.drawLightResponse(f({ w: 3 }), east);
+  assert.deepEqual([props.lightResponseStats().builds, env.reads], [34, 2], 'rebuilt overlays reuse the flags');
+  env.canvases[0].lose(false);   // a lost mask is replaced by a new canvas, which is read back once
+  for (let i=0;i<16;i++) props.drawLightResponse(f(), nth(i));
+  assert.deepEqual([props.lightResponseStats().builds, env.reads], [50, 3]);
+});
+
+/* SAME PICTURE AS TRUNK. The budget and the per-mask flags change only what an overlay costs, never what it is. The
+   oracle is the module with trunk's responseOverlay (VERBATIM, 2026-10-20, before the 4x budget) and trunk's budget
+   spliced back in; both draw the same scenes into a context that records every blit, and every blit must match:
+   position, state and every overlay pixel. */
+const TRUNK_LIMITS = 'const RESPONSE_LIMIT = 96, RESPONSE_PIXELS = 262144, RESPONSE_SINGLE = 65536;';
+const TRUNK_OVERLAY = `function responseOverlay(f,light) {
+    const mask=shadowMask(f);if(!mask)return null;
+    const key=[f.t,f.w||1,f.h||1,f.r||0,f.m||0,light.direction,light.strength,...light.color].join('|');
+    let hit=lightResponses.get(key);
+    if(hit) {
+      const g=hit.cv.getContext('2d');
+      if(hit.mask===mask&&g&&!(g.isContextLost&&g.isContextLost())) {
+        lightResponses.delete(key);lightResponses.set(key,hit);responseMetrics.hits++;return hit.cv;
+      }
+      dropResponse(key);
+    }
+    const w=mask.width,h=mask.height,pixels=w*h;
+    if(pixels>RESPONSE_SINGLE)return null;
+    const alpha=mask.getContext('2d').getImageData(0,0,w,h).data;
+    if(alpha.length!==pixels*4)return null;
+    let minX=w,minY=h,maxX=-1,maxY=-1;
+    // Ignore the translucent spill already carried by old art. A physical rim
+    // belongs to its opaque casing, not to a halo or a contact shadow on the deck.
+    const solid=(x,y)=>x>=0&&y>=0&&x<w&&y<h&&alpha[(y*w+x)*4+3]>=250;
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(solid(x,y)) {
+      minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
+    }
+    if(maxX<0)return null;
+    const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+    const g=cv.getContext('2d');if(!g||!g.createImageData||!g.putImageData)return null;
+    const image=g.createImageData(w,h),out=image.data;
+    const cx=(minX+maxX)/2,cy=(minY+maxY)/2,rx=Math.max(1,(maxX-minX)/2),ry=Math.max(1,(maxY-minY)/2);
+    const span=Math.abs(light.dx)+Math.abs(light.dy)||1,sx=Math.round(light.dx),sy=Math.round(light.dy);
+    const grey=light.color.reduce((sum,v)=>sum+v,0)/3;
+    const tint=light.color.map(v=>Math.round(v*.45+grey*.55));
+    for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++) {
+      if(!solid(x,y))continue;
+      const facing=responseClamp(.5+(((x-cx)/rx)*light.dx+((y-cy)/ry)*light.dy)/(2*span),0,1);
+      const rim=light.direction>=0&&!solid(x+sx,y+sy);
+      const shadeA=light.strength*.12*Math.pow(1-facing,1.4);
+      const tintA=light.strength*(.055*facing+(rim?.105:0));
+      const a=tintA+shadeA*(1-tintA),i=(y*w+x)*4;
+      if(!a)continue;
+      for(let c=0;c<3;c++)out[i+c]=Math.round((tint[c]*tintA+RESPONSE_SHADE[c]*shadeA*(1-tintA))/a);
+      out[i+3]=Math.round(a*255);
+    }
+    g.putImageData(image,0,0);
+    while(lightResponses.size>=RESPONSE_LIMIT||responsePixels+pixels>RESPONSE_PIXELS) {
+      dropResponse(lightResponses.keys().next().value);responseMetrics.evictions++;
+    }
+    hit={cv,mask,pixels};lightResponses.set(key,hit);responsePixels+=pixels;responseMetrics.builds++;
+    if(cv.addEventListener)cv.addEventListener('contextlost',()=>{if(lightResponses.get(key)===hit)dropResponse(key);},{once:true});
+    return cv;
+  }`;
+function trunkSource() {
+  const { fnBody } = require('./_fnbody');
+  const overlay = fnBody(source, 'function responseOverlay(');
+  assert.ok(overlay.length > 400 && overlay.length < 6000, '(responseOverlay found)');
+  const limits = /const RESPONSE_LIMIT = \d+, RESPONSE_PIXELS = \d+, RESPONSE_SINGLE = 65536;/;
+  assert.ok(limits.test(source), '(the budget line is found)');
+  const out = source.replace(limits, () => TRUNK_LIMITS).replace(overlay, () => TRUNK_OVERLAY);
+  assert.ok(out.includes(TRUNK_LIMITS) && out.includes(TRUNK_OVERLAY) && out !== source);
+  return out;
+}
+function recorded(src, frames) {
+  const { props, target, env } = harness(src), blits = [];
+  target.ctx.drawImage = function (image, x, y) {
+    assert.equal(arguments.length, 3);
+    blits.push({ x, y, w: image.width, h: image.height, pixels: Buffer.from(image.pixels), state: this.state() });
+  };
+  const perFrame = [];
+  frames.forEach((scene, k) => {
+    props.setNow(4000 + k * 16.7);
+    const s0 = props.lightResponseStats(), reads = env.reads;
+    const lit = scene.map(([prop, light]) => props.drawLightResponse(prop, light));
+    const s1 = props.lightResponseStats();
+    perFrame.push({ lit, builds: s1.builds - s0.builds, reads: env.reads - reads });
+  });
+  return { blits, perFrame, stats: props.lightResponseStats() };
+}
+function sameBlits(a, b, name) {
+  assert.equal(a.blits.length, b.blits.length, name + ': as many blits as trunk');
+  a.blits.forEach((x, i) => {
+    const y = b.blits[i];
+    assert.deepEqual([x.x, x.y, x.w, x.h, x.state], [y.x, y.y, y.w, y.h, y.state], name + ' blit ' + i + ': placed as trunk places it');
+    assert.equal(Buffer.compare(x.pixels, y.pixels), 0, name + ' blit ' + i + ': every overlay pixel equals trunk');
+  });
+  assert.deepEqual(a.perFrame.map(r => r.lit), b.perFrame.map(r => r.lit), name + ': the same props lit on every frame');
+}
+
+test('every overlay drawn equals trunk, under the budget and past it; past it the builds cost what trunk costs', () => {
+  const trunk = trunkSource();
+  // A station of mixed rigid props, each in its own light, a fifth of them flickering frame to frame: past trunk's
+  // 96 entries / 256 Ki px, under the 4x budget.
+  const TYPES = ['crate', 'desk', 'chair', 'shelf', 'stool', 'bench', 'toolbox', 'bookshelf'];
+  const props = Array.from({ length: 120 }, (_, i) => {
+    const t = TYPES[i % TYPES.length];
+    return Object.assign({ t, x: 2 + (i % 12) * 3, y: 2 + Math.floor(i / 12) * 3, id: 'p' + i }, t === 'crate' ? { w: 2, h: 1 } : {},
+      i % 9 === 4 ? { mount: 'surface' } : {});
+  });
+  const station = k => props.map((p, i) => [p, { color: [(i * 37) % 256, (i * 91) % 256, (i * 53 + (i % 5 ? 0 : k * 16)) % 256],
+    strength: .25 + (i % 6) / 8 + (i % 5 ? 0 : (k % 2) * .125), dx: Math.cos(i), dy: (i % 7 === 3 ? 0 : Math.sin(i)) }]);
+  const frames = Array.from({ length: 5 }, (_, k) => station(k));
+  const now = recorded(source, frames), was = recorded(trunk, frames);
+  sameBlits(now, was, 'under the budget');
+  assert.ok(now.blits.length >= 5 * 100, '(setup: ' + now.blits.length + ' blits, most props lit)');
+  assert.ok(was.perFrame.slice(1).every(r => r.builds > 50), '(setup: past the old budget trunk rebuilds every frame)');
+  assert.equal(now.stats.evictions, 0, 'the station sits under the 4x budget');
+  assert.ok(now.perFrame.slice(1).every(r => r.builds <= 24 && r.reads === 0), 'and only the flickering props build, with no readback');
+  // Past the 4x budget: 40 overlays of 392 x 92 px in a cycle, 29 fit. Same plain LRU as trunk, so the same builds.
+  const big = Array.from({ length: 40 }, (_, i) => [f({ w: 30, h: 3, id: 'big' + i, x: 1, y: 1 + i * 4 }), nth(i)]);
+  const past = [big, big, big], nowPast = recorded(source, past), wasPast = recorded(trunk, past);
+  sameBlits(nowPast, wasPast, 'past the budget');
+  assert.deepEqual(nowPast.perFrame.map(r => r.builds), wasPast.perFrame.map(r => r.builds), 'past the budget it builds what trunk builds');
+  assert.ok(nowPast.perFrame.every(r => r.builds === 40), '(setup: a cycle past the budget misses every lookup)');
+  assert.equal(nowPast.stats.pixels <= nowPast.stats.maxPixels && nowPast.stats.entries <= nowPast.stats.maxEntries, true);
 });
 
 test('lost overlay and native mask contexts are rebuilt, and lost main context skips safely', () => {

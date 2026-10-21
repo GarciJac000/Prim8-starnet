@@ -205,6 +205,7 @@ const Voice = (() => {
   let replyTried = false;  // has the reply currently speaking already ATTEMPTED a synth? Only then may it
                            // outrank the cold-off — a BRAND-NEW reply still honors it in full (no hammering).
   const MID_REPLY_GIVEUP = 2;
+  const RETRY_GAP_MS = [400, 1200];   // wait before retry 1 / retry 2: a blip must outlive ~1.6 s to cost a sentence
   let fbStreak = 0;        // consecutive neural failures (reset by the next neural success)
   let fbNotified = '';     // reason class already surfaced this outage — notify once, not once per sentence
   /* A reason is a semicolon-joined LADDER of everything the sidecar tried, not one verdict:
@@ -222,18 +223,25 @@ const Voice = (() => {
   // /quota/ test conflated the two and bought 60s of silence for something that clears in seconds.
   const TERMINAL_BILLING = /\b402\b|insufficient[ _-]?credit|insufficient[ _-]?quota|payment required|billing|out of credit/i;
   const TRANSIENT_LEG = /\b429\b|\b5\d\d\b|rate[ _-]?limit|quota exceeded|too many requests|timeout|timed out|temporarily|unavailable|unreachable|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|empty audio|aborted/i;
+  // Judge each ';'-joined LEG on its own (sweep 2026-10-20). Whole-string tests let OpenAI's insufficient_quota —
+  // sent as HTTP 429 — buy two retries and the 4s cold-off, and let the bare word 'billing' in Gemini's standard
+  // per-minute 429 text ("check your plan and billing details … retry in 23s") pin "out of credits" on a rate limit.
+  // A named empty wallet wins over its leg's status code; a rate-limited leg that merely mentions billing is a rate limit.
+  const legsOf = reason => String(reason == null ? '' : reason).split(/;\s+/);
+  const billingLeg = l => /\b402\b|insufficient[ _-]?(?:credit|quota|funds)|payment required|out of credit/i.test(l) || (TERMINAL_BILLING.test(l) && !TRANSIENT_LEG.test(l));
+  const transientLeg = l => TRANSIENT_LEG.test(l) && !billingLeg(l);
   function classifyFallback(reason) {
     const r = String(reason == null ? '' : reason);
-    if (TERMINAL_BILLING.test(r)) return 'credits';
+    if (legsOf(r).some(billingLeg)) return 'credits';
     // 'no key' is structural. With a transient leg in the ladder the station does NOT need a credential —
     // the free floor does have voice and simply blipped, so sending the user to buy a key would be a lie.
-    if (/no key/i.test(r)) return TRANSIENT_LEG.test(r) ? 'error' : 'nokey';
+    if (/no key/i.test(r)) return legsOf(r).some(transientLeg) ? 'error' : 'nokey';
     return 'error';
   }
   function retryableFallback(reason) {
     const r = String(reason == null ? '' : reason);
-    if (TRANSIENT_LEG.test(r)) return true;                        // something in the ladder may well work now
-    if (TERMINAL_BILLING.test(r) || /no key/i.test(r)) return false;
+    if (legsOf(r).some(transientLeg)) return true;                  // something in the ladder may well work now
+    if (legsOf(r).some(billingLeg) || /no key/i.test(r)) return false;
     return true;                                                   // an unclassified error is treated as transient
   }
   // TRUTHFUL TELEMETRY, off the header. The voice swap must never be silent, but the COMMS status bar
@@ -930,18 +938,23 @@ const Voice = (() => {
     if ((replyTried && replyFails >= MID_REPLY_GIVEUP) || (!replyTried && neuralColdTerminal && Date.now() < neuralColdUntil)) { job.result = Promise.resolve({ kind: 'fail', reason: 'cooldown' }); return; }
     replyTried = true;
     const seq = job.seq;
+    // Two retries for a TRANSIENT failure (429 / network / 5xx) — a single provider blip must cost a
+    // beat of latency, not a whole sentence of the reply. A missing credential and an empty wallet are NOT
+    // transient: don't burn a second call on them. Ask retryableFallback, not the message class: a keyless
+    // station's reason ALWAYS carried the structural 'no key', which made this branch dead code there.
+    // Two bounded retries retain this exact chunk; later audio stays ordered.
+    // A torn-down job (barge-in bumped speakSeq) is never retried. The retries are SPACED (RETRY_GAP_MS): fired
+    // instantly, all three attempts of every chunk in flight landed inside the same blip, so a 300 ms 429 window
+    // failed the two prefetched opening chunks and MID_REPLY_GIVEUP silenced the whole reply (sweep 2026-10-20).
+    const retry = gap => res => (res.kind === 'fail' && retryableFallback(res.reason) && seq === speakSeq)
+      ? (job.recovering = true, new Promise(r => setTimeout(r, gap)).then(() => (seq === speakSeq ? synthOnce(job) : { kind: 'skip' }))) : res;
     job.result = synthOnce(job)
-      // Two retries for a TRANSIENT failure (429 / network / 5xx) — a single provider blip must cost a
-      // beat of latency, not a whole sentence of the reply. A missing credential and an empty wallet are NOT
-      // transient: don't burn a second call on them. Ask retryableFallback, not the message class: a keyless
-      // station's reason ALWAYS carried the structural 'no key', which made this branch dead code there.
-      // Two bounded retries retain this exact chunk; later audio stays ordered.
-      // A torn-down job (barge-in bumped speakSeq) is never retried.
-      .then(res => (res.kind === 'fail' && retryableFallback(res.reason) && seq === speakSeq) ? synthOnce(job) : res)
-      .then(res => (res.kind === 'fail' && retryableFallback(res.reason) && seq === speakSeq) ? synthOnce(job) : res)
+      .then(retry(RETRY_GAP_MS[0]))
+      .then(retry(RETRY_GAP_MS[1]))
       .then(res => {
+        job.recovering = false;
         if (seq !== speakSeq) return { kind: 'skip' };
-        if (res.kind === 'neural') { noteNeuralOk(); return res; }
+        if (res.kind === 'neural') { noteNeuralOk(); pumpSynth(); return res; }
         if (res.kind === 'skip') return res;   // intentional barge-in/teardown cancel — not a failure
         replyFails++;
         // cool the neural path off briefly (noteFallback lengthens this for 'no key'/'credits'); never latch.
@@ -952,6 +965,10 @@ const Voice = (() => {
       });
   }
   function pumpSynth() {
+    // No new prefetch while a chunk of this reply waits on a spaced retry: a dead provider must still cost two
+    // sentences of attempts, not a third one started before the second's exhaustion lands (the play head itself
+    // still starts the chunk it reaches; a recovered chunk resumes the prefetch above).
+    for (let i = playIdx; i < synthIdx; i++) if (jobs[i] && jobs[i].recovering) return;
     const next = jobs[synthIdx];
     const limit = next && next.voice.local && !next.voice.engine ? 1 : MAX_INFLIGHT;
     while (synthIdx < jobs.length && (synthIdx - playIdx) < limit) startSynth(jobs[synthIdx++]);
@@ -1341,10 +1358,16 @@ const Voice = (() => {
     let pcmProcessor = null, pcmSink = null, pcmFrames = [], pcmSamples = 0, pcmRate = 0, takeSttMode = 'cloud';
     let continuous = null, finalRecognizer = null;
     let previewPending = false, previewAbort = null, previewSeq = 0, previewLastAt = 0;
+    let previewDoneAt = 0, previewCostMs = 0;
     let cb = null, mime = '';
     let aborted = false, delivered = false, hardCapTimer = null;
     const LOCAL_PREVIEW_MIN_MS = 400;
     const LOCAL_PREVIEW_INTERVAL_MS = 650;
+    /* A preview re-transcribes the WHOLE take so far (Windows: a fresh PowerShell + System.Speech per call), so each one
+       costs more than the last. Started again the moment the previous one ended, they ran back to back for the whole
+       take - O(T^2) work and a core kept busy. The next preview now waits at least as long as the last one took: the
+       work stays at most half the wall time, however long the take runs. */
+    const LOCAL_PREVIEW_IDLE_FACTOR = 1;
 
     function pickMime() {
       const prefs = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
@@ -1432,6 +1455,7 @@ const Voice = (() => {
       const capturedMs = pcmSamples / Math.max(1, pcmRate || 48000) * 1000;
       const now = Date.now();
       if (capturedMs < LOCAL_PREVIEW_MIN_MS || (previewLastAt && now - previewLastAt < LOCAL_PREVIEW_INTERVAL_MS)) return;
+      if (previewDoneAt && now - previewDoneAt < previewCostMs * LOCAL_PREVIEW_IDLE_FACTOR) return;
       previewLastAt = now;
       previewPending = true;
       const seq = previewSeq;
@@ -1443,7 +1467,10 @@ const Voice = (() => {
       }).catch(error => {
         if (!error || error.name !== 'AbortError') console.warn('[voice] local preview failed:', (error && error.message) || error);
       }).finally(() => {
-        if (previewAbort === ac) { previewAbort = null; previewPending = false; }
+        if (previewAbort === ac) {
+          previewAbort = null; previewPending = false;
+          previewDoneAt = Date.now(); previewCostMs = Math.max(0, previewDoneAt - now);
+        }
       });
     }
     async function transcribe(blob) {
@@ -1516,24 +1543,28 @@ const Voice = (() => {
       if (continuous) continuous.cancel(); continuous = null;
       if (finalRecognizer) finalRecognizer.cancel(); finalRecognizer = null;
       cb = cbs; chunks = []; pcmFrames = []; pcmSamples = 0; pcmRate = 0; takeSttMode = classicSttMode;
-      previewSeq++; previewPending = false; previewAbort = null; previewLastAt = 0;
+      previewSeq++; previewPending = false; previewAbort = null; previewLastAt = 0; previewDoneAt = 0; previewCostMs = 0;
       aborted = false; delivered = false;
       // This take's identity. A click-stop-click during the permission prompt resets the shared flags above, so
       // the FIRST take's late getUserMedia used to pass the re-entry guard and build a second hot recorder (mic
       // left on, frames mixed, its prompt timeout firing 'mic-failed' into the new take).
       const take = previewSeq;
       if (takeSttMode === 'local' || classicPreviewMode === 'local') fetch('/api/local-voice/warm?tts=0', {method:'POST'}).catch(() => {});
-      let granted = null;
+      let granted = null, asked = null;
       try {
         // DEAD-BUTTON GUARD: getUserMedia can hang forever if the mic-permission prompt is DISMISSED (not
         // answered) — WebView2 and some browsers never settle the promise. Without a ceiling, `listening`
         // stays true and the mic button is wedged 'rec' until a page reload. Race the request against a
         // timeout so a stuck prompt degrades to a recoverable error instead of a permanently dead button.
+        asked = navigator.mediaDevices.getUserMedia({ audio: true });
         granted = await Promise.race([
-          navigator.mediaDevices.getUserMedia({ audio: true }),
+          asked,
           new Promise((_, rej) => setTimeout(() => { const e = new Error('mic prompt timed out'); e.name = 'TimeoutError'; rej(e); }, GUM_TIMEOUT_MS))
         ]);
       } catch (e) {
+        // A prompt answered AFTER the timeout still opens the microphone, and nothing would ever stop that stream:
+        // the mic stayed live (the OS recording light on) until a reload. Release a late grant the moment it lands.
+        if (asked) asked.then(late => { try { late.getTracks().forEach(t => t.stop()); } catch (_) {} }, () => {});
         if (take !== previewSeq) return;   // a newer take owns the callbacks now
         // NotAllowedError / SecurityError → the user (or policy) denied the mic. Map to the SR error string
         // so startListening()'s existing not-allowed branch (drop hands-free + clear copy) fires unchanged.

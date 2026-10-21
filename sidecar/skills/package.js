@@ -199,11 +199,18 @@ const catalog = require('./catalog.js');
       for (const f of s.files) writeText(path.join(dir, f.path), f.content);
       return dir;
     }
+    /* Disk limits mirror what the store itself can hold (64 support files; 1 MiB per file and 4 MiB in all cover the
+       store's character caps in any UTF-8 width). A package over them is not this skill's package: returns null and
+       hydrate() keeps the stored record. */
+    const DISK_MAX_FILES = 64, DISK_MAX_FILE_BYTES = 1024 * 1024, DISK_MAX_TOTAL_BYTES = 4 * 1024 * 1024;
     function readSupportFiles(dir) {
       const out = [];
+      let total = 0;
       for (const sd of SUPPORT_DIRS) {
         const base = path.join(dir, sd);
         if (!fs.existsSync(base)) continue;
+        // The support folder itself may be a link (a symlink, or a Windows junction): never walk into it.
+        try { if (fs.lstatSync(base).isSymbolicLink() || !insideRoot(base)) continue; } catch (_) { continue; }
         const stack = [base];
         while (stack.length) {
           const cur = stack.pop();
@@ -220,6 +227,11 @@ const catalog = require('./catalog.js');
               const rel = path.relative(dir, full).replace(/\\/g, '/');
               const p = supportPath(rel);
               if (!p) continue;
+              // A hardlinked file also lives somewhere else on disk; this module never writes one, so it is skipped.
+              let st = null; try { st = fs.lstatSync(full); } catch (_) { continue; }
+              if (st.nlink > 1) continue;
+              total += st.size;
+              if (out.length >= DISK_MAX_FILES || st.size > DISK_MAX_FILE_BYTES || total > DISK_MAX_TOTAL_BYTES) return null;
               let content = Buffer.alloc(0);
               try { content = fs.readFileSync(full); } catch (_) {}
               const asText = content.toString('utf8');
@@ -252,6 +264,7 @@ const catalog = require('./catalog.js');
       }
       if (!parsed) try { parsed = parseFrontmatter(fs.readFileSync(md, 'utf8')); } catch (_) {}
       if (!files.length) files = readSupportFiles(dir);
+      if (!files) return skill;   // over the disk limits (readSupportFiles): keep the stored record
       const out = Object.assign({}, skill);
       if (parsed) {
         out.description = parsed.meta.description || out.description || out.summary || '';

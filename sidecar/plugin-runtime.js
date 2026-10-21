@@ -5,7 +5,10 @@
      · every call has a deadline — a hung plugin costs its caller a timeout, never a stuck run;
      · a crash rejects everything in flight, marks the plugin crashed, and the NEXT use restarts it — at most
        MAX_RESTARTS times per RESTART_WINDOW_MS, after which it stays down until it is reloaded (re-approve, restart);
-     · stop() and a revoke end the process; nothing outlives its approval.
+     · stop() and a revoke end the process; nothing outlives its approval;
+     · a call that times out is followed by a liveness ping: a process that then answers nothing at all for longer
+       than the longest call deadline (its event loop is wedged) is killed, so the next use restarts it (bounded as
+       above) instead of every later hook paying its full timeout forever.
 
    makePluginRuntime({ fork, workerPath, store, now?, onLog?, timeouts? }) -> {
      start(plugin) -> { ok, subs, tools, handlers, jobs } | { ok:false, error }
@@ -16,7 +19,10 @@
 'use strict';
 const { note } = require('./failopen.js');   // a failed IPC/kill is noted, never silently dropped
 
-const DEFAULTS = { startMs: 8000, hookMs: 5000, toolMs: 120000, callMs: 30000 };
+/* wedgeMs (0 = derived): how long a process may answer nothing — no call result, no liveness pong — after one of its
+   calls timed out before it counts as wedged. Derived as the longest deadline a call it holds can have (a tool's), so
+   synchronous work that fits a call's own budget, or a background job's of the same length, is never cut off. */
+const DEFAULTS = { startMs: 8000, hookMs: 5000, toolMs: 120000, callMs: 30000, wedgeMs: 0 };
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 5 * 60 * 1000;
 
@@ -29,6 +35,7 @@ function makePluginRuntime(deps) {
   const now = deps.now;
   const rawLog = typeof deps.onLog === 'function' ? deps.onLog : () => {};
   const T = Object.assign({}, DEFAULTS, deps.timeouts || {});
+  const WEDGE_MS = Number(T.wedgeMs) > 0 ? Number(T.wedgeMs) : Math.max(T.toolMs, T.callMs, T.hookMs);
   const procs = new Map();   // id -> record
   /* E-STOP PAUSES JOBS, NOT GUARDS (sweep 2026-10-02). Killing plugin processes on E-STOP also switched off every
      plugin's pre_tool_call veto (a hook to a dead process answers null = allow) until RESUME, and a boot or an
@@ -45,7 +52,7 @@ function makePluginRuntime(deps) {
   // The process's working directory is NEUTRAL (never the plugin's own folder): on Windows a folder that is some
   // process's cwd cannot be deleted (EBUSY), which broke DELETE and a replacing plugin.submit while it ran.
   const workerCwd = deps.cwd || undefined;
-  /* verify(id, digest) -> bool: does the approval still cover exactly the code this process was started from?
+  /* verify(id, digest, opts?) -> bool: does the approval still cover exactly the code this process was started from?
      Asked before every tool/window call, before any restart, and on a timer for plugins with background jobs — an
      edit must never keep running (or be restarted from disk) without the Commander approving it again. */
   const verify = typeof deps.verify === 'function' ? deps.verify : null;
@@ -72,6 +79,8 @@ function makePluginRuntime(deps) {
     rec.state = 'starting';
     rec.error = '';
     rec.ready = null;
+    if (rec.ping) { clearTimeout(rec.ping.timer); rec.ping = null; }   // a probe of the previous process is moot
+    rec.hungReason = '';
     let child;
     try {
       child = fork(workerPath, [], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true, cwd: workerCwd });
@@ -88,7 +97,9 @@ function makePluginRuntime(deps) {
       if (rec.child !== child) return;
       const planned = rec.state === 'stopping' || rec.state === 'stopped';
       rec.state = planned ? 'stopped' : 'crashed';
-      if (!planned) rec.error = 'its process exited (' + (signal || ('code ' + code)) + ')';
+      if (!planned) rec.error = rec.hungReason || ('its process exited (' + (signal || ('code ' + code)) + ')');
+      rec.hungReason = '';
+      if (rec.ping) { clearTimeout(rec.ping.timer); rec.ping = null; }
       rejectAll(rec, planned ? 'the plugin was stopped' : 'the plugin crashed: ' + rec.error);
       if (rec.readyResolve) { rec.readyResolve({ ok: false, error: rec.error || 'the plugin stopped' }); rec.readyResolve = null; }
       rec.child = null;
@@ -150,6 +161,11 @@ function makePluginRuntime(deps) {
       return resolve(Object.assign({ ok: true }, rec.surface));
     }
     if (m.t === 'req') return void answerRequest(rec, m);
+    // a pong (any one) or a call's answer proves the event loop is running: the probe is answered
+    if (m.t === 'pong' || m.t === 'res') {
+      if (rec.ping) { clearTimeout(rec.ping.timer); rec.ping = null; }
+      if (m.t === 'pong') return;
+    }
     if (m.t === 'res') {
       const p = rec.pending.get(m.id); if (!p) return;
       rec.pending.delete(m.id); clearTimeout(p.timer);
@@ -199,6 +215,52 @@ function makePluginRuntime(deps) {
     return rec.restarting;
   }
 
+  /* A TIMEOUT IS NOT PROOF OF A HANG — silence is. A call can time out because its own work is slow (a long tool, an
+     awaited network call) while the process stays healthy; killing it then would take its other calls and jobs down
+     with it. So a timeout only asks { t:'ping' }: a live event loop answers at once. A process that answers NOTHING
+     (no pong, no call result) for WEDGE_MS after that is wedged (a busy loop, a hang); it used to stay 'running'
+     forever, so every later hook call, station-wide, waited out its full timeout. Now it is killed: the exit marks it
+     crashed with this reason, and the next use restarts it, bounded by MAX_RESTARTS.
+     NO HOLD (review 2026-10-21). A plugin that wedges on every use is recycled on every use (~125 s apart, so the
+     crash window never trips) and each hook pays its timeout, as it did when it stayed wedged forever. Keeping it
+     down after a second silence kill was tried and dropped: status() — and EXTENSIONS, which prints "It restarts on
+     its next use" for any crash — kept calling it an ordinary crash that restarts. A hold needs a state its readers
+     can show first.
+     ONE BUDGET, FROM THE FIRST TIMEOUT (review 2026-10-21). A blocked loop is also what legitimate synchronous work
+     looks like (an execSync git or zip call) — a tool's or a background job's — so the first silent ping proves
+     nothing; WEDGE_MS is the longest deadline a call may have, so work that fits a call's own budget is never cut off.
+     Calls and hooks sent meanwhile neither extend the budget (a window polling its backend would keep a busy loop
+     alive forever) nor are skipped: a guard's pre_tool_call still waits its own timeout, so a veto from a process
+     that comes back inside it still lands, as before. It is ended with SIGKILL: a wedged loop can never run a SIGTERM
+     listener the plugin registered.
+     THE KILL LINE SAYS WHAT HAPPENS NEXT (polish 2026-10-21). It always said "the next use restarts it", but live()
+     refuses a restart once MAX_RESTARTS fall inside RESTART_WINDOW_MS: a plugin killed with its budget spent stays
+     down, and the line now says so and until when (the moment the oldest of those restarts leaves the window). */
+  function restartNote(rec) {
+    const t = now();
+    const recent = rec.restarts.filter((x) => t - x < RESTART_WINDOW_MS);
+    if (recent.length < MAX_RESTARTS) return 'the next use restarts it';
+    const until = recent[recent.length - MAX_RESTARTS] + RESTART_WINDOW_MS;
+    return 'it already restarted ' + MAX_RESTARTS + ' times in the last 5 minutes, so it stays down: any use before ' +
+      new Date(until).toISOString() + ' (in ' + Math.ceil((until - t) / 1000) + ' s) is refused';
+  }
+  function probe(rec) {
+    const child = rec.child;
+    if (!child || rec.state !== 'running' || rec.ping) return;
+    const ref = ++rec.seq;
+    const timer = setTimeout(() => {
+      if (!rec.ping || rec.ping.ref !== ref) return;
+      rec.ping = null;
+      if (rec.child !== child || rec.state !== 'running') return;
+      rec.hungReason = 'it stopped responding (a call timed out and it then answered nothing, not even a liveness check, for ' + Math.round(WEDGE_MS / 1000) + ' s)';
+      onLog(rec.id, '[runtime] ' + rec.hungReason + ' — ending its process; ' + restartNote(rec));
+      try { child.kill('SIGKILL'); } catch (e) { note('plugins.runtime.kill-hung', e); }
+    }, WEDGE_MS);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    rec.ping = { ref, timer };
+    try { child.send({ t: 'ping', ref }); } catch (e) { note('plugins.runtime.ping-send', e); }
+  }
+
   /* signal (optional): the RUN's abort signal. A STOP / E-STOP used to wait out a plugin tool to its end (up to the tool
      timeout) because nothing reached the process (QA 2026-10-02): now the call settles at once as stopped and the
      process gets { t:'cancel', ref } — the tool's ctx.signal aborts, so a tool that honours it stops its work too. */
@@ -212,6 +274,7 @@ function makePluginRuntime(deps) {
         if (!rec.pending.has(id)) return;
         rec.pending.delete(id); done();
         reject(new Error(label + ' did not answer within ' + Math.round(ms / 1000) + ' s'));
+        probe(rec);
       }, ms);
       if (timer && typeof timer.unref === 'function') timer.unref();
       rec.pending.set(id, { resolve: (v) => { done(); resolve(v); }, reject: (e) => { done(); reject(e); }, timer });
@@ -274,12 +337,15 @@ function makePluginRuntime(deps) {
   function stopAll() { return Promise.all(Array.from(procs.keys()).map((id) => stop(id))); }
 
   // Plugins with background jobs are re-verified on a timer: nothing else would ever notice an edit to them.
+  // { quick: true } (2026-10-19): the host may answer from a stat stamp of the approved folder and re-hash only when
+  // something on disk moved (or its safety interval lapsed) — see plugins.js approvedRecord. Every other verify call
+  // (tool/window calls, restarts) stays a full check.
   let jobCheck = null;
   if (verify) {
     jobCheck = setInterval(() => {
       for (const [id, rec] of procs) {
         if (rec.state !== 'running' || !rec.surface || !rec.surface.jobs) continue;
-        Promise.resolve(verify(id, rec.plugin.digest)).then((ok) => {
+        Promise.resolve(verify(id, rec.plugin.digest, { quick: true })).then((ok) => {
           if (!ok && procs.get(id) === rec) { onLog(id, '[runtime] its files changed since approval — stopped until approved again'); stop(id); }
         }, (e) => note('plugins.runtime.job-verify', e));
       }

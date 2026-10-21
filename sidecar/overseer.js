@@ -36,9 +36,11 @@ function makeOverseer(deps) {
 
   // ONE load of the page's save: deps.sessions() parses the whole save file, so a caller that needs the rows twice
   // (resolve the parent, then check the title) reads them from one view instead of loading it again.
+  // deps.sessionsRead() (optional) = { doc, stamp }: the same doc plus the save's stamp for a clean read ('' otherwise)
   function view() {
     if (unavailable) throw new Error(unavailable);
-    const legacy = deps.sessions() || {};
+    const read = deps.sessionsRead ? deps.sessionsRead() : { doc: deps.sessions(), stamp: '' };
+    const legacy = (read && read.doc) || {};
     const deleted = new Set(legacy.deletedIds || []);
     const rows = new Map((legacy.workstreams || []).map(w => [w.id, w]));
     for (const w of state.threads) {
@@ -50,10 +52,43 @@ function makeOverseer(deps) {
         projectRoot: (visible && visible.projectRoot) || w.projectRoot || null }));
     }
     return { deleted, rows: Array.from(rows.values()).filter(w => !w.archived).map(w => ({ ...w,
-      title: w.title || (w.id === legacy.generalId ? 'General' : 'Untitled') })) };
+      title: w.title || (w.id === legacy.generalId ? 'General' : 'Untitled') })), stamp: (read && read.stamp) || '' };
   }
   function threads() { return view().rows; }
   function resolve(ref) { return resolveIn(threads(), ref); }
+  /* THE LISTED THREADS, MEMOIZED BY THE SAVE'S STAMP (idle-cpu piece 2, 2026-10-19). GET /api/overseer is polled every
+     2.5 s per open page and parsed the whole save each time (~11 ms at a real 3.8 MB station, ~45 ms near the 16 MiB cap),
+     for a list that only changes when the save or overseer.json does. The memo holds ONLY the flat projected rows (never
+     view() rows, which point into the parsed doc, never the doc) and is reused only while (1) the save's stamp, taken by
+     deps.sessionsStamp() before this read, still matches, and (2) `state` is the very object it was built from (state is
+     replaced on every change, never edited in place: an in-place edit must clear `listed`). A build is adopted only when
+     its read was clean (stamp non-empty) and the stamp did not move while it was built, so a racing save costs one more
+     read, never a stale list. Callers get copies. threads()/resolve()/create()/ensure()/projectHome() stay uncached. */
+  let listed = null;
+  function projectThread(w) {
+    return { id: w.id, title: w.title, agentId: w.agentId,
+    parentStreamId: w.parentStreamId || '', projectRoot: w.projectRoot || null, projectHome: !!w.projectHome, worker: w.worker === true,
+    kind: w.kind, lane: w.lane, createdAt: w.createdAt,
+    // the lead run that filed this thread (requestId = '<leadRunId>:<call>:<slot>' for a dispatch worker,
+    // '<leadRunId>:<title>' for a session.create thread): the page groups a lead run's threads by it
+    leadRunId: String(w.requestId || '').split(':')[0],
+    // the dispatch call that filed a worker thread: the page keeps each call's workers together. Workers only: a
+    // session.create title may hold a colon, and that is never a call
+    call: w.worker === true ? (p => p.length > 2 ? p[1] : '')(String(w.requestId || '').split(':')) : '',
+    // the worker slot in that call: the page lists a call's workers in the order they were asked
+    slot: Number(String(w.requestId || '').split(':').pop()) || 0 };
+  }
+  function listedThreads() {
+    const before = deps.sessionsStamp ? deps.sessionsStamp() : '';
+    if (before && listed && listed.stamp === before && listed.state === state) return listed.rows;
+    const v = view();
+    const rows = v.rows.map(projectThread);
+    listed = (v.stamp && deps.sessionsStamp && v.stamp === deps.sessionsStamp()) ? { stamp: v.stamp, state, rows } : null;
+    return rows;
+  }
+  // resolve() over the listed rows: the same id/title/agentId/worker, projectRoot '' read as null (both falsy). For a
+  // check that only needs to know the conversation exists and its project; anything that runs a turn resolves afresh.
+  function resolveListed(ref) { return { ...resolveIn(listedThreads(), ref) }; }
   function resolveIn(rows, ref) {
     const key = String(ref || '').trim().toLowerCase();
     const exact = rows.filter(w => w.id === ref);
@@ -274,18 +309,20 @@ function makeOverseer(deps) {
     state = next;
     commit(state);
   }
+  /* THE TICK AND THE HALT READ NO SAVE (idle-cpu piece 2, 2026-10-19). paused and reviews come from overseer.json's
+     state already held in RAM, yet the 2 s tick and GET /api/halt read them through snapshot(), which also builds every
+     thread from a full parse of the page's save (3.8 MB on a real station: ~20 ms a tick, ~86k parses a day, at idle).
+     These four answer from RAM with exactly the values snapshot() would carry; snapshot() stays the page's full picture. */
+  function paused() { return unavailable ? true : (emergencyPaused || !!state.paused); }
+  function error() { return unavailable || ''; }
+  function reviews() { return unavailable ? [] : copy(state.reviews); }
+  function review(id) {
+    if (unavailable) return null;
+    const row = state.reviews.find(r => r.id === id);
+    return row ? copy(row) : null;
+  }
   function snapshot() { if (unavailable) return { threads: [], reviews: [], paused: true, error: unavailable };
-    return { threads: threads().map(w => ({ id: w.id, title: w.title, agentId: w.agentId,
-    parentStreamId: w.parentStreamId || '', projectRoot: w.projectRoot || null, projectHome: !!w.projectHome, worker: w.worker === true,
-    kind: w.kind, lane: w.lane, createdAt: w.createdAt,
-    // the lead run that filed this thread (requestId = '<leadRunId>:<call>:<slot>' for a dispatch worker,
-    // '<leadRunId>:<title>' for a session.create thread): the page groups a lead run's threads by it
-    leadRunId: String(w.requestId || '').split(':')[0],
-    // the dispatch call that filed a worker thread: the page keeps each call's workers together. Workers only: a
-    // session.create title may hold a colon, and that is never a call
-    call: w.worker === true ? (p => p.length > 2 ? p[1] : '')(String(w.requestId || '').split(':')) : '',
-    // the worker slot in that call: the page lists a call's workers in the order they were asked
-    slot: Number(String(w.requestId || '').split(':').pop()) || 0 })), reviews: copy(state.reviews), paused: emergencyPaused || !!state.paused }; }
+    return { threads: listedThreads().map(w => ({ ...w })), reviews: copy(state.reviews), paused: paused() }; }
   function resumeReviews() {
     // A damaged optional coordination store must not prevent ordinary chat.
     // Reads/creates still refuse, and the poller remains paused; never overwrite it.
@@ -293,7 +330,8 @@ function makeOverseer(deps) {
     if (state.paused || emergencyPaused) update(s => { s.paused = false; return null; });
     emergencyPaused = false;
   }
-  return { threads, resolve, create, ensure, projectHome, collect, patchReview, withThread, snapshot, stopReviews, resumeReviews, membersOf, refreshReview };
+  return { threads, resolve, create, ensure, projectHome, collect, patchReview, withThread, snapshot, stopReviews, resumeReviews, membersOf, refreshReview,
+    paused, error, reviews, review, resolveListed };
 }
 /* station.read_session as the OVERSEER answers it (org P29-sys review, 2026-10-14). The lead's session.peek in an interactive
    coordinator run is wired to overseerStation (sidecar/index.js), which answers read_session itself and never reaches the

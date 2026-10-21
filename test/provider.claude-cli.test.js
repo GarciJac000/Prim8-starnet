@@ -185,6 +185,61 @@ const result = (extra) => Object.assign({ type: 'result', subtype: 'success', is
     A.eq(chat.filter(e => e.type === 'text').map(e => e.delta).join(''), 'Use <invoke name="x"> like this.', 'a chat turn never turns prose into a call');
   }
 
+  // E4. A FILE-SIZED CALL IS READ IN LINEAR TIME (2026-10-20). Each push appended to the call's buffer and then searched
+  //     it, which made V8 copy the whole call flat on every delta: a 512 KB fs_write cost 1-4 s of sidecar CPU. Counted
+  //     here as characters handed to string search/slice calls while the call streams (trunk: ~2000x the call's size).
+  {
+    const SP = String.prototype, RP = RegExp.prototype;
+    const saved = { indexOf: SP.indexOf, lastIndexOf: SP.lastIndexOf, slice: SP.slice, search: SP.search, exec: RP.exec };
+    const cut = (s, a, b) => saved.slice.call(s, a, b);
+    function drive(text, step) {
+      const sp = _internals.makeCallSplitter();
+      const out = { text: '', starts: [], bodies: [], stop: false, rest: '' };
+      const take = o => {
+        out.text += o.text;
+        for (const it of o.items) { if (it.start) out.starts.push(it.start); if (it.body != null) out.bodies.push([it.body, it.closed]); }
+        if (o.stop) { out.stop = true; out.rest = o.rest; }
+      };
+      const steps = typeof step === 'number' ? null : step;
+      for (let i = 0, k = 0; i < text.length; k++) { const n = steps ? steps[k % steps.length] : step; take(sp.push(cut(text, i, i + n))); i += n; }
+      take(sp.end());
+      return out;
+    }
+    function touched(text, step) {
+      let sum = 0, out;
+      const wrap = k => function () { sum += String(this).length; return saved[k].apply(this, arguments); };
+      SP.indexOf = wrap('indexOf'); SP.lastIndexOf = wrap('lastIndexOf'); SP.slice = wrap('slice'); SP.search = wrap('search');
+      RP.exec = function (s) { sum += String(s).length; return saved.exec.call(this, s); };
+      try { out = drive(text, step); }
+      finally { SP.indexOf = saved.indexOf; SP.lastIndexOf = saved.lastIndexOf; SP.slice = saved.slice; SP.search = saved.search; RP.exec = saved.exec; }
+      return { ratio: sum / text.length, out };
+    }
+    const big = 'const doc = "a < b && c > d";\n'.repeat(4400);   // ~128 KB of file body
+    const native = '<function_calls>\n<invoke name="fs_write">\n<parameter name="content">' + big + '</parameter>\n</invoke>\n</function_calls>';
+    const n = touched(native, 64);
+    A.eq(n.out.starts, ['fs_write'], 'E4 native: the call is announced once');
+    A.eq(n.out.bodies, [['\n<parameter name="content">' + big + '</parameter>\n', true]], 'E4 native: the body arrives whole and exact');
+    A.ok(n.ratio <= 50, 'E4 native: chars searched/sliced = ' + n.ratio.toFixed(1) + 'x the call (must stay linear, <= 50x)');
+    const jsonCall = '<tool_call>{"name":"fs_write","arguments":' + JSON.stringify({ path: 'big.js', content: big }) + '}</tool_call>';
+    const j = touched(jsonCall, 64);
+    A.eq(j.out.starts, ['fs_write'], 'E4 json: the call is announced once');
+    A.eq(j.out.bodies, [[cut(jsonCall, '<tool_call>'.length, jsonCall.length - '</tool_call>'.length), true]], 'E4 json: the body arrives whole and exact');
+    A.ok(j.ratio <= 50, 'E4 json: chars searched/sliced = ' + j.ratio.toFixed(1) + 'x the call (must stay linear, <= 50x)');
+
+    // the parked body changes nothing a reader sees: every split of these gives what one whole push gives
+    const late = '<tool_call>{"arguments": {"x": "' + 'p'.repeat(500) + '"}, "name": "late"}</tool_call>';
+    A.eq(drive(late, 7).starts, [], 'E4: a <tool_call> whose name comes past the first 400 chars never announces under small pushes');
+    A.eq(drive(late, 7).bodies, drive(late, late.length).bodies, 'E4: …and closes with the same body as one whole push');
+    const inValue = '<function_calls>\n<invoke name="fs_write">\n<parameter name="content">x</invoke>\n<div>' + 'y'.repeat(300) + '</invoke> tail </invoke>\n</function_calls>';
+    const cutOff = '<function_calls>\n<invoke name="fs_write">\n<parameter name="content">' + 'z'.repeat(300) + '</invoke>\n<inv';
+    for (const text of [inValue, cutOff, late, native.slice(0, 2000)]) {
+      const whole = JSON.stringify(drive(text, text.length));
+      let differ = 0;
+      for (let at = 1; at < text.length; at++) if (JSON.stringify(drive(text, [at, text.length])) !== whole) differ++;
+      A.eq(differ, 0, 'E4: split at every offset == one whole push (' + JSON.stringify(text.slice(0, 40)) + '…)');
+    }
+  }
+
   // F. failures are errors, never a silent empty delivery.
   {
     const { p } = make({ lines: [init('none'), result({ is_error: true, subtype: 'success', result: 'Claude AI usage limit reached' })] });

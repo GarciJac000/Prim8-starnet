@@ -44,6 +44,19 @@
      deps.heartbeatMs       -> int                 // throttle for the durable liveness write (30s)
      deps.maxParallel       -> int                 // loops that may have an iteration in flight at once (4)
      deps.maxRunMs          -> int                 // zombie-claim ceiling handed to the pure gate as staleMs
+     deps.declineRepeatMs   -> int                 // OPTIONAL: re-log an UNCHANGED stand-down at most this often (1h)
+
+   EDGE-TRIGGERED STAND-DOWNS (2026-10-19, idle-CPU piece 2). The 20s tick used to ledger a 'skip' on EVERY tick a
+   loop sat budget-capped, busy or precheck-blocked (and a 'defer' on every at-capacity tick, and a 'skip' on every
+   no-credential tick): 4,320 fsync'd rows a day per stuck loop, which evicted the night shift's whole trail from the
+   autonomy ledger's 3,000-row RAM ring in under 17 h. These stand-downs now copy nightshift-driver's logDecline: a
+   row lands only when the loop's stand-down reason (kind + binding + reason + note) CHANGES, or once per
+   declineRepeatMs while it holds. The first row of every run is byte-identical to the old per-tick row; a later row
+   (a changed reason, the hourly repeat, or the FIRE that ends the run) carries detail.heldTicks/heldBinding — how
+   many identical ticks the previous logged reason was folded for. Nothing reads per-tick rows for truth: GET
+   /api/loops reads the LIVE gate. The run memory is RAM-only (a restart logs one fresh row per stuck loop, which is
+   true) and pruned for deleted loops. Persist/settlement-failure defers are NEVER folded — they are failure
+   signals, and hiding a failing disk would be a lie.
 
    NO loop.* BUS EVENTS, DELIBERATELY. shared/events.js is the FROZEN, OWNED contract; it carries no loop.*
    family and this lane does not get to invent one (additive changes go through the owner). So the driver emits
@@ -73,6 +86,7 @@
   const DEFAULT_MAX_PARALLEL = 0;          // unlimited; positive values opt into a ceiling
   const DEFAULT_MAX_RUN_MS = 900000;      // 15 min — the zombie-claim ceiling, extended by live heartbeats
   const DEFAULT_HEARTBEAT_MS = 30000;     // durable liveness write interval while an iteration streams
+  const DEFAULT_DECLINE_REPEAT_MS = 3600000;   // an unchanged stand-down is re-logged at most hourly (= night shift)
   const TITLE_WORDS = 12;
 
   function noop() {}
@@ -113,6 +127,7 @@
     const maxRunMs = deps.maxRunMs != null ? deps.maxRunMs : DEFAULT_MAX_RUN_MS;
     // how often a live iteration persists its liveness heartbeat. Throttled so the token path never writes.
     const heartbeatMs = deps.heartbeatMs != null ? deps.heartbeatMs : DEFAULT_HEARTBEAT_MS;
+    const declineRepeatMs = (Number.isFinite(deps.declineRepeatMs) && deps.declineRepeatMs >= 0) ? deps.declineRepeatMs : DEFAULT_DECLINE_REPEAT_MS;
     const tee = isFn(deps.tee) ? deps.tee : null;
     /* THE HOST-RUN CHECK (S2). Two hooks, both optional — a loop with no check behaves exactly as before.
          snapshot(loop) -> Promise<any>   taken BEFORE the iteration runs, so the check can attribute changed
@@ -155,6 +170,8 @@
     // which is what survives a restart. Both are consulted by the gate.
     const leases = new Map();
     let bootReconciled = false;
+    // loopId -> { key, binding, at, held }: the last LOGGED stand-down per loop (the edge-trigger memory, RAM only).
+    const lastStandDown = new Map();
 
     function personaOf() {
       const p = deps.persona;
@@ -167,6 +184,31 @@
           source: 'loop', kind: kind, jobId: loop && loop.id, agentId: loop && loop.agentId
         }, extra || {}));
       } catch (_) { /* telemetry must never break a run */ }
+    }
+
+    // ledger a per-tick stand-down iff its reason changed since this loop's last logged one, or the same reason has
+    // held for declineRepeatMs (see EDGE-TRIGGERED STAND-DOWNS). Returns true when written; a suppressed tick only
+    // counts toward the held tally. Mirrors nightshift-driver's logDecline.
+    function noteStandDown(kind, loop, nowMs, extra) {
+      const id = loop && loop.id;
+      const det = (extra && extra.detail) || null;
+      const key = kind + '|' + String(extra.binding || '') + '|' + String(extra.reason || '') + '|' + String((det && det.note) || '');
+      const prev = lastStandDown.get(id);
+      const fresh = !prev || prev.key !== key || !(nowMs >= prev.at) || (nowMs - prev.at) >= declineRepeatMs;
+      if (!fresh) { prev.held += 1; return false; }
+      const out = Object.assign({}, extra);
+      if (prev && prev.held > 0) out.detail = Object.assign({}, det || {}, { heldTicks: prev.held, heldBinding: prev.binding });
+      note(kind, loop, out);
+      lastStandDown.set(id, { key: key, binding: extra.binding, at: nowMs, held: 0 });
+      return true;
+    }
+
+    // a failure row (a persist defer) lands between stand-downs: the run is BROKEN, so the next stand-down is a fresh
+    // edge and the trail never ends on the failure while the loop is actually held for another reason. The held
+    // tally is kept and rides that next row (night shift: its forced persist-failed decline replaces lastDecline).
+    function breakStandDownRun(id) {
+      const prev = lastStandDown.get(id);
+      if (prev) prev.key = null;
     }
 
     /* buildMessages — the iteration prompt: the standing objective, then the LEDGER DIGEST. The digest is what
@@ -266,7 +308,7 @@
       const key = deps.getKey ? deps.getKey(provider, loop) : null;
       const hasCred = deps.hasCredential ? deps.hasCredential(provider, key, loop) : true;
       if (!hasCred) {
-        note('skip', loop, { reason: 'no-credential', binding: 'precheck' });
+        noteStandDown('skip', loop, nowMs, { reason: 'no-credential', binding: 'precheck' });
         return false;
       }
 
@@ -275,11 +317,13 @@
       // 1. durable claim, persisted BEFORE anything is launched.
       if (!setLoops(store.claimFire(getLoops(), loop.id, { now: nowMs }))) {
         note('defer', loop, { reason: 'claim-persist-failed', binding: 'persist' });
+        breakStandDownRun(loop.id);
         return false;
       }
       // 2. take the iteration slot (iterationCount advances at START so a crash still burns it).
       if (!setLoops(store.startIteration(getLoops(), loop.id, { runId: runId, now: nowMs }))) {
         note('defer', loop, { reason: 'start-persist-failed', binding: 'persist' });
+        breakStandDownRun(loop.id);
         return false;
       }
 
@@ -330,7 +374,13 @@
         if (tee) { try { tee(name, p, { loopId: loop.id, runId: runId, iteration: iterN }); } catch (_) {} }
       };
 
-      note('fire', fresh, { runId: runId, reason: 'iteration-' + iterN, binding: 'verdict', detail: { iteration: iterN } });
+      // a launch ENDS the stand-down run (night shift: a beat breaks the decline run). The fire row carries the folded
+      // tally only when something was folded, so an ordinary fire row stays exactly { iteration }.
+      const standDown = lastStandDown.get(loop.id);
+      lastStandDown.delete(loop.id);
+      const fireDetail = { iteration: iterN };
+      if (standDown && standDown.held > 0) { fireDetail.heldTicks = standDown.held; fireDetail.heldBinding = standDown.binding; }
+      note('fire', fresh, { runId: runId, reason: 'iteration-' + iterN, binding: 'verdict', detail: fireDetail });
 
       /* RESOLVE THE PROJECT CONTEXT BEFORE SPENDING. The slot and the durable claim are already taken (so a
          crash here still burns the iteration rather than replaying it), but the model call has not happened.
@@ -513,9 +563,10 @@
 
         if (!d.fire) {
           // only the states that are genuinely a per-tick DECISION are worth a ledger row; a paused/stopped/
-          // dormant loop would otherwise write a row every 60s forever and drown the real decisions.
+          // dormant loop would otherwise write a row every 20s tick forever and drown the real decisions. Even
+          // these three are edge-triggered (noteStandDown): a loop held for hours writes one row an hour, not 180.
           if (d.binding === 'concurrency' || d.binding === 'precheck' || d.binding === 'budget') {
-            note('skip', loop, { reason: d.binding, binding: d.binding, detail: { note: d.detail || '' } });
+            noteStandDown('skip', loop, nowMs, { reason: d.binding, binding: d.binding, detail: { note: d.detail || '' } });
           }
           skipped++;
           continue;
@@ -524,11 +575,17 @@
         planned++;
         if (maxParallel > 0 && leases.size >= maxParallel) {
           // over the fan-out cap: HELD, not dropped. Nothing is advanced, so it is still eligible next tick.
-          note('defer', loop, { reason: 'at-capacity', binding: 'concurrency-cap' });
+          noteStandDown('defer', loop, nowMs, { reason: 'at-capacity', binding: 'concurrency-cap' });
           deferred++;
           continue;
         }
         if (fireLoop(loop, nowMs)) fired++; else skipped++;
+      }
+
+      // keep the edge-trigger memory bounded: forget the run of any loop that no longer exists.
+      if (lastStandDown.size) {
+        const live = new Set(getLoops().map(l => l && l.id));
+        for (const id of Array.from(lastStandDown.keys())) if (!live.has(id)) lastStandDown.delete(id);
       }
 
       return { fired: fired, skipped: skipped, deferred: deferred, planned: planned };
@@ -562,7 +619,10 @@
       abortLease: abortLease,
       abortAllLeases: abortAllLeases,
       leases: leases,
-      _internals: { fireLoop: fireLoop, settle: settle, reconcileBoot: reconcileBoot, buildMessages: buildMessages, defaultHarvest: defaultHarvest }
+      _internals: {
+        fireLoop: fireLoop, settle: settle, reconcileBoot: reconcileBoot, buildMessages: buildMessages, defaultHarvest: defaultHarvest,
+        standDownRuns: () => lastStandDown.size
+      }
     };
   }
 

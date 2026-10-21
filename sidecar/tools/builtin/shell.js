@@ -29,6 +29,9 @@
   const trackChild = (typeof require === 'function') ? require('../../procledger.js').trackChild : function () { return { exited: function () {}, done: function () {} }; };
   const shellFailNote = (typeof require === 'function') ? require('../../failopen.js').note : function () {};
   const visibleOutputPath = (typeof require === 'function') ? require('../../output-artifacts.js').visibleOutputPath : function (p) { return p; };
+  // fullOut is bounded (head + tail, output-capture.js): an unbounded `+=` crashed the station at V8's max string length
+  const makeFullCapture = (typeof require === 'function') ? require('../../output-capture.js').makeFullCapture
+    : function () { let s = ''; return { push: function (t) { s += t; }, value: function () { return s; }, elided: function () { return 0; } }; };
   function safeAgentId(id) { if (!AID_RE.test(id || '')) throw new Error('bad agentId'); return id; }
   function clip(s, n) { s = String(s == null ? '' : s); n = n || 200; return s.length > n ? s.slice(0, n) + '…' : s; }
   function clamp(n, lo, hi) { n = Number(n); if (!isFinite(n)) return lo; return Math.max(lo, Math.min(hi, n)); }
@@ -771,10 +774,11 @@
       const receipt = trackChild(opts.ledger || null, child && child.pid, { cmd: opts.ledgerCmd != null ? opts.ledgerCmd : '', kind: 'shell.fg', pinAfterMs: opts.ledgerPinAfterMs, exitStampMs: opts.ledgerExitStampMs });
       if (typeof child.on === 'function') child.on('exit', function () { receipt.exited(); });
       const t0 = now();
-      let out = '', fullOut = '', total = 0, truncated = false, settled = false, timedOut = false, aborted = false;
+      let out = '', total = 0, truncated = false, settled = false, timedOut = false, aborted = false;
+      const full = makeFullCapture(opts.fullOutMax);
       const append = function (text) {
         const complete = String(text);
-        fullOut += complete;
+        full.push(complete);
         if (total >= maxBytes) { truncated = true; return; }
         let s = complete;
         if (total + s.length > maxBytes) { s = s.slice(0, maxBytes - total); truncated = true; }
@@ -799,7 +803,7 @@
         receipt.done();
         // Stripped HERE, at the single exit of the shared primitive, so shell.exec and the background tail
         // (shellbg.js reads r.out) are both covered by one strip that cannot drift into two.
-        resolve({ exitCode: (typeof code === 'number') ? code : -1, out: stripAnsi(out), fullOut: stripAnsi(fullOut), ms: Math.max(0, now() - t0), truncated: truncated, timedOut: timedOut, aborted: aborted });
+        resolve({ exitCode: (typeof code === 'number') ? code : -1, out: stripAnsi(out), fullOut: full.value(stripAnsi), fullOutElided: full.elided(), ms: Math.max(0, now() - t0), truncated: truncated, timedOut: timedOut, aborted: aborted });
       }
       // a spawn failure (no PID) is the only 'error' that ends the command; it has no receipt to keep either way
       child.on('error', function (e) { if (settled) return; settled = true; clearTimeout(timer); if (sig) { try { sig.removeEventListener('abort', onAbort); } catch (_) {} } receipt.done(); reject(new Error('shell error: ' + ((e && e.message) || e))); });
@@ -947,7 +951,10 @@
           const exitCode = (pm.ec != null && !res.timedOut && !res.aborted) ? pm.ec : res.exitCode;
           const note = res.timedOut ? ' — KILLED (timed out after ' + timeoutMs + 'ms)' : res.aborted ? ' — KILLED (aborted)' : '';
           const body = redact((res.truncated ? preview.cleanOut : pm.cleanOut) || '(no output)');
-          const content = clampNote + body + '\n[exit ' + exitCode + (res.truncated ? ', output truncated to ' + Math.round(MAX_BYTES / 1000) + 'KB' : '') + note + ']';
+          // the bounded capture (output-capture.js) dropped the middle of a huge output: say so, never imply the saved copy is whole
+          const elided = Number(res.fullOutElided) > 0 ? Number(res.fullOutElided) : 0;
+          const content = clampNote + body + '\n[exit ' + exitCode + (res.truncated ? ', output truncated to ' + Math.round(MAX_BYTES / 1000) + 'KB' : '')
+            + (elided ? ', ' + elided + ' characters from the middle of the output were not kept' : '') + note + ']';
           const fullContent = res.truncated
             ? clampNote + redact(pm.cleanOut || '(no output)') + '\n[exit ' + exitCode + note + ']'
             : undefined;
@@ -972,9 +979,12 @@
             const killed = new Error(head + content);
             killed.toolSummary = res.timedOut ? 'timeout' : 'cancelled';
             if (fullContent) killed.fullContent = head + fullContent;
+            if (elided) killed.fullContentElided = elided;
             throw killed;
           }
-          return { content: content, fullContent: fullContent, summary: 'exit ' + exitCode + ' (' + res.ms + 'ms)' + (res.truncated ? ', truncated' : '') };
+          const done = { content: content, fullContent: fullContent, summary: 'exit ' + exitCode + ' (' + res.ms + 'ms)' + (res.truncated ? ', truncated' : '') };
+          if (elided) done.fullContentElided = elided;
+          return done;
         });
       }
     };
@@ -993,7 +1003,9 @@
         if (id) {
           const v = await Promise.resolve(source ? source.statusBackground(aid, id) : bg.status(aid, id));
           if (!v) return { content: 'No background process "' + id + '".', summary: 'not found' };
-          const saved = v.outputSpillVerified ? '\n[full output: ' + v.outputBytes + ' bytes durably appended to ' + spillPath(v.outputPath, ctx) + ']' : (v.outputSpillError ? '\n[full-output spill failed: ' + v.outputSpillError + ']' : '');
+          const saved = v.outputSpillVerified ? '\n[full output: ' + v.outputBytes + ' bytes durably appended to ' + spillPath(v.outputPath, ctx) + ']'
+            : v.outputSpillCapped ? '\n[output log: the first ' + v.outputBytes + ' bytes are durably appended to ' + spillPath(v.outputPath, ctx) + '; the log stopped at its cap, later output is only in the memory ring]'
+            : (v.outputSpillError ? '\n[full-output spill failed: ' + v.outputSpillError + ']' : '');
           const state = v.running ? 'RUNNING' + killNote(v) : v.lost ? 'LOST — ' + (v.remoteBoundary || 'remote process identity is unconfirmed') : 'exited ' + v.exitCode + (v.killed ? ' (killed)' : '') + killNote(v);
           return { content: '[' + v.bgId + '] ' + state + ' · ' + v.ms + 'ms · ' + v.cmd + saved + '\n--- output tail ---\n' + redact(v.tail || '(none)'), summary: v.running ? 'running' : v.lost ? 'lost' : 'exited ' + v.exitCode };
         }
@@ -1095,8 +1107,11 @@
         const note = r.truncatedStart
           ? (r.outputSpillVerified
               ? '\n(earlier output left the memory buffer; the full ' + r.outputBytes + '-byte log is saved once at ' + spillPath(r.outputPath, ctx) + ' and can be paged with fs.read)'
-              : '\n(earlier output was dropped from memory and durable spill is unverified' + (r.outputSpillError ? ': ' + r.outputSpillError : '') + ')')
-          : (r.outputSpillVerified ? '\n(full output is durably appended to ' + spillPath(r.outputPath, ctx) + '; ' + r.outputBytes + ' bytes so far)' : '');
+              : r.outputSpillCapped
+                ? '\n(earlier output left the memory buffer; the log stopped at its cap, so only the first ' + r.outputBytes + ' bytes are saved at ' + spillPath(r.outputPath, ctx) + ' and can be paged with fs.read)'
+                : '\n(earlier output was dropped from memory and durable spill is unverified' + (r.outputSpillError ? ': ' + r.outputSpillError : '') + ')')
+          : (r.outputSpillVerified ? '\n(full output is durably appended to ' + spillPath(r.outputPath, ctx) + '; ' + r.outputBytes + ' bytes so far)'
+            : r.outputSpillCapped ? '\n(the first ' + r.outputBytes + ' bytes are durably appended to ' + spillPath(r.outputPath, ctx) + '; the log stopped at its cap, later output is only in the memory ring)' : '');
         const body = r.returned
           ? r.lines.map(function (ln, i) { return String(r.lineNos[i]).padStart(6, ' ') + '  ' + ln; }).join('\n')
           : (r.grep ? '(no lines match)' : '(no output yet)');

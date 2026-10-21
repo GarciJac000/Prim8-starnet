@@ -58,6 +58,18 @@ function git(cwd, args) { execFileSync('git', args, { cwd, stdio: 'ignore', wind
     A.eq(cold.body.fired, false, 'no blessed roots -> the cycle does not fire');
     A.eq(cold.body.binding, 'no-roots', '…and names WHY (no-roots)');
 
+    // PERSIST-IF-CHANGED (2026-10-19): a no-fire cycle that changes nothing must not rewrite the state file. The
+    // 15-min tick used to do two durable writes (.bak + main) of byte-identical content on every pass.
+    const stateFile = path.join(ws, 'discovery.state.json');
+    const st1 = fs.statSync(stateFile), text1 = fs.readFileSync(stateFile, 'utf8');
+    const bak1 = fs.existsSync(stateFile + '.bak') ? fs.statSync(stateFile + '.bak').mtimeMs : null;
+    await new Promise(r => setTimeout(r, 50));   // a rewrite would move mtime past this gap
+    const cold2 = await j('POST', '/api/discovery/scan');
+    A.eq(cold2.body.binding, 'no-roots', 'a second no-fire cycle names the same binding');
+    A.eq(fs.statSync(stateFile).mtimeMs, st1.mtimeMs, 'an unchanged no-fire cycle does NOT rewrite discovery.state.json');
+    A.eq(fs.readFileSync(stateFile, 'utf8'), text1, '…and the content is exactly what was already on disk');
+    A.eq(fs.existsSync(stateFile + '.bak') ? fs.statSync(stateFile + '.bak').mtimeMs : null, bak1, '…nor its .bak');
+
     // bless the repo through the REAL grant machinery (the only door — discovery never blesses).
     const bless = await j('POST', '/api/projects/bless', { path: repo });
     A.eq(bless.status, 200, 'POST /api/projects/bless -> 200');

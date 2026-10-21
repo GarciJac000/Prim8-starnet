@@ -61,8 +61,15 @@
     } finally { busy = false; render(); }
   }
   recovery.addEventListener('click', resume);
-  window.addEventListener('focus', refresh);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
-  refresh();
+  /* idle CPU piece 3 (2026-10-20): through PollGate the read slows to a 30 s floor while the Commander is away instead of
+     stopping on document.hidden — a webview that reports hidden while still on screen got NO pause-state reads at all.
+     ONE READ ON RETURN (fix round 5): PollGate's wake already runs the overdue beat, and this file's own visibilitychange
+     and focus listeners each started another refresh() beside it (no in-flight guard: three /api/halt reads at once,
+     two answers thrown away). They read through the loop now (runNow: never a second read beside one in flight); the
+     boot read is the loop's first beat. */
+  const loop = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(refresh, { ms: 5000 }) : null;
+  const look = () => (loop ? loop.runNow() : refresh());
+  window.addEventListener('focus', look);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) look(); });
+  if (!loop) { setInterval(() => { if (!document.hidden) refresh(); }, 5000); refresh(); }
 })();

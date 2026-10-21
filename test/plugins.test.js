@@ -308,6 +308,84 @@ async function writePlugin(id, source, manifest) {
 
       delete global.__helperSays;
     }
+
+    // ---- QUICK RE-VERIFY for the background job timer (2026-10-19, idle-CPU piece 2) ----
+    // The 10 s job timer used to re-read, sha256 and guard-scan the whole approved folder on every tick. A quick check
+    // trusts the cached approval only while a stat stamp of the folder is unchanged (and re-hashes at least every
+    // STAMP_TRUST_MS); any edit, add or revoke must still be caught on the very next tick.
+    {
+      await fsp.rm(ALLOW, { force: true });
+      for (const d of await fsp.readdir(PLUGINS)) await fsp.rm(path.join(PLUGINS, d), { recursive: true, force: true });
+      const base = path.join(PLUGINS, 'jobber');
+      await writePlugin('jobber', "module.exports = { register(api) {} };");
+      await fsp.mkdir(path.join(base, 'lib'), { recursive: true });
+      const helper = path.join(base, 'lib', 'helper.js');
+      await fsp.writeFile(helper, "module.exports = () => 'aaaa';", 'utf8');
+      let t = Date.now() + 60000, reads = 0, hashes = 0, scans = 0;   // real time + 1 min: the files are past the racy window
+      const countingFsp = Object.assign({}, fsp, { readFile: (...a) => { reads++; return fsp.readFile(...a); } });
+      const loader = mk({ fsp: countingFsp, clock: { now: () => t }, hash: (s) => { hashes++; return sha(s); },
+        guard: { scanText: () => { scans++; return []; } } });
+      const d0 = (await loader.discover()).plugins[0];
+      await loader.allow(d0.id, d0.digest);
+      A.ok((await loader.approvedRecord('jobber', { quick: true })) !== null, 'quick: the first check hashes and approves');
+
+      const tick = async () => { t += 10000; reads = 0; hashes = 0; scans = 0; return loader.approvedRecord('jobber', { quick: true }); };
+      let r = await tick();
+      A.ok(r && r.digest === d0.digest, 'quick: an untouched folder is still approved 10 s later');
+      A.eq(hashes, 0, 'quick: …without hashing a single file');
+      A.eq(scans, 0, '…without a guard scan');
+      A.eq(reads, 1, '…and reading only the allowlist (a revoke must still win at once)');
+
+      // a SAME-SIZE rewrite (the classic stat-cache blind spot) moves the stamp: caught on the very next tick
+      await fsp.writeFile(helper, "module.exports = () => 'bbbb';", 'utf8');
+      r = await tick();
+      A.eq(r, null, 'quick: a same-size edit to a helper is caught on the next tick (the approval no longer covers it)');
+      await fsp.writeFile(helper, "module.exports = () => 'aaaa';", 'utf8');
+      A.ok((await tick()) !== null, 'restoring the approved bytes restores the approval (full re-hash)');
+      A.ok(hashes > 0, '…which really re-hashed');
+
+      // an ADDED file moves the stamp too
+      await fsp.writeFile(path.join(base, 'lib', 'extra.js'), '1', 'utf8');
+      A.eq(await tick(), null, 'quick: a file dropped into the folder is caught on the next tick');
+      await fsp.rm(path.join(base, 'lib', 'extra.js'));
+      A.ok((await tick()) !== null, 'removing it restores the approval');
+
+      // a REVOKE wins at once, whatever the stamp says
+      await loader.revoke('jobber');
+      A.eq(await tick(), null, 'quick: a revoked plugin is refused on the next tick');
+      await loader.allow(d0.id, d0.digest);
+      A.ok((await tick()) !== null, 're-approved: approved again');
+
+      // the safety interval: an unchanged stamp is trusted for at most 5 min since the last real hash
+      let rehashedAt = -1;
+      for (let i = 1; i <= 31 && rehashedAt < 0; i++) { await tick(); if (hashes > 0) rehashedAt = i; }
+      A.ok(rehashedAt > 0 && rehashedAt <= 30, 'quick: an unchanged folder is still fully re-hashed within 5 min of 10 s ticks (tick ' + rehashedAt + ')');
+
+      // every NON-quick caller keeps the exact old rule: past the 2 s window it re-hashes, stamp or not
+      t += 3000; hashes = 0;
+      A.ok((await loader.approvedRecord('jobber')) !== null, 'full: still approved');
+      A.ok(hashes > 0, 'full: a non-quick caller past the 2 s window always re-hashes');
+
+      // RACY-CLEAN: a folder touched within 2 s of its hash is never stamp-trusted (a coarse filesystem could hide a
+      // same-size rewrite in that tick), so the next quick check re-hashes
+      {
+        let t2 = 0, h2 = 0;
+        const racy = mk({ clock: { now: () => t2 }, hash: (s) => { h2++; return sha(s); } });
+        await fsp.writeFile(helper, "module.exports = () => 'aaaa';", 'utf8');   // the approved bytes, a fresh mtime
+        t2 = Date.now();
+        A.ok((await racy.approvedRecord('jobber', { quick: true })) !== null, 'racy: approved');
+        t2 += 10000; h2 = 0;
+        A.ok((await racy.approvedRecord('jobber', { quick: true })) !== null, 'racy: still approved on the next tick');
+        A.ok(h2 > 0, 'racy: a folder touched within 2 s of its hash is re-hashed on the next quick tick, not stamp-trusted');
+      }
+
+      // no clock → no quick path (never fails open for want of a clock)
+      const clockless = mk({ clock: undefined, hash: (s) => { hashes++; return sha(s); } });
+      await clockless.approvedRecord('jobber', { quick: true });
+      hashes = 0;
+      await clockless.approvedRecord('jobber', { quick: true });
+      A.ok(hashes > 0, 'clockless: every quick check re-hashes');
+    }
   } finally {
     await fsp.rm(DIR, { recursive: true, force: true });
     delete global.__auditLog; delete global.__apiKeys; delete global.__spineReachable;

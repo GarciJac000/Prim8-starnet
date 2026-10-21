@@ -8,12 +8,19 @@ test/bay-name-legibility.test.js
 test/group-sessions.edge.test.js
 test/group-chat-picker.test.js
 test/group-sessions.repair.test.js
+test/group-sessions.memory.test.js
+test/group-sessions.since.test.js
+test/group-poll-idle.test.js
+test/group-paint-index.test.js
+test/save-serialize-once.test.js
 test/contract.test.js
 test/events-contract.test.js
 test/clock-rng.test.js
 test/context.test.js
 test/redact.known-values.test.js
 test/redact.masked-keys.test.js
+test/redact.linear.test.js
+test/redact.known-cache.test.js
 test/runtimeinfo.test.js
 test/harness-snapshot.test.js
 test/harness-stream-completion.test.js
@@ -36,6 +43,7 @@ test/reflect.test.js
 test/memory-corrections.test.js
 test/project-memory-boundary.test.js
 test/memory-truth.test.js
+test/memory-rank.tokenize-once.test.js
 test/memcore.test.js
 test/cost.test.js
 test/spend.test.js
@@ -102,6 +110,7 @@ test/eval-parity-offline.test.js
 test/overnight-reliability-runner.test.js
 test/provider.openrouter.test.js
 test/provider.openai-compatible.test.js
+test/provider.catalog-cache.test.js
 test/provider.ollama-native.test.js
 test/provider.ollama-system.test.js
 test/ollama-wait-truth.test.js
@@ -111,6 +120,7 @@ test/realtime-voice.test.js
 test/native-stt.test.js
 test/local-voice.test.js
 test/media-service.test.js
+test/edgetts-stream-end.test.js
 test/desktop-voice-bundle.test.js
 test/transcript.compaction.e2e.test.js
 test/provider.anthropic.test.js
@@ -200,6 +210,7 @@ test/cloudsave-unload.test.js
 test/fullscreen.test.js
 test/titlebar.test.js
 test/hudmode.test.js
+test/camera-settle.test.js
 test/logo-occlusion.test.js
 test/keepawake.test.js
 test/grace.test.js
@@ -208,6 +219,7 @@ test/shell-bg.test.js
 test/shell-bg-io.test.js
 test/shell-visible-window.test.js
 test/shell-input-isolation.test.js
+test/shell.source-scan.test.js
 test/shell-machine-state.test.js
 test/procledger.test.js
 test/inputguard.test.js
@@ -242,6 +254,7 @@ test/tools.test.js
 test/capgate.test.js
 test/capdrift.test.js
 test/capsummary.test.js
+test/capsummary-room-scope.test.js
 test/boot-security.test.js
 test/sidecar-fixture.test.js
 test/sidecar.security.test.js
@@ -262,6 +275,7 @@ test/workshop-resolution.test.js
 test/workshop-toggle-ui.test.js
 test/quest-store.test.js
 test/journey-store.test.js
+test/journey-read-cache.test.js
 test/journey.test.js
 test/journeystore.test.js
 test/journey-wiring.test.js
@@ -291,6 +305,7 @@ test/apiauth.test.js
 test/peerowner.test.js
 test/provider-key-check.test.js
 test/custom-provider-model-id.test.js
+test/wake-key-check-copy.test.js
 test/engine-credential.test.js
 test/engine-key-sync.test.js
 test/kimi-region.test.js
@@ -324,6 +339,7 @@ test/skills.gate.test.js
 test/skills.trust-origin.test.js
 test/skills.review-approval.test.js
 test/skills.worker-shared-approval.test.js
+test/skills.package-hardening.test.js
 test/slash.test.js
 test/slash-actions.test.js
 test/slash.parity.test.js
@@ -335,6 +351,7 @@ test/voice-live-ui.test.js
 test/voice-flow.test.js
 test/voice-stream.test.js
 test/voice.draftguard.test.js
+test/voice.mic-release.test.js
 test/save.test.js
 test/saveversion.test.js
 test/backup-secrets.test.js
@@ -398,13 +415,19 @@ test/qa-evidence-sweep.test.js
 test/qa-installed-smoke.test.js
 test/transcript.test.js
 test/transcript-history-v2.test.js
+test/transcript-perf-paths.test.js
 test/recall.test.js
 test/fs.jail.test.js
 test/fs.search-gitignore.test.js
+test/fs.search-budget.test.js
 test/fs.large-output.test.js
+test/fs.read-large.test.js
 test/fs-mutation-receipts.test.js
 test/fs.patch.test.js
 test/fs.stale-write.test.js
+test/fs.concurrent-mutations.test.js
+test/fs.read-version.test.js
+test/fs.drift-lsp-resync.test.js
 test/docextract.test.js
 test/imagewire.test.js
 test/web.ssrf.test.js
@@ -415,6 +438,7 @@ test/web.fetch-jina.test.js
 test/web.calm.test.js
 test/web.reach.test.js
 test/web.pinned-dispatcher.test.js
+test/web.body-ceiling.test.js
 test/browser.test.js
 test/browser-upload.test.js
 test/browser-proxy.test.js
@@ -426,6 +450,7 @@ test/dev-seed-preflight.test.js
 test/browser.reach-measure.test.js
 test/browser.tool-parity.test.js
 test/browser.wait-recovery.test.js
+test/browser.refs-retire.test.js
 test/browser.download-receipt.test.js
 test/browser.attach.test.js
 test/browser.pie.test.js
@@ -465,18 +490,25 @@ test/scout.test.js
 test/dossier.test.js
 test/understanding.test.js
 test/fork.test.js
+test/fork-marker-perf.test.js
+test/live-markdown-incremental.test.js
+test/world-say-head.test.js
 test/taskintent.test.js
 test/taskbrief.clarify.test.js
+test/taskbrief.answer-hold.test.js
 test/understandingstore.test.js
 test/study.test.js
 test/goals.test.js
 test/goalstore.test.js
+test/quest-clip-surrogates.test.js
 test/goal-advance.test.js
 test/trust.test.js
 test/truststore.test.js
 test/goalloop.test.js
 test/interview.test.js
+test/intake-plain-questions.test.js
 test/onboarding.test.js
+test/onboarding-answer-hygiene.test.js
 test/onboard-fresh-launcher.test.js
 test/codex-configured.test.js
 test/crt-glprobe.test.js
@@ -510,6 +542,7 @@ test/beatcard.test.js
 test/recommend.test.js
 test/rec-truth-consistency.test.js
 test/rec-one-memory.test.js
+test/foryou-shelf-floor.test.js
 test/rec-evidence.test.js
 test/recquality.test.js
 test/recqualitystore.test.js
@@ -557,6 +590,7 @@ test/projects-store.test.js
 test/projectbless.test.js
 test/folderpick.test.js
 test/pathtrust.test.js
+test/protected-floor-ntfs.test.js
 test/workspace-reserved.test.js
 test/nightfocus.test.js
 test/nightfocus-workflow.test.js
@@ -569,6 +603,7 @@ test/project-discovery.test.js
 test/permpanel.test.js
 test/permissionsstore.test.js
 test/permissions-ui.test.js
+test/approval-posture-recorded.test.js
 test/theme-custom-phosphor.test.js
 test/panel-brightness.test.js
 test/simulation-lighting.test.js
@@ -589,6 +624,8 @@ test/capprop-map.contract.test.js
 test/dock-terms-open.test.js
 test/settings-p1-ui.test.js
 test/dossier-persona-ui.test.js
+test/dossier-persona-toggle-skin.test.js
+test/skinstage-idle-loop.test.js
 test/settings-codex-row.test.js
 test/settings-oauth-rows.test.js
 test/genesis-oauth-providers.test.js
@@ -669,6 +706,7 @@ test/cron.hardening.test.js
 test/cron.reliability-ramp.test.js
 test/cron.english.test.js
 test/cron.dst.test.js
+test/cron.clock-rewind.test.js
 test/cron.durability.test.js
 test/cron.lock.test.js
 test/cron-session-hydration.test.js
@@ -678,9 +716,15 @@ test/loopjob-driver.test.js
 test/model-loop-control.test.js
 test/loop-review-controls.test.js
 test/loop-review-needs-you.test.js
+test/automation-lane-poller.test.js
+test/browser-chip-wait.test.js
+test/pollgate.test.js
+test/poll-fetch-deadline.test.js
+test/ctx-gauge-memo.test.js
 test/routine-origin-race.test.js
 test/returnstore-rate-sync.test.js
 test/returnstore-recovery.test.js
+test/outbox-crate-memo.test.js
 test/settings-save-failure.test.js
 test/loop-tools.test.js
 test/loopgit.test.js
@@ -702,6 +746,7 @@ test/acp-core.test.js
 test/workstreams.test.js
 test/workstreams.search-perf.test.js
 test/workstreams.latest-visible.test.js
+test/board-stopped-run.test.js
 test/session-power-tools.test.js
 test/session-creation.test.js
 test/projects-view.test.js
@@ -736,6 +781,7 @@ test/model-ack-honesty.test.js
 test/toolprops.test.js
 test/worldmodel.test.js
 test/path-smoothing.test.js
+test/path-oracle.test.js
 test/run-truth.test.js
 test/station-authority.test.js
 test/zones.test.js
@@ -833,6 +879,7 @@ test/propanchor.test.js
 test/prop-mount.test.js
 test/prop-flat-decal.test.js
 test/bed-sleep.test.js
+test/scene-index.test.js
 test/prop-render-smoke.test.js
 test/proprotate.test.js
 test/recliner-side-seat.test.js
@@ -864,6 +911,7 @@ test/channels.group-allow.test.js
 test/channels.telegram.pairing-ux.test.js
 test/channels.telegram.test.js
 test/channels.telegram.format.test.js
+test/channels.telegram.linear.test.js
 test/channels.telegram.context.test.js
 test/channels.telegram.media.test.js
 test/channels.telegram.groups.test.js
@@ -901,6 +949,7 @@ test/mcp.description-untrusted.test.js
 test/mcp.resources-prompts.test.js
 test/mcp.transport.test.js
 test/mcp.stdio.test.js
+test/mcp.safecell-reconnect.test.js
 test/mcp.schema-lifecycle.test.js
 test/mcp.manager-race.test.js
 test/mcp.manager-auth-race.test.js
@@ -940,6 +989,7 @@ test/personalization-authority-wiring.test.js
 test/sprite-loading.test.js
 test/textsize-screen-space.test.js
 test/mobile-control-reachability.test.js
+test/mobile-topbar-glass-cascade.test.js
 test/station-tooltip.test.js
 test/hint-input-mode.test.js
 test/hints-setting.test.js
@@ -955,6 +1005,7 @@ test/terminal-resize.test.js
 test/glass-interactions.test.js
 test/backdrop-preview.test.js
 test/backdrop-bake.test.js
+test/spacebg-void-strings.test.js
 test/glass-comms.test.cjs
 test/comms-popup-fit.test.cjs
 test/glass-approval.test.cjs
@@ -967,6 +1018,7 @@ test/terminal-output-boundary.test.js
 test/release-bump.test.js
 test/release-cut.test.js
 test/release-preflight.test.js
+test/release-gate-text-encoding.test.js
 test/release-ritual.test.js
 test/release-notes-security-wording.test.js
 test/release-notes-dossier-tabs.test.js
@@ -1116,6 +1168,7 @@ test/budget-authority-ui.test.js
 test/settle-managed-copy.test.js
 test/staging-development-closure.test.js
 test/overseer-ui.test.js
+test/overseer-pollgate.test.js
 test/workspace-owner-election.test.js
 test/project-home-ui.test.js
 test/cli.test.js
@@ -1176,6 +1229,7 @@ test/loop.retry-events.test.js
 test/loop.waiting-heartbeat.test.js
 test/subagents.waiting-is-progress.test.js
 test/openai-waiting-keepalive.test.js
+test/openai-compat-lifecycle.test.js
 test/comms-wait-line.test.js
 test/line-stats.test.js
 test/linewatch.test.js
@@ -1276,3 +1330,24 @@ test/loop-unapproved-truth.test.js
 test/build-paint-material.test.js
 test/routine-media.test.js
 test/routine-images-grant.test.js
+test/index-strict-mode.test.js
+test/output-capture.test.js
+test/channels.poll-signal.test.js
+test/ssh-bg-read-remote.test.js
+test/overseer-idle-cost.test.js
+test/overseer-busy-lock.test.js
+test/source-collapsed-escapes.test.js
+test/openrouter-free-daily-cap.test.js
+test/openrouter-inband-error.test.js
+test/provider-403-truth.test.js
+test/oauth-refresh-throttle-copy.test.js
+test/proc-footprint.test.js
+test/skills-io.test.js
+test/checkpoint-measure-nostat.test.js
+test/shellbg-spill-batched.test.js
+test/channels.store-cache.test.js
+test/notebook-peer-reads.test.js
+test/task-turn-evidence.test.js
+test/remote-crew-looks.test.js
+test/save-persist-cost.test.js
+test/run-recoveries-page.test.js

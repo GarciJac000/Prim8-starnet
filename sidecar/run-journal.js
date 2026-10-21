@@ -162,6 +162,48 @@ function makeFsIo(opts) {
       return out;
     },
     list() { return fs.readdirSync(dir).filter(n => /^[a-f0-9]{64}\.jsonl$/.test(n)).map(n => path.join(dir, n)); },
+    /* ONE directory read for a whole recovery page (perf review 10-19): the journal files plus every journal's damage
+       evidence. evidence() above re-read the whole directory once per journal (and the host's forensic mark once more),
+       so a 100-row page over a directory of thousands of journals did ~200 full listings. The evidence rule is the
+       same one evidence() applies, over the same names. */
+    snapshot() {
+      const names = fs.readdirSync(dir);
+      const files = [], sib = new Map();
+      for (const n of names) {
+        if (/^[a-f0-9]{64}\.jsonl$/.test(n)) { files.push(path.join(dir, n)); continue; }
+        const m = /^([a-f0-9]{64}\.jsonl)\.(.*)$/.exec(n);
+        if (!m) continue;
+        const e = sib.get(m[1]) || { corrupt: false, torn: false };
+        if (m[2].indexOf('corrupt') === 0) e.corrupt = true;
+        else if (m[2].indexOf('torn-') === 0) e.torn = true;
+        sib.set(m[1], e);
+      }
+      return { files, evidence: (filePath) => { const e = sib.get(path.basename(filePath)); return e ? { corrupt: e.corrupt, torn: e.torn } : { corrupt: false, torn: false }; } };
+    },
+    // the first non-blank line of a journal (its begin record), read in bounded chunks; null = none within maxBytes
+    readHead(filePath, maxBytes) {
+      const cap = Math.max(4096, Number(maxBytes) || (8 << 20));
+      let fd = null, held = Buffer.alloc(0), eof = false;
+      try {
+        fd = fs.openSync(filePath, 'r');
+        let pos = 0;
+        while (pos < cap) {
+          const buf = Buffer.alloc(pos ? 65536 : 4096);   // a begin record is usually well under 4 KB
+          const n = fs.readSync(fd, buf, 0, buf.length, pos);
+          if (!(n > 0)) { eof = true; break; }
+          pos += n;
+          // bytes, not text: a multi-byte character split across two reads must not decode as U+FFFD
+          held = Buffer.concat([held, buf.subarray(0, n)]);
+          for (let nl = held.indexOf(10); nl >= 0; nl = held.indexOf(10)) {
+            const line = held.toString('utf8', 0, nl).replace(/\r$/, '');
+            held = held.subarray(nl + 1);
+            if (line.trim()) return line;
+          }
+        }
+        const last = held.toString('utf8').trim();
+        return eof && last ? last : null;   // a single unterminated line at EOF is still the whole first record
+      } finally { if (fd != null) { try { fs.closeSync(fd); } catch (e) { failNote('run-journal.head.close', e); } } }
+    },
     readFile(filePath) { return fs.readFileSync(filePath, 'utf8'); },
     // A valid final record whose '\n' never landed: terminate it in place (fsync'd) so the next append starts a
     // new line instead of gluing two records into one unparseable line. Nothing is rewritten or discarded.
@@ -476,11 +518,15 @@ function makeRunJournal(opts) {
 
   // A repaired journal parses clean, but the damage it had is durable in its sibling's name. Mid-file damage stays
   // forensic across every later inspect (and so never resolves, continues, or retires); a cut torn tail does not.
-  function withEvidence(state, file) {
-    if (!state || !file || typeof io.evidence !== 'function') return state;
+  function withEvidence(state, file, evidenceOf) {
+    const read = typeof evidenceOf === 'function' ? evidenceOf : (typeof io.evidence === 'function' ? io.evidence : null);
+    if (!state || !file || !read) return state;
     let ev;
-    try { ev = io.evidence(file); }
+    try { ev = read(file); }
     catch (e) { failNote('run-journal.evidence', e); ev = { corrupt: true, torn: false }; }   // unprovable: fail closed
+    // the damage evidence of THIS file is now folded in (`forensic` covers a `.corrupt*` sibling): a host need not
+    // list the directory again to learn it. Non-enumerable, so no serialized or compared state changes shape.
+    Object.defineProperty(state, 'evidenceSeen', { value: true, enumerable: false, configurable: true });
     if (ev.corrupt) {
       state.forensic = true; state.retirable = false; state.damage = 'corrupt';
     } else if (ev.torn && state.damage === 'none') {
@@ -494,12 +540,38 @@ function makeRunJournal(opts) {
     return withEvidence(analyze(p.records, p.corrupt, p.damage), typeof io.fileOf === 'function' ? io.fileOf(runId) : null);
   }
 
-  function recoverFile(file, rawText) {
+  /* HEADS (perf review 10-19): a journal's begin record — its first record — names the conversation and agent it
+     belongs to, and it never changes (appends, repairs and continuations keep record 1). Kept per file name, from
+     every full parse and from a bounded first-line read, so a recovery listing for ONE conversation parses only that
+     conversation's journals instead of a hash-ordered first page that missed it once there were >100 journals. */
+  const heads = new Map();   // journal file basename -> { streamId, agentId } exactly as the recovery DTO derives them
+  const baseOf = (file) => String(file || '').split(/[\\/]/).pop();
+  function headFromMeta(meta) {
+    meta = meta || {};
+    return { streamId: String(meta.streamId || 'global'), agentId: String(meta.agentId || '') };
+  }
+  function headOf(file) {
+    const base = baseOf(file);
+    if (heads.has(base)) return heads.get(base);
+    if (typeof io.readHead !== 'function') return null;
+    let line = null;
+    try { line = io.readHead(file); } catch (e) { if (!e || e.code !== 'ENOENT') failNote('run-journal.head', e); return null; }
+    if (line == null) return null;   // unknown: the caller parses the whole journal and decides from it
+    let r = null;
+    try { r = JSON.parse(line); } catch (_) { r = null; }
+    // exactly parseRecords' first-record rule + analyze's meta rule: anything else analyzes to meta {}
+    const valid = r && r.v === VERSION && r.seq === 1 && r.prev === '' && r.hash === hashRecord(r);
+    const h = headFromMeta(valid && r.type === 'begin' ? r.payload : {});
+    heads.set(base, h);
+    return h;
+  }
+  function recoverFile(file, rawText, evidenceOf) {
     let parsed;
     try { parsed = parseRecords(rawText != null ? rawText : io.readFile(file)); }
     catch (_) { parsed = { records: [], corrupt: true, damage: 'corrupt' }; }
     const state = analyze(parsed.records, parsed.corrupt, parsed.damage);
     state.file = file;
+    heads.set(baseOf(file), headFromMeta(state.meta));
     try {
       if (parsed.corrupt && parsed.records.length && typeof io.repair === 'function') {
         state.repairedFrom = io.repair(file, parsed.records, parsed.damage === 'torn_tail' ? 'torn' : 'corrupt');
@@ -513,7 +585,8 @@ function makeRunJournal(opts) {
       const last = parsed.records[parsed.records.length - 1];
       live.set(state.runId, { seq: last.seq, hash: last.hash });
     }
-    return state.quarantinedTo ? state : withEvidence(state, file);
+    if (state.quarantinedTo) heads.delete(baseOf(file));
+    return state.quarantinedTo ? state : withEvidence(state, file, evidenceOf);
   }
 
   return {
@@ -644,18 +717,32 @@ function makeRunJournal(opts) {
     // every file in it provably belongs to an earlier process.
     listFiles() { return io.list().sort(); },
     recoverFile(file) { return recoverFile(file); },
+    // read (and keep) one journal's head without parsing it — a boot walk warms the journals it does not parse
+    warmHead(file) { return headOf(file); },
     recoverAll() {
       return io.list().sort().map(file => recoverFile(file));
     },
     // Lazy/paged recovery preserves every journal while preventing thousands of failed runs
     // from blocking process startup or producing one unbounded API response. Stable filename
     // ordering makes offset pagination deterministic; no file is deleted here.
+    // options.streamId / options.agentId (optional, additive): only that conversation's (and agent's) journals —
+    // matched on the begin record exactly as the recovery DTO derives streamId/agentId — so the caller's run is
+    // found however many other journals sort ahead of it. Without them the listing is unchanged.
     recoverPage(options) {
       options = options || {};
-      const files = io.list().sort();
+      const snap = typeof io.snapshot === 'function' ? io.snapshot() : null;
+      let files = (snap ? snap.files : io.list()).sort();
+      if (snap) { const present = new Set(files.map(baseOf)); for (const k of heads.keys()) if (!present.has(k)) heads.delete(k); }
+      const stream = options.streamId != null ? String(options.streamId) : null;
+      const agent = options.agentId != null ? String(options.agentId) : null;
+      const matches = (h) => (stream == null || h.streamId === stream) && (agent == null || h.agentId === agent);
+      const filtered = stream != null || agent != null;
+      if (filtered) files = files.filter(file => { const h = headOf(file); return !h || matches(h); });
       const offset = Math.max(0, Number(options.offset) || 0);
       const limit = Math.max(1, Math.min(500, Number(options.limit) || 100));
-      return { rows: files.slice(offset, offset + limit).map(file => recoverFile(file)), total: files.length, offset, limit };
+      let rows = files.slice(offset, offset + limit).map(file => recoverFile(file, null, snap ? snap.evidence : null));
+      if (filtered) rows = rows.filter(r => r && matches(headFromMeta(r.meta)));   // a head too long to pre-read decides here
+      return { rows, total: files.length, offset, limit };
     },
     _internals: { parseRecords, analyze, hashRecord, runFileName, cloneSafe, writeAll, leafSignature, sameSignature }
   };

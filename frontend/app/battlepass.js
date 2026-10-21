@@ -40,7 +40,8 @@
   const MONTHS = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
 
   const int = v => { const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : 0; };
-  const clip = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  // clip by CODE POINT, not UTF-16 unit: a goal like "Ship the 🚀 launch" must never be cut into a lone surrogate (sweep 10-20)
+  const clip = (s, n) => { const cp = Array.from(String(s == null ? '' : s).replace(/\s+/g, ' ').trim()); return cp.length > n ? cp.slice(0, n - 1).join('') + '…' : cp.join(''); };
 
   function rankOf(tier) {
     const t = Math.max(1, int(tier));
@@ -133,8 +134,12 @@
     const mk = (id, title, have, need, pts, go) => ({ id, title, have: Math.min(have, need), need, done: have >= need, pts, go });
     if (!goal || !input.goalRegistered) {
       // no registered goal → the sidecar cannot award a single point yet; the one honest challenge is to set one.
-      out.push(mk('goal', goal ? 'Give “' + clip(goal.text, 48) + '” a success condition' : 'Set a goal and say what success looks like',
-        0, 1, 'starts your pass', { view: 'goals' }));
+      // a goal that HAS a success condition but whose registration never reached the sidecar (offline at save) is not
+      // "missing" one — say what is actually true: it is saved here and still has to reach the journey (sweep 10-20).
+      const title = !goal ? 'Set a goal and say what success looks like'
+        : input.goalSaved ? 'Finish saving “' + clip(goal.text, 48) + '” to your journey — retry its success condition'
+        : 'Give “' + clip(goal.text, 48) + '” a success condition';
+      out.push(mk('goal', title, 0, 1, 'starts your pass', { view: 'goals' }));
       return out;
     }
     const steps = wk.filter(e => e.step && e.goalId === goal.id).length;
@@ -146,7 +151,11 @@
     // an active registered goal) — station / dossier / build / fix-it quests never do, so the challenge names exactly that.
     out.push(mk('quests', 'Confirm 3 quests for your goals', quests, 3, '+10 PTS EACH', { view: 'available', category: 'missions' }));
     const activeDays = new Set(wk.map(e => ordinal(e.at))).size;
-    out.push(mk('days', 'Earn points on 3 different days', activeDays, 3, 'BUILDS YOUR STREAK', { view: 'available' }));
+    // the need never exceeds what the week still allows (Sunday with 0 days asks for 1, not an impossible 3) (sweep 10-20)
+    const daysLeft = 7 - ((ymd(now).wd + 6) % 7);   // today included: Mon → 7 … Sun → 1
+    const todayCounted = wk.some(e => ordinal(e.at) === ordinal(now));
+    const dayNeed = Math.max(1, Math.min(3, activeDays + daysLeft - (todayCounted ? 1 : 0)));
+    out.push(mk('days', 'Earn points on ' + dayNeed + ' different day' + (dayNeed === 1 ? '' : 's'), activeDays, dayNeed, 'BUILDS YOUR STREAK', { view: 'available' }));
     if (input.metric && input.metric.label) {
       const metric = wk.filter(e => e.kind === 'metric' && e.goalId === goal.id).length;
       out.push(mk('metric', 'Move “' + clip(input.metric.label, 40) + '” past its next checkpoint', metric, 1, '+10 PTS', { view: 'progress' }));

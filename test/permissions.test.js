@@ -238,7 +238,7 @@ const hardline = (call) => (call && call.args && /(^|\/)(\.env|permissions\.allo
     A.ok(/agentFullAccessNow\(\)/.test(src), 'the consent broker reads that posture on every call');
     A.ok(!/grantsBlanketByAgent|blanketSetFor|grantsBlanket:/.test(src), 'the obsolete process-memory wildcard is gone');
     const ui = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'chat.js'), 'utf8');
-    A.ok(/App\.setApproval\([^\n]+, 'full'\)/.test(ui), 'the confirmed permission-card choice updates the visible roster posture');
+    A.ok(/App\.setApproval\([^\n]+, 'full', \{ recorded: true \}\)/.test(ui), 'the confirmed permission-card choice updates the visible roster posture (already recorded by the station)');
   }
 
   A.report('permissions.test');

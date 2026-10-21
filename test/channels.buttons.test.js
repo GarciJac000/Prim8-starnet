@@ -490,6 +490,45 @@ async function run() {
     A.ok(!sends.some(s => /already expired/.test(s.t)), 'and no expiry correction is sent');
   }
 
+  // ---- 5E3. an ask ALLOWED on another surface is never stamped "expired — DENIED" by a late Telegram tap ----
+  // Live-caught 2026-10-20 (sweep/channels): STARNET REMOTE answers a channel prompt through the same finisher, so
+  // the action ran — then a tap on the still-live Telegram keyboard lost the race and the permanent record, the
+  // toast and a follow-up message all said the request had expired and been denied. The host remembers how each
+  // settled prompt actually ended (consentOutcome); the late tap reports THAT.
+  {
+    const sends = [], acks = [], edits = []; const store = fakeStore({ 555: { agentId: 'tg_555', approvals: true } });
+    const host = makeHostConsent(5000);
+    const settled = new Map();
+    let decision = null, promptSeen = null;
+    const runOnce = async (o) => { decision = await o.prompt({ name: 'fs.write', args: {} }, { scope: 'write' }); o.emit('agent.token', { delta: 'Wrote it.' }); o.emit('agent.run.end', { reason: 'done' }); };
+    const reg = makePromptRegistry({ newId: idGen('tok') });
+    const hub = makeChannelHub({
+      isOwner: () => true,
+      runOnce, store, prompts: reg,
+      send: (c, t, opts) => { sends.push({ c, t, opts }); return Promise.resolve({ ok: true, messageId: 'm1' }); },
+      answerCallback: (id, text) => { acks.push(text); return Promise.resolve({ ok: true }); },
+      editMessage: (c, mid, text) => { edits.push({ c, mid, text }); return Promise.resolve({ ok: true }); },
+      askConsent: (o) => host.ask(Object.assign({}, o, { onPrompt: (pid, f) => { promptSeen = { runId: o.runId, promptId: pid }; o.onPrompt(pid, f); } }))
+        .then(d => { if (promptSeen) settled.set(promptSeen.promptId, d); return d; }),
+      resolveConsent: host.resolve,
+      consentOutcome: (runId, promptId) => settled.get(String(promptId)) || '',
+      secrets: () => ({ key: 'k', model: 'm' }), classify: () => false, newId: idGen('run')
+    });
+    const running = hub.onInbound(dm('write it'));
+    await waitFor(() => !!promptSeen && !!lastKeyboard(sends));
+    A.ok(host.resolve(promptSeen.runId, promptSeen.promptId, 'once'), 'fixture: another surface (STARNET REMOTE) allows the ask through the same finisher');
+    await running;
+    A.eq(decision, 'once', 'the run really got the allow');
+    const kb = lastKeyboard(sends);
+    await hub.onCallback({ chatId: '555', userId: 'u1', data: kb[3][0].callback_data, callbackId: 'late', messageId: 'm1' });
+    A.eq(edits.length, 1, 'the permission message is stamped once');
+    const stamp = edits[0].text.split('\n').pop();   // the outcome line under the original ask
+    A.ok(!/DENIED|expired/i.test(stamp), 'the PERMANENT record never says DENIED for an ask that was allowed: ' + stamp);
+    A.ok(/ALLOWED/.test(stamp), 'it states the decision that was applied');
+    A.ok(acks.every(a => !/denied|expired/i.test(String(a || ''))), 'the toast does not claim a denial: ' + JSON.stringify(acks));
+    A.ok(!sends.some(s => /already expired|was denied/.test(s.t)), 'and no "expired — denied" correction is sent');
+  }
+
   // ---- 5G. an UNDELIVERABLE keyboard denies AT ONCE instead of stalling out the consent timeout ----
   // Asserted on TIMING, not on the decision: a regression here still ends in 'deny' (the fail-closed timer gets
   // there eventually), so only the wait distinguishes correct from broken. The Commander was never asked, so

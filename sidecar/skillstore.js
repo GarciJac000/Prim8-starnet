@@ -241,9 +241,28 @@
       if (!skill || skill.agentId !== str(r.agentId) || skill.name !== r.name) return;
       candidateRows.set(keyOf(skill.agentId, skill.name), Object.assign({}, r, { skill }));
     }
+    // A USAGE ROW (markUsed) carries only the counters, keyed by `skillName` — never `name`, so an older StarNet
+    // that does not know the row reads it as a nameless record and skips it instead of replacing the skill.
+    // A use always leaves the skill ACTIVE (markUsed never touches an archived one, and the run's view() has already
+    // flipped a stale one in RAM), so the row restores that unconditionally; a later curate/archive record, which comes
+    // after it in file order, still wins.
+    function applyUsage(r) {
+      const e = latest.get(keyOf(str(r.agentId), str(r.skillName)));
+      if (!e) return;
+      e.useCount = Math.max(num(e.useCount), num(r.useCount));
+      e.viewCount = Math.max(num(e.viewCount), num(r.viewCount));
+      if (r.lastUsedAt != null) e.lastUsedAt = Math.max(num(e.lastUsedAt), num(r.lastUsedAt));
+      if (e.state === 'stale') e.state = 'active';
+    }
+    // The library may only be WRITTEN (persist, a staged proposal, a rejection, markUsed, curate, compact) after a
+    // COMPLETE load: a failed or partial read
+    // leaves skills that exist on disk missing from RAM, and a write over one of them (or a compaction of the
+    // partial view) is exactly how skills get replaced or deleted.
+    let loaded = false, loadError = null;
     try {
       const raw = io.readAll();
       if (Array.isArray(raw)) for (const r of raw) {
+        if (r && r.recordType === 'skill-usage') { applyUsage(r); continue; }
         if (r && r.recordType === 'skill-candidate') { restoreCandidate(r); continue; }
         if (r && r.recordType === 'skill-promotion') {
           const active = normalizeEntry(r.entry);
@@ -253,7 +272,18 @@
         const n = normalizeEntry(r);
         if (n) latest.set(keyOf(n.agentId, n.name), n);
       }
-    } catch (e) { /* corrupt log -> empty library (fail-open) */ }
+      loaded = true;
+    } catch (e) { loadError = e; failNote('skillstore.load', e); }   // the library reads empty, and refuses writes (canWrite)
+    function canWrite() { return loaded && !(io && typeof io.loadComplete === 'function' && io.loadComplete() === false); }
+    function cannotWrite() {
+      return new Error('the skill library did not load completely (' + ((loadError && loadError.message) || 'a partial read') + '), so nothing is written over it until it loads');
+    }
+    // Compaction instead of rotation: once the io says the file has grown (or a legacy rotated archive is still on
+    // disk), rewrite it to one line per skill. Runs only after a write was published to RAM, so the rewrite holds it.
+    function maybeCompact() {
+      try { if (io && typeof io.needsCompaction === 'function' && io.needsCompaction()) compact(); }
+      catch (e) { failNote('skillstore.compact', e); }
+    }
 
     function now() { return num(clock.now()); }
     function red(s, max) {
@@ -263,15 +293,15 @@
     }
     // RAM-only bump: update the in-memory `latest` copy WITHOUT appending a JSONL line. view() is called on
     // every skill.view / skill load, many times per run — appending each one is what grows skills.jsonl without
-    // bound. The bumped counters (viewCount/useCount/lastUsedAt/state) instead ride along the NEXT real mutation
-    // (write/edit/patch/markUsed/curate all persist the skill, and makeEntry carries viewCount/useCount forward),
-    // or a low-frequency compaction flush. Returns the projected skill (same shape view() returned before).
+    // bound. The bumped counters (viewCount/useCount/lastUsedAt/state) instead ride along the NEXT durable write:
+    // markUsed's usage row at the end of the run that loaded it, a real mutation (write/edit/patch/curate persist the
+    // skill and makeEntry carries the counters forward), or a compaction. Returns the projected skill.
     function bumpView(entry) {
       latest.set(keyOf(entry.agentId, entry.name), clone(entry));
       return entry;
     }
-    function persist(entry, promotion) {
-      const projected = projectSkill(entry, true);
+    // The guard's verdict for these bytes under the CURRENT rules, stamped onto `entry` (scan + guardAction).
+    function scanInto(entry, projected) {
       try {
         if (guard && typeof guard.scanSkillRecord === 'function') {
           // 'user' (the Commander's own typing) is its own trust tier — see the TRUST table in
@@ -301,27 +331,45 @@
           if (reviewWritten(entry) && entry.guardAction !== 'block') entry.guardAction = 'ask';
         }
       } catch (e) { failNote('skillstore.guard.scan', e); }
+      return entry;
+    }
+    /* THE PACKAGE MIRROR (skill-packages/<agent>/<id>/SKILL.md) is what view() hydrates over a non-canonical skill's
+       stored body, so it may only ever hold bytes the store accepted. persist() writes it AFTER the durable append (a
+       refused edit never reaches it), and markUsed re-writes it for a skill this process has not yet mirrored from its
+       current record: the first use after a boot, or the first use after a failed write (a Windows EBUSY on SKILL.md).
+       That is the repair a use used to get from persist() on every run, at one package write per skill per boot. */
+    const mirrored = new Set();
+    function mirrorDir(entry) {
+      if (!packageStore) return '';
+      const dirOf = entry.state === 'archived' && typeof packageStore.archiveDir === 'function' ? packageStore.archiveDir : packageStore.packageDir;
+      return typeof dirOf === 'function' ? str(dirOf(entry)) : '';
+    }
+    function writeMirror(entry, tag) {
+      if (!packageStore || typeof packageStore.writePackage !== 'function') return;
+      const key = keyOf(entry.agentId, entry.name);
+      mirrored.delete(key);
+      try { packageStore.writePackage(projectSkill(entry, true)); mirrored.add(key); }
+      catch (e) { failNote(tag, e); }
+    }
+    function persist(entry, promotion) {
+      if (!canWrite()) throw cannotWrite();
+      const projected = projectSkill(entry, true);
+      scanInto(entry, projected);
       // Stamp the digest of the content that was JUST scanned, so the verdict and the digest can
       // never disagree about which bytes they describe.
       try { if (digest) entry.contentDigest = str(digest(projected)); } catch (_) {}
-      try {
-        if (!promotion && packageStore && typeof packageStore.writePackage === 'function') {
-          const dir = packageStore.writePackage(projectSkill(entry, true));
-          if (dir) entry.packagePath = dir;
-        }
-      } catch (e) { failNote('skillstore.package.write', e); }
+      // The record names its mirror before the append; the mirror itself is written after it (see writeMirror).
+      if (!promotion) { const dir = mirrorDir(entry); if (dir) entry.packagePath = dir; }
       try { io.append(clone(promotion ? { recordType: 'skill-promotion', entry, candidate: promotion } : entry)); }
       catch (e) { failNote('skillstore.append', e); throw e; }
       // Publish to RAM only after the durable event was accepted. Otherwise manage() reports
       // success for a skill that vanishes on the next sidecar restart.
       latest.set(keyOf(entry.agentId, entry.name), clone(entry));
-      if (promotion) {
-        candidateRows.set(keyOf(entry.agentId, entry.name), clone(promotion));
-        // The durable entry is authoritative. A failed mirror update cannot make a new
-        // candidate overwrite the previously approved package before publication commits.
-        try { if (packageStore && typeof packageStore.writePackage === 'function') packageStore.writePackage(projectSkill(entry, true)); }
-        catch (e) { failNote('skillstore.package.promotion', e); }
-      }
+      // The durable entry is authoritative: a promotion's mirror is written only once publication committed, so a
+      // failed append cannot make a new candidate overwrite the previously approved package.
+      if (promotion) candidateRows.set(keyOf(entry.agentId, entry.name), clone(promotion));
+      writeMirror(entry, promotion ? 'skillstore.package.promotion' : 'skillstore.package.write');
+      maybeCompact();
       return entry;
     }
     function mine(agentId, opts2) {
@@ -588,6 +636,9 @@
       return trustSource(e.createdBy || 'agent') === 'agent-created';
     }
     function stageMutation(e, legacyWrite) {
+      // The model's write path is a write too: after a failed load it would build on an empty view (isNew for a skill
+      // on disk) and its row would replace the real pending proposal on the next boot.
+      if (!canWrite()) return { ok: false, error: cannotWrite().message };
       const aid = str(e.agentId) || 'agent';
       const seeds = Array.from(latest.values()).map(clone);
       // A writer builds on a pending draft only when it can SEE that draft: the review/curator passes read it
@@ -757,6 +808,7 @@
     }
     function rejectCandidate(e) {
       e = e || {};
+      if (!canWrite()) return { ok: false, error: cannotWrite().message };
       const found = candidateDecision(e);
       if (found.error) return { ok: false, error: found.error };
       const row = Object.assign({}, clone(found.row), { status: 'rejected', resolvedAt: now() });
@@ -878,7 +930,19 @@
       }
       return projectSkill(out, true);
     }
+    /* A USE IS TELEMETRY, NOT A NEW VERSION. markUsed runs at the end of every run for every skill the run loaded.
+       It used to persist() the WHOLE record each time (body, support files, base64 package, a guard re-scan and a
+       package rewrite), which grew skills.jsonl by megabytes a day; the log's size rotation then deleted the only
+       durable copy of every skill not used recently. Now each use appends a ~200-byte usage row (applied on load,
+       folded into the record by the next compaction) and updates RAM. A failed append keeps the RAM bump, which
+       the next compaction flushes. The package mirror is re-written only when this process has not written it from
+       the current record (writeMirror): once per skill per boot, and after a failed write.
+       THE GUARD STILL SEES EVERY USE. The re-scan on use was how a new guard rule reached a skill nobody edits, so a
+       use still scans the bytes under the current rules (CPU, no disk); only when the scan (verdict, findings, summary)
+       or action would change, or a legacy record lacks a digest, is the whole record persisted (rare: once per rule
+       change). */
     function markUsed(agentId, idOrNames) {
+      if (!canWrite()) return { ok: false, count: 0, error: cannotWrite().message };
       const ids = Array.isArray(idOrNames) ? idOrNames : [idOrNames];
       let count = 0;
       for (const id of ids) {
@@ -888,8 +952,26 @@
         entry.useCount = (entry.useCount || 0) + 1;
         entry.lastUsedAt = now();
         if (entry.state === 'stale') entry.state = 'active';
-        persist(entry); count++;
+        if (guard && typeof guard.scanSkillRecord === 'function') {
+          // the WHOLE scan, not only the verdict: a rule that adds a finding under the same verdict changes the
+          // categories the gate shows the Commander (the scan is deterministic for the same bytes and rules)
+          const probe = scanInto(clone(entry), projectSkill(entry, true));
+          const scanOf = (x) => JSON.stringify((x && x.scan) || null);
+          if (str(probe.guardAction) !== str(entry.guardAction) || scanOf(probe) !== scanOf(entry) || (digest && !entry.contentDigest)) {
+            persist(entry); count++;
+            continue;
+          }
+        }
+        const row = { recordType: 'skill-usage', agentId: entry.agentId, skillName: entry.name, useCount: entry.useCount, viewCount: num(entry.viewCount), lastUsedAt: entry.lastUsedAt };
+        try { io.append(row); } catch (e) { failNote('skillstore.usage.append', e); }
+        const key = keyOf(entry.agentId, entry.name);
+        // heal a mirror this process has not written from the current record (see writeMirror); the path rides the
+        // next compaction like the counters do
+        if (!mirrored.has(key)) { const dir = mirrorDir(entry); if (dir) entry.packagePath = dir; writeMirror(entry, 'skillstore.package.write'); }
+        latest.set(key, entry);
+        count++;
       }
+      if (count) maybeCompact();
       return { ok: true, count };
     }
     /* compact — rewrite the append-only JSONL keeping ONLY the newest entry per (agentId, name). `latest`
@@ -903,10 +985,12 @@
     function compact() {
       const entries = Array.from(latest.values()).concat(Array.from(candidateRows.values())).map(e => clone(e));
       if (!io || typeof io.rewrite !== 'function') return { ok: false, reason: 'io has no rewrite', kept: entries.length };
+      if (!canWrite()) return { ok: false, reason: cannotWrite().message, kept: entries.length };
       try { io.rewrite(entries); return { ok: true, kept: entries.length }; }
       catch (e) { return { ok: false, reason: (e && e.message) || 'rewrite failed', kept: entries.length }; }
     }
     function curate(agentId, opts2) {
+      if (!canWrite()) return { ok: false, stale: 0, archived: 0, proposedArchives: 0, error: cannotWrite().message };
       opts2 = opts2 || {};
       const staleMs = opts2.staleMs > 0 ? opts2.staleMs : 30 * 24 * 60 * 60 * 1000;
       const archiveMs = opts2.archiveMs > 0 ? opts2.archiveMs : 90 * 24 * 60 * 60 * 1000;
@@ -944,6 +1028,8 @@
 
     return {
       write, manage, list, view, markUsed, curate, compact,
+      // broken is not empty: a library that failed to load says so instead of listing nothing
+      loadState() { return canWrite() ? { ok: true, error: null } : { ok: false, error: cannotWrite().message }; },
       candidates, candidate, pendingView, promotionBlocker, approveCandidate, rejectCandidate, veto, share, listAccessible, viewAccessible,
       all() { return Array.from(latest.values()).map(s => projectSkill(s, true)); },
       count() { return latest.size; },

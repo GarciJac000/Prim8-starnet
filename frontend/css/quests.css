@@ -8,8 +8,10 @@
 .quests-win .q-journal-count { border-radius: 10px; padding: 10px 14px; background: var(--quest-glass); border-color: rgba(var(--ph-rgb),.18); box-shadow: none; }
 .quests-win .q-journal-count strong { color: var(--ph-bright); font-size: 30px; }
 .quests-win .q-journal-count span { font-size: 13px; color: var(--ph-dim); }
-.quests-win .q-view-tabs { display: flex; gap: 5px; padding: 4px; border: 1px solid rgba(var(--ph-rgb),.15); border-radius: 9px; background: rgba(0,0,0,.13); }
-.quests-win .q-view-tabs button { flex: 1; font: inherit; font-size: 16px; color: var(--ph-dim); padding: 10px 12px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; }
+.quests-win .q-view-tabs { display: flex; gap: 5px; padding: 4px; border: 1px solid rgba(var(--ph-rgb),.15); border-radius: 9px; background: rgba(0,0,0,.13); container-type: inline-size; container-name: qtabs; }
+.quests-win .q-view-tabs button { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: inherit; font-size: 16px; color: var(--ph-dim); padding: 10px 12px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; }
+/* five tabs since PASS joined (10-19): a narrow WINDOW on a wide screen gets the compact tabs too, not only a narrow viewport (sweep 10-20) */
+@container qtabs (max-width: 460px) { .quests-win .q-view-tabs button { padding: 8px 2px; font-size: 14px; letter-spacing: 0; } }
 .quests-win .q-view-tabs button[aria-selected="true"] { color: var(--ph-bright); border-color: rgba(var(--ph-rgb),.3); background: var(--quest-glass); box-shadow: inset 0 1px 0 rgba(var(--ph-bright-rgb),.1); }
 .quests-win .q-view-tabs button:hover { color: var(--ph-bright); background-color: rgba(var(--ph-rgb),.06); }
 .quests-win .q-view-tabs button span { margin-left: 6px; font-size: 12px; color: var(--ph-dim); }
@@ -174,11 +176,11 @@
 /* ============== THE PASS (2026-10-19) — the quest log as an ASCII battle pass ==============
    Plain-ASCII art (VT323 owns every glyph) on the station's phosphor + gold tokens. Rules are text runs clipped by
    the panel width, so the frame stays ASCII at any window size; the tier track scrolls sideways like a pass. */
-.quests-win .bp { font-size: 16px; color: var(--ph); }
+.quests-win .bp { font-size: 16px; color: var(--ph); container-type: inline-size; container-name: bpass; }
 .quests-win .bp pre { margin: 0; font: inherit; line-height: 1.05; white-space: pre; }
 .quests-win .bp-rule { display: flex; white-space: nowrap; overflow: hidden; color: rgba(var(--ph-rgb),.55); margin: 14px 0 10px; line-height: 1; letter-spacing: 1px; }
 .quests-win .bp-rule:first-child { margin-top: 0; }
-.quests-win .bp-rule-label { color: var(--gold); letter-spacing: 1.5px; flex: 0 0 auto; }
+.quests-win .bp-rule-label { color: var(--gold); letter-spacing: 1.5px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .quests-win .bp-rule-run { flex: 1 1 0; min-width: 0; overflow: hidden; }
 .quests-win .bp-frame-hull .bp-rule, .quests-win .bp-frame-starline .bp-rule, .quests-win .bp-frame-deep-field .bp-rule { color: rgba(var(--gold-rgb),.7); text-shadow: 0 0 6px rgba(var(--gold-rgb),.35); }
 
@@ -186,7 +188,10 @@
 .quests-win .bp-tier { color: var(--ph-bright); font-size: 20px; text-shadow: 0 0 10px var(--ph-glow); }
 .quests-win .bp-eyebrow { display: block; font-size: 12px; letter-spacing: 1.5px; color: var(--ph-dim); }
 .quests-win .bp-rank { display: block; font-weight: normal; font-size: 34px; line-height: 1.05; letter-spacing: 3px; color: var(--gold); text-shadow: 0 0 12px rgba(var(--gold-rgb),.45); }
-.quests-win .bp-xp { margin: 6px 0 2px; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: clip; }
+.quests-win .bp-xp { margin: 6px 0 2px; font-size: 18px; white-space: nowrap; }
+.quests-win .bp-bar-s { display: none; }
+.quests-win .bp-stale { margin: 0 0 8px; }
+.quests-win .bp-reset { margin: -4px 0 8px; text-align: right; letter-spacing: .5px; }
 .quests-win .bp-xp b { color: var(--ph-bright); font-weight: normal; }
 .quests-win .bp-bar { color: var(--ph-bright); text-shadow: 0 0 6px var(--ph-glow); letter-spacing: 0; }
 .quests-win .bp .sub { font-size: 14px; line-height: 1.45; color: var(--ph-dim); }
@@ -212,7 +217,7 @@
 .quests-win .bp-box { color: rgba(var(--ph-rgb),.45); font-size: 17px; }
 .quests-win .bp-node-title { font-size: 13px; letter-spacing: 1px; color: var(--ph-dim); }
 .quests-win .bp-node-frame { font-size: 11px; color: rgba(var(--gold-rgb),.75); }
-.quests-win .bp-node .bp-need { font-size: 12px; color: rgba(var(--ph-rgb),.5); }
+.quests-win .bp-node .bp-need { font-size: 12px; color: var(--ph-dim); }
 .quests-win .bp-node .bp-got { font-size: 12px; color: var(--ph-dim); }
 .quests-win .bp-done .bp-box { color: var(--ph); }
 .quests-win .bp-done .bp-node-title { color: var(--ph); }
@@ -241,9 +246,16 @@
 .quests-win .bp-done-tag { color: var(--gold); letter-spacing: 1.5px; font-size: 14px; }
 .quests-win .bp .bp-go { padding: 6px 14px; }
 .quests-win .bp-law { margin: 12px 0 0; }
-@media (max-width: 720px) {
+/* sized by the PASS's own width (a narrow window on a wide screen is just as narrow) — sweep 10-20 */
+@container bpass (max-width: 640px) {
   .quests-win .bp-hero { grid-template-columns: auto minmax(0,1fr); }
   .quests-win .bp-streak { grid-column: 1 / -1; }
+}
+@container bpass (max-width: 420px) {
+  .quests-win .bp-bar-l { display: none; }
+  .quests-win .bp-bar-s { display: inline; }
+  .quests-win .bp-rank { font-size: 28px; letter-spacing: 2px; }
+  .quests-win .bp-tier { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .quests-win .bp-streak.lit .bp-flame, .quests-win .bp-here, .quests-win .bp .bp-claim, .quests-win .bp-claimbar, .quests-win .bp-flash .bp-box { animation: none; }

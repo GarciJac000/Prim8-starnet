@@ -66,7 +66,7 @@ const chat = read('frontend/app/chat.js');
 const ex = name => { const m = new RegExp('(  function ' + name + '\\([\\s\\S]*?\\n  \\})').exec(chat); A.ok(m, 'chat.js defines ' + name); return m ? m[1] : ''; };
 const esc = /const HTML_ESC = \{[^}]*\};/.exec(chat)[0], rel = /  const REL_PATH = [^\n]*;/.exec(chat)[0];
 // eslint-disable-next-line no-new-func
-const inline = new Function(esc + '\n' + rel + '\n' + ex('escapeHtml') + ex('linkify') + ex('hostOf') + ex('linkHostNote') + ex('fileRefLink') + ex('fileRefImage') + ex('reportInline') + '\nreturn reportInline;')();
+const inline = new Function(esc + '\n' + rel + '\n' + ex('escapeHtml') + ex('linkify') + ex('hostOf') + ex('linkHostNote') + ex('appFileRef') + ex('fileRefLink') + ex('fileRefImage') + ex('reportInline') + '\nreturn reportInline;')();
 let o = inline('[Review the original](review/coffee-break-cat-new/index.html)');
 A.ok(/<a class="md-file" href="#" data-md-path="review\/coffee-break-cat-new\/index\.html">Review the original<\/a>/.test(o), 'a relative [link](path) is a file link');
 o = inline('![New candidate](review/coffee-break-cat-new/final-preview.jpg)');
@@ -76,7 +76,7 @@ for (const bad of ['../secrets.txt', '/etc/passwd', 'C:\\x.txt', '#top', 'javasc
   A.ok(!/md-file|md-img|href="(?!https?:)/.test(inline('[x](' + bad + ')')), 'no file link for an unsafe target: ' + bad);
 A.ok(!/<script|<b>|"onerror/.test(inline('[<script>](a"onerror=1.png)') + inline('![<b>](x.png)')), 'labels and paths are escaped into our markup');
 A.ok(/\|\\\]\\\(\/m;/.test(chat), 'the prose fast path no longer skips a reply whose only markup is a link');
-A.ok(/function hydrateFileRefs\(bodyEl\)/.test(chat) && /hydrateFileRefs\(bodyEl\);/.test(chat), 'renderProse hydrates file links and images');
+A.ok(/function hydrateFileRefs\(bodyEl[,)]/.test(chat) && /hydrateFileRefs\(bodyEl\);/.test(chat) && /hydrateFileRefs\(bodyEl, added\);/.test(chat), 'renderProse hydrates file links and images (a live frame: the blocks it drew)');
 A.ok(/new Blob\(\[b\], \{ type: 'image\/svg\+xml' \}\)/.test(chat), 'an .svg served as a download is retyped so the <img> decodes');
 A.ok(/\.md-img\[data-ready\]/.test(chat), 'a loaded image is carried across streaming re-renders (no per-frame rebuild)');
 A.ok(/userScrollHeld \|\| Date\.now\(\) - userScrollAt < 1200\) stick = false/.test(chat) && /else if \(stick\) log\.scrollTop = log\.scrollHeight/.test(chat),

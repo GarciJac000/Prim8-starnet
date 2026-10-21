@@ -167,6 +167,16 @@ A.eq(panelOff.halted, false, 'an OFF status carries halted:false');
 const panelPosture = NR.panelModel({ status: { active: false, away: false, beatsUsedToday: 0, leashPerDay: 3, binding: 'posture', lastBeatAt: 0, nextEligibleAt: T0610Z + 2700000 }, tzOffsetMin: -300 });
 A.ok(!/\d{1,2}:\d{2}\s*(AM|PM)/.test(panelPosture.nextEligibleText) && /not scheduled/.test(panelPosture.nextEligibleText) && /WAIT or SUGGEST/.test(panelPosture.nextEligibleText), 'a posture-bound shift shows no next-job clock and names the dial as the reason');
 A.ok(/\d{1,2}:\d{2}\s*(AM|PM)/.test(panelActive.nextEligibleText), 'a cooldown-bound shift still shows its real next-job clock');
+// sweep/autonomy 2026-10-20: a SPENT LEASH is not cleared by the cooldown clock — it refills at the local midnight the
+// status carries (leashResetsAt). And a gate no clock clears (budget, no provider, readiness…) has no next-job time.
+const resetAt = T0610Z + 18 * 3600000;
+const panelLeash = NR.panelModel({ status: { active: true, away: true, beatsUsedToday: 3, leashPerDay: 3, binding: 'leash', lastBeatAt: T0610Z, nextEligibleAt: T0610Z + 2700000, leashResetsAt: resetAt }, tzOffsetMin: -300 });
+A.ok(panelLeash.nextEligibleText.indexOf(NR.fmtLocalTime(T0610Z + 2700000, -300)) < 0, 'a leash-bound shift never names the cooldown clock as its next job');
+A.ok(panelLeash.nextEligibleText.indexOf(NR.fmtLocalTime(resetAt, -300)) >= 0 && /limit/.test(panelLeash.nextEligibleText), 'it names the leash refill time and why: ' + panelLeash.nextEligibleText);
+for (const binding of ['budget', 'spend-unknown', 'no-provider', 'readiness', 'precheck-error', 'persist-failed']) {
+  const p = NR.panelModel({ status: { active: true, away: true, beatsUsedToday: 1, leashPerDay: 3, binding, lastBeatAt: T0610Z, nextEligibleAt: T0610Z + 2700000 }, tzOffsetMin: -300 });
+  A.ok(!/\d{1,2}:\d{2}\s*(AM|PM)/.test(p.nextEligibleText) && /not scheduled/.test(p.nextEligibleText), binding + '-bound: no next-job clock a clock cannot clear (' + p.nextEligibleText + ')');
+}
 
 /* ---------- panelModel(): BUILD-vs-DRAFT mode + cold-start readiness honesty (2026-07-13) ----------
    Regression: at dial=free/sandbox with no away-workshop grant every beat silently degraded to a reason-only

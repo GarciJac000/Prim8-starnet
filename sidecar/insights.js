@@ -31,7 +31,7 @@
     const bucketMs = num(opts.bucketMs) > 0 ? num(opts.bucketMs) : HOUR;
     const nBuckets = num(opts.buckets) > 0 ? num(opts.buckets) : 24;
 
-    let totalUsd = 0, totalTokens = 0, meteredRuns = 0, unmeteredRuns = 0, unmeteredTokens = 0, spendUnknownRuns = 0;
+    let totalUsd = 0, totalTokens = 0, meteredRuns = 0, unmeteredRuns = 0, unmeteredTokens = 0, spendUnknownRuns = 0, unpricedRuns = 0;
     const byReason = {};
     const modelMap = new Map();   // model -> { model, usd, tokens, runs }
     const agentMap = new Map();   // agentId -> { agentId, usd, tokens, runs }
@@ -45,22 +45,28 @@
       const usd = spendUnknown ? 0 : num(r.usd), tok = spendUnknown ? 0 : num(r.tokens);
       const unmetered = !!(r && r.unmetered);
       const meteredUsd = unmetered ? 0 : usd;
+      // UNPRICED: tokens no provider cost or catalog rate priced. Its usd is a floor (often 0), never a proven $0 —
+      // counted and labelled, and a $0 one is not a metered run (it would drag avgUsdPerRun toward a fake zero).
+      const unpriced = !spendUnknown && !unmetered && !!(r && r.unpriced === true);
+      const metered = !spendUnknown && !unmetered && !(unpriced && usd === 0);
+      if (unpriced) unpricedRuns++;
       totalUsd += meteredUsd; totalTokens += tok;
       if (spendUnknown) spendUnknownRuns++;
-      else if (unmetered) { unmeteredRuns++; unmeteredTokens += tok; } else { meteredRuns++; }
+      else if (unmetered) { unmeteredRuns++; unmeteredTokens += tok; } else if (metered) { meteredRuns++; }
       const reason = str(r.reason) || 'done';
       byReason[reason] = (byReason[reason] || 0) + 1;
       const m = str(r.model) || '(unknown)';
-      const mm = modelMap.get(m) || { model: m, usd: 0, tokens: 0, runs: 0, meteredRuns: 0, unmeteredRuns: 0, unmeteredTokens: 0, spendUnknownRuns: 0 };
+      const mm = modelMap.get(m) || { model: m, usd: 0, tokens: 0, runs: 0, meteredRuns: 0, unmeteredRuns: 0, unmeteredTokens: 0, spendUnknownRuns: 0, unpricedRuns: 0 };
       mm.usd += meteredUsd; mm.tokens += tok; mm.runs++;
+      if (unpriced) mm.unpricedRuns++;
       if (spendUnknown) mm.spendUnknownRuns++;
-      else if (unmetered) { mm.unmeteredRuns++; mm.unmeteredTokens += tok; } else { mm.meteredRuns++; }
+      else if (unmetered) { mm.unmeteredRuns++; mm.unmeteredTokens += tok; } else if (metered) { mm.meteredRuns++; }
       modelMap.set(m, mm);
       const a = str(r.agentId) || '(unknown)';
       const am = agentMap.get(a) || { agentId: a, usd: 0, tokens: 0, runs: 0, meteredRuns: 0, unmeteredRuns: 0, unmeteredTokens: 0, spendUnknownRuns: 0 };
       am.usd += meteredUsd; am.tokens += tok; am.runs++;
       if (spendUnknown) am.spendUnknownRuns++;
-      else if (unmetered) { am.unmeteredRuns++; am.unmeteredTokens += tok; } else { am.meteredRuns++; }
+      else if (unmetered) { am.unmeteredRuns++; am.unmeteredTokens += tok; } else if (metered) { am.meteredRuns++; }
       agentMap.set(a, am);
     }
 
@@ -91,6 +97,7 @@
       meteredRuns: meteredRuns,
       unmeteredRuns: unmeteredRuns,
       spendUnknownRuns: spendUnknownRuns,   // interrupted runs whose spend was never settled — excluded from every $ figure
+      unpricedRuns: unpricedRuns,           // runs with tokens no published rate priced — their $ is a floor, not a fact
       totalUsd: round(totalUsd),
       totalTokens: totalTokens,
       unmeteredTokens: unmeteredTokens,
@@ -100,8 +107,10 @@
       byModel: Array.from(modelMap.values()).map(m => ({
         model: m.model, usd: round(m.usd), tokens: m.tokens, runs: m.runs,
         meteredRuns: m.meteredRuns, unmeteredRuns: m.unmeteredRuns, unmeteredTokens: m.unmeteredTokens, spendUnknownRuns: m.spendUnknownRuns,
+        unpricedRuns: m.unpricedRuns,
         unmetered: m.unmeteredRuns > 0 && m.meteredRuns === 0,
-        spendLabel: (m.unmeteredRuns > 0 && m.meteredRuns === 0) ? 'subscription / unmetered' : ''
+        spendLabel: (m.unmeteredRuns > 0 && m.meteredRuns === 0) ? 'subscription / unmetered'
+          : m.unpricedRuns > 0 ? (m.usd > 0 ? 'partly unpriced (no published price for some tokens)' : 'no published price') : ''
       })).sort(byUsdDesc),
       byAgent: Array.from(agentMap.values()).map(a => ({
         agentId: a.agentId, usd: round(a.usd), tokens: a.tokens, runs: a.runs,

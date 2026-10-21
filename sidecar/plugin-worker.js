@@ -198,6 +198,8 @@ process.on('message', (m) => {
     return void answer(m, () => fn(m.args == null ? null : m.args));
   }
   if (m.t === 'jobs') { jobsPaused = m.paused === true; if (jobsPaused) stopJobs(); else startJobs(); return; }
+  // the runtime's liveness check after a call timed out: answering it at all proves this event loop is not wedged
+  if (m.t === 'ping') return send({ t: 'pong', ref: m.ref });
   if (m.t === 'stop') { try { process.exit(0); } catch (e) { note('plugins.worker.stop-exit', e); } }
 });
 

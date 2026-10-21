@@ -206,11 +206,14 @@ function makeRouter(o) {
     // each entry is EITHER a bare objectType string (the generic caps: 'computer'/'dish'/…) OR a rich object
     // { objectType, … } carrying per-instance data — e.g. a connector portal's { objectType:'connector',
     // connectorId } so the manager can project THAT server's tools. Normalize both to a room object.
+    // `floor` marks this as a ROUTED FLOOR ROOM (resolveTools ignores it): runOnce's capability note may then name the
+    // room this dock's agent draws on (capability/cap-scope.js), after checking the saved floor reproduces these objects
     return {
       agents: { [agentId]: { id: agentId, room: 'bay' } },
       rooms: { bay: { id: 'bay', objects: objs.map((t, i) =>
         (t && typeof t === 'object') ? Object.assign({ instanceId: 'o' + i }, t) : { instanceId: 'o' + i, objectType: t }
-      ) } }
+      ) } },
+      floor: { dockId: bay.propId }
     };
   }
 

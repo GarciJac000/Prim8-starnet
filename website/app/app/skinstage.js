@@ -40,13 +40,18 @@ const SkinStage = (() => {
 
   // ~8fps walk on every mounted stage, but only while that stage's <img> is actually on screen
   // (offsetParent === null when hidden), so a closed panel/modal costs nothing.
+  // The loop LIVES only while it has something to animate (sweep/world 2026-10-20): it re-armed rAF unconditionally, so after
+  // WAKE the create screen's hidden-but-connected <img> kept a 60fps loop behind the station all session. Now: a visible stage
+  // runs on rAF; hidden stages are re-checked on a slow 250ms poll (a restored window resumes with no re-mount); no stage = stop.
   function tick(now) {
+    let visible = false;
     if (stages.length) {
       // drop stages whose <img> was removed by a panel rebuild before advancing the survivors
       const live = [];
       for (const st of stages) {
         if (!st.img || !st.img.isConnected) continue;
         live.push(st);
+        if (st.img.offsetParent) visible = true;
         if (st.img.offsetParent && st.frames.length > 1 && now - st.last > 120) {
           st.last = now;
           st.ix = (st.ix + 1) % st.frames.length;
@@ -59,7 +64,9 @@ const SkinStage = (() => {
         if (current && stages.indexOf(current) === -1) current = stages[stages.length - 1] || null;
       }
     }
-    requestAnimationFrame(tick);
+    if (!stages.length) { looping = false; return; }
+    if (visible) requestAnimationFrame(tick);
+    else setTimeout(() => tick(performance.now()), 250);
   }
 
   // bind a stage's <img> + name element, show an initial skin, and start the loop once. Loads

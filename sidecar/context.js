@@ -124,6 +124,111 @@
   }
 
   // ---- secret redaction (module-level so it's usable without a context instance) ----
+  /* LINEAR-TIME DRIVERS (perf lane, 2026-10-20). Four shapes in SECRET_PATTERNS were quadratic as plain global
+     scans. A failed attempt at one start re-scanned to the end of its run, and so did the attempt at every later start
+     in the same run: "sk-.sk-.…", "a.a.a.…" and "eyJ-eyJ-…" put a word boundary every few characters, and a page of
+     BEGIN PRIVATE KEY headers with no END retried every header. 80 KB of crafted page content cost seconds per
+     redact() pass, and every tool result takes at least two. The regexes are unchanged and stay the definition. A
+     driver skips only start positions PROVEN unable to match, and runs the SAME regex, sticky, at the one start that
+     can. The result is identical to s.replace(re, rep), and test/redact.linear.test.js diffs the two on random and
+     adversarial input. Each proof depends on its regex's exact shape: edit one of these regexes and you re-prove its
+     driver.
+       · masked key: every prefix is key-body characters [-_.A-Za-z0-9], and a word boundary inside a prefix only
+         falls right after it. A later start in the same body run therefore has a later body start and the SAME run
+         end. If the leftmost start finds no mask, no later start in that run can.
+       · URL password: every start in one scheme run [A-Za-z0-9+.-] reaches the same "://" and the same remainder.
+         The only start that can match is the leftmost letter at a word boundary in the run ending at each "://".
+       · private key: a later BEGIN header ends later, so its END search covers a subset of the failed one's.
+         After the first unclosed header nothing later can match.
+       · JWT: '.' is not a segment character [A-Za-z0-9_-], so the first segment of a start at p can only end where
+         the segment run from p+3 ends, and it must meet the fixed ".eyJ…" rest there. A later "eyJ" inside that run
+         has a shorter first segment that ends at the SAME place and needs the SAME rest. If p fails, every start up
+         to the run end fails too. */
+  function isAlnumCode(c) { return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+  function isWordCode(c) { return isAlnumCode(c) || c === 95; }                               // \w without /u
+  function isKeyBodyCode(c) { return isAlnumCode(c) || c === 45 || c === 95 || c === 46; }    // [-_.A-Za-z0-9]
+  function isSchemeCode(c) { return isAlnumCode(c) || c === 43 || c === 46 || c === 45; }     // [a-z0-9+.-] under /i
+  function isLetterCode(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }          // [a-z] under /i
+  function isJwtSegCode(c) { return isAlnumCode(c) || c === 95 || c === 45; }                 // [A-Za-z0-9_\-]
+  function stickyCopy(re) { return new RegExp(re.source, re.flags.replace('g', '') + 'y'); }
+  function maskedKeyDriver(re, rep) {
+    const cut = re.source.indexOf('[-_.A-Za-z0-9]*?');
+    if (cut <= 0 || rep.indexOf('$') >= 0) return null;   // not the shape this proof covers: plain scan
+    const head = new RegExp(re.source.slice(0, cut), 'g');   // \b + the vendor prefixes
+    const at = stickyCopy(re);
+    return function (s) {
+      let out = '', last = 0, m;
+      head.lastIndex = 0;
+      while ((m = head.exec(s)) !== null) {
+        const p = m.index;
+        at.lastIndex = p;
+        if (at.exec(s) !== null) { out += s.slice(last, p) + rep; last = at.lastIndex; head.lastIndex = last; continue; }
+        let r = p;
+        while (r < s.length && isKeyBodyCode(s.charCodeAt(r))) r++;
+        head.lastIndex = r;   // no start inside this body run can match either
+      }
+      return last ? out + s.slice(last) : s;
+    };
+  }
+  function urlPasswordDriver(re, rep) {
+    if (rep !== '$1[redacted-secret]') return null;
+    const at = stickyCopy(re);
+    return function (s) {
+      let out = '', last = 0;
+      let i = s.indexOf('://');
+      while (i >= 0) {
+        let b = i;
+        while (b > last && isSchemeCode(s.charCodeAt(b - 1))) b--;
+        let q = -1;
+        for (let j = b; j < i; j++) {
+          if (isLetterCode(s.charCodeAt(j)) && (j === 0 || !isWordCode(s.charCodeAt(j - 1)))) { q = j; break; }
+        }
+        if (q >= 0) {
+          at.lastIndex = q;
+          const hit = at.exec(s);
+          if (hit !== null) { out += s.slice(last, q) + hit[1] + '[redacted-secret]'; last = at.lastIndex; i = s.indexOf('://', last); continue; }
+        }
+        i = s.indexOf('://', i + 1);
+      }
+      return last ? out + s.slice(last) : s;
+    };
+  }
+  function privateKeyDriver(re, rep) {
+    const cut = re.source.indexOf('[\\s\\S]*?');
+    if (cut <= 0 || rep.indexOf('$') >= 0) return null;   // not the shape this proof covers: plain scan
+    const at = stickyCopy(re);
+    const header = new RegExp(re.source.slice(0, cut), 'y');   // the regex's own BEGIN header
+    return function (s) {
+      let out = '', last = 0;
+      let p = s.indexOf('-----BEGIN ');
+      while (p >= 0) {
+        at.lastIndex = p;
+        if (at.exec(s) !== null) { out += s.slice(last, p) + rep; last = at.lastIndex; p = s.indexOf('-----BEGIN ', last); continue; }
+        header.lastIndex = p;
+        if (header.test(s)) break;   // a well-formed header with no END after it: no later header can close either
+        p = s.indexOf('-----BEGIN ', p + 1);
+      }
+      return last ? out + s.slice(last) : s;
+    };
+  }
+  function jwtDriver(re, rep) {
+    if (re.source.indexOf('\\beyJ[A-Za-z0-9_\\-]{8,}\\.') !== 0 || re.flags !== 'g' || rep.indexOf('$') >= 0) return null;   // not the shape this proof covers: plain scan
+    const head = /\beyJ/g;
+    const at = stickyCopy(re);
+    return function (s) {
+      let out = '', last = 0, m;
+      head.lastIndex = 0;
+      while ((m = head.exec(s)) !== null) {
+        const p = m.index;
+        at.lastIndex = p;
+        if (at.exec(s) !== null) { out += s.slice(last, p) + rep; last = at.lastIndex; head.lastIndex = last; continue; }
+        let r = p + 3;
+        while (r < s.length && isJwtSegCode(s.charCodeAt(r))) r++;
+        head.lastIndex = r;   // no start before the end of this segment run can match either
+      }
+      return last ? out + s.slice(last) : s;
+    };
+  }
   // Key/token shapes scrubbed before anything is logged, streamed, or persisted. Each pattern is
   // distinctive enough (vendor prefix + a length floor) that it does not eat ordinary prose. This is
   // ALWAYS-ON — there is deliberately no toggle the model could flip off. Most-specific vendor prefixes
@@ -135,8 +240,8 @@
     // full-key pattern below, so the visible head/tail went into diag.errors.json verbatim (reported against
     // 0.12.4). Any vendor-prefixed token that contains a mask run (** / •• / … / ...) is scrubbed whole.
     // The prefix needs its separator, so prose like "skip..." is never touched.
-    [/\b(?:(?:sk|pk|rk|xai|pplx|glpat|xox[abeprs])-|sk_(?:live|test)_|(?:gsk|hf|gh[pousr]|whk|ntn|lin_api)_|AIza|ya29\.)[-_.A-Za-z0-9]*?(?:[*•]{2,}|…|\.{3})(?:[-_A-Za-z0-9*•…]|\.{3})*/g, '[redacted-key]'],
-    [/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY-----/g, '[redacted-private-key]'],
+    [/\b(?:(?:sk|pk|rk|xai|pplx|glpat|xox[abeprs])-|sk_(?:live|test)_|(?:gsk|hf|gh[pousr]|whk|ntn|lin_api)_|AIza|ya29\.)[-_.A-Za-z0-9]*?(?:[*•]{2,}|…|\.{3})(?:[-_A-Za-z0-9*•…]|\.{3})*/g, '[redacted-key]', maskedKeyDriver],
+    [/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY-----/g, '[redacted-private-key]', privateKeyDriver],
     [/sk-or-v1-[A-Za-z0-9_\-]{8,}/g, '[redacted-key]'],                 // OpenRouter
     [/sk-ant-[A-Za-z0-9_\-]{8,}/g, '[redacted-key]'],                   // Anthropic
     [/sk-proj-[A-Za-z0-9_\-]{16,}/g, '[redacted-key]'],                 // OpenAI project key
@@ -161,14 +266,14 @@
     [/\bhf_[A-Za-z0-9]{30,}\b/g, '[redacted-key]'],                     // HuggingFace
     [/\bxai-[A-Za-z0-9]{20,}\b/g, '[redacted-key]'],                    // xAI
     [/\bAC[a-f0-9]{32}\b/g, '[redacted-key]'],                          // Twilio account SID
-    [/\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}/g, '[redacted-jwt]'], // JWT
+    [/\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}/g, '[redacted-jwt]', jwtDriver], // JWT
     [/\b\d{8,10}:[A-Za-z0-9_\-]{30,}\b/g, '[redacted-token]'],          // Telegram bot token (this app uses these)
     [/sk-[A-Za-z0-9_\-]{16,}/g, '[redacted-key]'],                      // generic OpenAI-style (broad — keep last)
     [/\bBearer\s+[A-Za-z0-9._\-]{12,}/g, 'Bearer [redacted-key]'],      // Authorization: Bearer <token>
     // The password in a URL's `user:pass@host` part (git remotes, proxies, database URLs). The user name and host stay
     // readable; the password runs to the LAST '@' of the authority, because a password may itself hold an '@'. A vendor
     // key or known secret already scrubbed in that slot keeps its own tag. A port (`host:8080/…`) is never touched.
-    [/\b([a-z][a-z0-9+.-]*:\/\/[^\s:\/?#@]*:)(?!\[redacted-)[^\s\/?#]+(?=@)/gi, '$1[redacted-secret]'],
+    [/\b([a-z][a-z0-9+.-]*:\/\/[^\s:\/?#@]*:)(?!\[redacted-)[^\s\/?#]+(?=@)/gi, '$1[redacted-secret]', urlPasswordDriver],
     // Synthetic/local connectors frequently use ordinary canaries rather than vendor-shaped tokens. Scrub
     // explicit credential assignments too, including URL query strings, so upstream diagnostics cannot turn a
     // `password=...` or `client_secret: ...` value into a credential disclosure.
@@ -176,6 +281,8 @@
     // opening the value, used to stop this rule cold — so `cat codex/tokens.json` reached the model verbatim.
     [/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|secret[_-]?key|bot[_-]?token|webhook[_-]?secret|password|passwd|authorization)\b(["']?\s*[=:]\s*["']?)(?!\[redacted-)[^\s&,;"']{4,}/gi, '$1$2[redacted-secret]'],
   ];
+  // [regex, replacement, linear driver | null] in pattern order; a driver returns exactly s.replace(regex, replacement)
+  const SECRET_RULES = SECRET_PATTERNS.map(p => [p[0], p[1], typeof p[2] === 'function' ? p[2](p[0], p[1]) : null]);
   /* KNOWN-VALUE redaction. Shape patterns only catch vendor-shaped secrets; a service key, a custom connector
      token, a Mistral key or a rotated OAuth token has no shape at all. The host (index.js) registers ONE source
      that returns every secret value it currently holds (provider keys, channel tokens, OAuth access/refresh
@@ -183,28 +290,42 @@
      exact strings first, so `echo $MY_SERVICE_KEY` in a shell, a server echoing a key in an error body, or a
      token in a log line can never reach the model, the bus, a transcript or diagnostics — whatever its shape.
      The source is read once per top-level redact() call; values shorter than KNOWN_MIN are ignored (too likely
-     to collide with ordinary text). A throwing source degrades to shape-only redaction, never to a crash. */
+     to collide with ordinary text). A throwing source degrades to shape-only redaction, never to a crash.
+     REVISION CACHE (perf lane, 2026-10-20): redact() runs on every token frame, and rebuilding + sorting the whole
+     held list each time was pure repeat work. The source is STILL read on every call, so a rotated or added key is
+     covered by the very next redact(). Only the derived list is reused, and only while the source hands back the
+     exact same strings in the same order as last time. Its revision is a private copy of that output, so a source
+     that edits its own array in place still forces a rebuild. */
   const KNOWN_MIN = 8;
   let knownSecretSource = null;
-  function setKnownSecretSource(fn) { knownSecretSource = typeof fn === 'function' ? fn : null; }
+  let knownCache = null;   // { raw: copy of the source's last output, list: the derived list (or null) }
+  function setKnownSecretSource(fn) { knownSecretSource = typeof fn === 'function' ? fn : null; knownCache = null; }
   function knownSecrets() {
     if (!knownSecretSource) return null;
     let raw;
     try { raw = knownSecretSource(); } catch (_) { return null; }
     if (!raw || typeof raw[Symbol.iterator] !== 'function') return null;
+    const vals = Array.from(raw);
+    const c = knownCache;
+    if (c && c.raw.length === vals.length) {
+      let same = true;
+      for (let i = 0; i < vals.length; i++) if (vals[i] !== c.raw[i]) { same = false; break; }
+      if (same) return c.list;
+    }
     const seen = new Set();
-    for (const v of raw) {
+    for (const v of vals) {
       if (typeof v !== 'string') continue;
       const t = v.trim();
       if (t.length >= KNOWN_MIN && t.indexOf('[redacted-') < 0) seen.add(t);
     }
-    if (!seen.size) return null;
     // longest first: a key that contains another known key is scrubbed whole, never left as a partial tail
-    return Array.from(seen).sort((a, b) => b.length - a.length);
+    const list = seen.size ? Array.from(seen).sort((a, b) => b.length - a.length) : null;
+    knownCache = { raw: vals, list: list };
+    return list;
   }
   function redactStr(s, known) {
     if (known) for (let i = 0; i < known.length; i++) if (s.indexOf(known[i]) >= 0) s = s.split(known[i]).join('[redacted-secret]');
-    for (let i = 0; i < SECRET_PATTERNS.length; i++) s = s.replace(SECRET_PATTERNS[i][0], SECRET_PATTERNS[i][1]);
+    for (let i = 0; i < SECRET_RULES.length; i++) { const r = SECRET_RULES[i]; s = r[2] ? r[2](s) : s.replace(r[0], r[1]); }
     return s;
   }
   const SECRET_FIELD = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|passwd|authorization|cookie|credentials?)$/i;
@@ -453,24 +574,38 @@
   function bm25(records, query) {
     const recs = Array.isArray(records) ? records : [];
     const qTerms = tokenize(query);
-    const scores = new Array(recs.length).fill(0);
-    if (!recs.length || !qTerms.length) return { scores, queried: qTerms.length > 0 };
-    const K1 = 1.2;
-    const docs = recs.map(r => tokenize(recordText(r)));
+    if (!recs.length || !qTerms.length) return { scores: new Array(recs.length).fill(0), queried: qTerms.length > 0 };
+    return { scores: bm25Scores(bm25Corpus(recs.map(r => tokenize(recordText(r)))), qTerms), queried: true };
+  }
+  /* The BM25 core over PRE-TOKENIZED docs, split in two so one corpus (its document frequencies and per-doc term
+     counts) scores several queries. lexicalScores() runs the exact query plus up to four lexical ones over the same
+     records, and used to re-tokenize and re-count every record for each of them (perf lane, 2026-10-20: ~75 ms per
+     recall at 2,000 notes). Same arithmetic in the same order, so the scores are bit-identical. */
+  const BM25_K1 = 1.2;
+  function bm25Corpus(docs) {
     const df = Object.create(null);
-    for (const toks of docs) { const seen = Object.create(null); for (const t of toks) { if (!seen[t]) { seen[t] = 1; df[t] = (df[t] || 0) + 1; } } }
-    const N = recs.length;
-    for (let i = 0; i < recs.length; i++) {
-      const tf = Object.create(null); for (const t of docs[i]) tf[t] = (tf[t] || 0) + 1;
+    const tfs = new Array(docs.length);
+    for (let i = 0; i < docs.length; i++) {
+      const tf = Object.create(null);
+      for (const t of docs[i]) { if (tf[t]) tf[t]++; else { tf[t] = 1; df[t] = (df[t] || 0) + 1; } }
+      tfs[i] = tf;
+    }
+    return { N: docs.length, df: df, tfs: tfs };
+  }
+  function bm25Scores(corpus, qTerms) {
+    const N = corpus.N, df = corpus.df, tfs = corpus.tfs;
+    const scores = new Array(N).fill(0);
+    for (let i = 0; i < N; i++) {
+      const tf = tfs[i];
       let relevance = 0;
       for (const qt of qTerms) {
         const f = tf[qt]; if (!f) continue;
         const idf = Math.log(1 + (N - df[qt] + 0.5) / (df[qt] + 0.5));
-        relevance += idf * (f * (K1 + 1)) / (f + K1);     // BM25 tf-saturation (no length norm — notes are short)
+        relevance += idf * (f * (BM25_K1 + 1)) / (f + BM25_K1);     // BM25 tf-saturation (no length norm — notes are short)
       }
       scores[i] = relevance;
     }
-    return { scores, queried: true };
+    return scores;
   }
   // Bounded lexical expansion, NOT a semantic model. Exact vocabulary retains full weight;
   // inflections and a small explicit alias lexicon add a weaker retrieval lane. Embeddings remain
@@ -491,11 +626,26 @@
     if (t.length > 3 && /[^s]s$/.test(t)) return t.slice(0, -1);
     return t;
   }
+  // token -> the canonical word of the FIRST group listing it (what LEXICAL_GROUPS.find picked), one lookup per token
+  const LEXICAL_CANON = new Map();
+  for (const g of LEXICAL_GROUPS) for (const w of g) if (!LEXICAL_CANON.has(w)) LEXICAL_CANON.set(w, g[0]);
+  function lexicalTokens(tokens) {
+    return tokens.map(t => { const c = LEXICAL_CANON.get(t); return c !== undefined ? c : lexicalStem(t); });
+  }
   function lexicalText(text) {
-    return tokenize(lexicalForm(text)).map(t => {
-      const group = LEXICAL_GROUPS.find(g => g.indexOf(t) >= 0);
-      return group ? group[0] : lexicalStem(t);
-    }).join(' ');
+    return lexicalTokens(tokenize(lexicalForm(text))).join(' ');
+  }
+  // A record's lexical doc: exactly tokenize(recordText({ content: lexicalText(text), kind: 'fact' })), the shim the
+  // lexical lane scores. Two shortcuts, both exact: when lexicalForm leaves the text unchanged its tokens are the exact
+  // tokens already in hand, and plain [a-z0-9] tokens pass NFKC, lowercasing and the split untouched, so re-tokenizing
+  // them is only the length + stop-word filter.
+  const PLAIN_TOKENS = /^[a-z0-9 ]*$/;
+  function lexicalDoc(text, exactTokens) {
+    const form = lexicalForm(text);
+    const mapped = lexicalTokens(form === text && exactTokens ? exactTokens : tokenize(form));
+    const joined = mapped.join(' ');
+    if (PLAIN_TOKENS.test(joined)) return mapped.filter(t => t.length >= 2 && !STOP.has(t));
+    return tokenize(recordText({ content: joined, kind: 'fact' }));
   }
   function expandRecallQuery(query) {
     const terms = tokenize(lexicalForm(String(query || '').slice(0, 2000))).slice(0, 32);
@@ -509,14 +659,23 @@
     if (out.has('throttle') || out.has('ratelimit')) { out.add('rate'); out.add('limits'); }
     return Array.from(out).slice(0, 96).join(' ');
   }
+  // Every record is tokenized ONCE per call: its exact tokens feed the exact query and, in the common case, its lexical
+  // doc too; the lexical corpus is counted once and scores the expanded query and every variant.
   function lexicalScores(records, query, opts) {
     const list = Array.isArray(records) ? records : [];
-    const exact = bm25(list, query);
-    const normalized = list.map(r => ({ content: lexicalText(recordText(r)), kind: 'fact' }));
-    const expanded = bm25(normalized, lexicalText(query));
     const variants = opts && Array.isArray(opts.queryVariants) ? opts.queryVariants.slice(0, 3).filter(q => typeof q === 'string').map(q => q.slice(0, 1000)) : [];
-    const extra = variants.map(q => bm25(normalized, lexicalText(q)).scores);
-    return { queried: exact.queried, scores: exact.scores.map((s, i) => Math.max(s, 0.65 * expanded.scores[i], ...extra.map(a => 0.5 * a[i]))) };
+    const qExact = tokenize(query);
+    const qLex = tokenize(lexicalText(query));
+    const qVar = variants.map(q => tokenize(lexicalText(q)));
+    const zeros = () => new Array(list.length).fill(0);
+    const texts = list.length ? list.map(recordText) : [];
+    const exactDocs = list.length && qExact.length ? texts.map(t => tokenize(t)) : null;
+    const lexCorpus = list.length && (qLex.length || qVar.some(q => q.length))
+      ? bm25Corpus(texts.map((t, i) => lexicalDoc(t, exactDocs ? exactDocs[i] : null))) : null;
+    const exact = exactDocs ? bm25Scores(bm25Corpus(exactDocs), qExact) : zeros();
+    const expanded = lexCorpus && qLex.length ? bm25Scores(lexCorpus, qLex) : zeros();
+    const extra = qVar.map(q => (lexCorpus && q.length ? bm25Scores(lexCorpus, q) : zeros()));
+    return { queried: qExact.length > 0, scores: exact.map((s, i) => Math.max(s, 0.65 * expanded[i], ...extra.map(a => 0.5 * a[i]))) };
   }
 
   // PROJECT SCOPE (memory-compound lane): the comparable key for a run's project root. Paths are compared
@@ -879,5 +1038,9 @@
     return api;
   }
 
-  return { makeContext, redact, setKnownSecretSource, renderRecall, injectRecall, rank, bm25, lexicalScores, expandRecallQuery, isStandingMemory, activeMemoryRecords, projectKey, memoryProjectKey, memoryAllowedInProject, cosine, SEMANTIC_FLOOR, flagInjection, stripRecallFence, compactionMemoryBlock, compactionSummaryPrompt, COMPACTION_SECTIONS, CHARS_PER_TOKEN, IMAGE_TOKENS_DEFAULT, imageTokens, estimateContentTokens, RUN_CONTEXT_DEFAULTS, REARM_MIN_FREED, foldFreedEnough };
+  // test surface only: fresh regex copies (no shared lastIndex), in order, and whether each runs through a driver
+  const _internals = { secretPatterns: () => SECRET_RULES.map(r => ({ re: new RegExp(r[0].source, r[0].flags), rep: r[1], driven: !!r[2], run: r[2] })),
+    // the lexical primitives, so a test can rebuild the naive single-pass ranking from the module's CURRENT rules
+    tokenize, recordText, lexicalForm, lexicalStem, LEXICAL_GROUPS: LEXICAL_GROUPS.map(g => g.slice()) };
+  return { _internals, makeContext, redact, setKnownSecretSource, renderRecall, injectRecall, rank, bm25, lexicalScores, expandRecallQuery, isStandingMemory, activeMemoryRecords, projectKey, memoryProjectKey, memoryAllowedInProject, cosine, SEMANTIC_FLOOR, flagInjection, stripRecallFence, compactionMemoryBlock, compactionSummaryPrompt, COMPACTION_SECTIONS, CHARS_PER_TOKEN, IMAGE_TOKENS_DEFAULT, imageTokens, estimateContentTokens, RUN_CONTEXT_DEFAULTS, REARM_MIN_FREED, foldFreedEnough };
 });

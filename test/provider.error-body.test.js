@@ -12,6 +12,9 @@
    Injected fetch only — no network. */
 'use strict';
 const A = require('./_assert.js');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 const { classifyApiError } = require('../sidecar/providers/errorClass.js');
 const { makeAnthropicProvider } = require('../sidecar/providers/anthropic.js');
 const { makeGeminiProvider } = require('../sidecar/providers/gemini.js');
@@ -37,6 +40,17 @@ async function thrown(p, req) {
   return null;
 }
 const line = o => 'data: ' + JSON.stringify(o);
+// Every adapter that reads an HTTP error body, built over one fetch double (catalog GETs answered empty). They all read
+// the body through provider.runtime.readErrorBody (2026-10-20): anthropic/codex/gemini/openrouter used to call
+// res.json() then res.text(), which threw on every non-JSON body and read it with no idle guard and no Stop.
+const CATALOG = '{"data":[],"models":[]}';
+const ADAPTERS = [
+  ['openai-compatible', (fetch) => makeOpenAICompatibleProvider({ baseUrl: 'http://127.0.0.1:11434/v1', fetch })],
+  ['anthropic', (fetch) => makeAnthropicProvider({ key: 'k', fetch })],
+  ['codex', (fetch) => makeCodexProvider({ token: 't', fetch })],
+  ['gemini', (fetch) => makeGeminiProvider({ key: 'k', fetch })],
+  ['openrouter', (fetch) => makeOpenRouterProvider({ key: 'k', fetch })]
+];
 
 (async () => {
   // ---- OpenAI-compatible: the body rides; a generic message with code insufficient_quota is billing ----
@@ -73,7 +87,7 @@ const line = o => 'data: ' + JSON.stringify(o);
     process.env.SKYNET_PROVIDER_IDLE_MS = '180';
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     try {
-      for (const partial of [false, true]) {
+      for (const [name, make] of ADAPTERS) for (const partial of [false, true]) {
         for (const cancel of [false, true]) {
           let controller, cancelled = 0, calls = 0;
           const response = new Response(new ReadableStream({
@@ -81,15 +95,14 @@ const line = o => 'data: ' + JSON.stringify(o);
             cancel() { cancelled++; }
           }), { status: 400 });
           const ac = new AbortController();
-          const p = makeOpenAICompatibleProvider({ baseUrl: 'http://127.0.0.1:11434/v1',
-            fetch: async (_url, init) => { if (!init || !init.body) return new Response('{"data":[]}'); calls++; return response; } });
+          const p = make(async (_url, init) => { if (!init || !init.body) return new Response(CATALOG); calls++; return response; });
           const pending = thrown(p, Object.assign({}, REQ, { signal: ac.signal }));
           // Wait for the actual error-body reader, so cancellation is strictly after response headers.
           while (!response.body.locked) await sleep(1);
           if (cancel) ac.abort();
           const observed = await Promise.race([pending.then(error => ({ settled: true, error })), sleep(700).then(() => ({ settled: false }))]);
           if (!observed.settled) { controller.close(); await pending; }
-          const label = 'compatible error ' + (partial ? 'partial body' : 'headers only') + (cancel ? ' cancel' : ' idle');
+          const label = name + ' error ' + (partial ? 'partial body' : 'headers only') + (cancel ? ' cancel' : ' idle');
           A.eq(observed.settled, true, label + ': settles before fixture cleanup');
           A.eq(cancelled, 1, label + ': cancels the response body');
           A.eq(calls, 1, label + ': no adapter retry');
@@ -132,18 +145,68 @@ const line = o => 'data: ' + JSON.stringify(o);
   }
 
   // A proxy streaming a huge error page is read only up to a cap, then cancelled: 500 characters are kept anyway.
-  {
+  for (const [name, make] of [['openai-compatible', (fetch) => makeOpenAICompatibleProvider({ baseUrl: 'https://proxy.test/v1', fetch })]].concat(ADAPTERS.slice(1))) {
     let sent = 0, cancelled = 0;
     const chunk = new TextEncoder().encode('<html>' + 'x'.repeat(8192));
     const response = new Response(new ReadableStream({
       pull(c) { sent += chunk.byteLength; c.enqueue(chunk); if (sent > 8 * 1024 * 1024) c.close(); },
       cancel() { cancelled++; }
     }), { status: 502 });
-    const err = await thrown(makeOpenAICompatibleProvider({ baseUrl: 'https://proxy.test/v1', fetch: async (_url, init) => (!init || !init.body) ? new Response('{"data":[]}') : response }));
-    A.eq(err && err.status, 502, 'a huge error page keeps its status');
-    A.eq(cancelled, 1, 'a huge error page is cancelled at the cap');
-    A.ok(sent < 1024 * 1024, 'and is never read whole (read ' + sent + ' bytes)');
-    A.eq(response.body.locked, false, 'the capped body releases its reader');
+    const err = await thrown(make(async (_url, init) => (!init || !init.body) ? new Response(CATALOG) : response));
+    A.eq(err && err.status, 502, name + ': a huge error page keeps its status');
+    A.eq(cancelled, 1, name + ': a huge error page is cancelled at the cap');
+    A.ok(sent < 1024 * 1024, name + ': and is never read whole (read ' + sent + ' bytes)');
+    A.eq(response.body.locked, false, name + ': the capped body releases its reader');
+  }
+
+  // A proxy's non-JSON error page. A non-JSON body never rides as err.body (errorClass reads only a provider's
+  // structured error). anthropic/codex/gemini/openrouter keep the status text, as before the shared reader: a proxy's
+  // prose is not a provider's error. openai-compatible quoted the page text before that reader and still does, so
+  // its quote stays redacted and on one line.
+  const SEP = { anthropic: '-', codex: '—', gemini: '-', openrouter: '—' };
+  for (const [name, make] of ADAPTERS) {
+    const html = '<html><body><h1>502</h1>upstream connect error or disconnect/reset before headers. reset reason: overflow\n' +
+      'echo: Authorization: Bearer fixture-tok-123456 key sk-fixture-abcdefgh123</body></html>';
+    const err = await thrown(make(async (_url, init) => (!init || !init.body) ? new Response(CATALOG)
+      : new Response(html, { status: 502, statusText: 'Bad Gateway', headers: { 'Content-Type': 'text/html' } })));
+    A.eq(err && err.status, 502, name + ' HTML 502: the status survives');
+    A.ok(err && err.message.startsWith(name + ' http 502 '), name + ' HTML 502: the adapter\'s own sentence leads (' + (err && err.message.slice(0, 40)) + ')');
+    if (SEP[name]) A.eq(err && err.message, name + ' http 502 ' + SEP[name] + ' Bad Gateway', name + ' HTML 502: the page text stays out of the message');
+    A.ok(err && !/fixture-tok-123456|sk-fixture-abcdefgh123/.test(err.message), name + ' HTML 502: tokens and keys in the page are redacted');
+    A.ok(err && !/[\r\n]/.test(err.message), name + ' HTML 502: control characters are collapsed');
+    A.eq(err && err.body, undefined, name + ' HTML 502: a non-JSON body never rides as a structured error');
+  }
+
+  // ROUTING (review p4-wire): a gateway's text/plain 503 says "connection reset" / "Connection refused", and a WAF's
+  // 403 page says "flagged by security policy". The browser's error copy (friendlyerror.js loaded WITHOUT require, the
+  // path real users get) reads transport and policy words BEFORE the status, so with that prose in the message a 503
+  // the gateway answered read "The connection dropped before the reply finished", and the 403 read as a content block
+  // (also in errorClass, which moves retry/fallback/rotate). The four adapters keep the status text instead.
+  {
+    const BrowserFriendly = (() => {
+      const ctx = {}; ctx.globalThis = ctx; vm.createContext(ctx);
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'friendlyerror.js'), 'utf8'), ctx);
+      return ctx.Friendly;
+    })();
+    A.eq(typeof BrowserFriendly.friendlyError, 'function', 'browser-mode friendlyerror loads');
+    const pages = [
+      ['envoy reset 503', 503, 'Service Unavailable', 'upstream connect error or disconnect/reset before headers. reset reason: connection reset'],
+      ['envoy refused 503', 503, 'Service Unavailable', 'upstream connect error or disconnect/reset before headers. reset reason: remote connection failure, transport failure reason: delayed connect error: Connection refused'],
+      ['waf 403', 403, 'Forbidden', '<html><body>Request flagged by security policy</body></html>']
+    ];
+    for (const [name, make] of ADAPTERS.slice(1)) for (const [label, status, statusText, text] of pages) {
+      const err = await thrown(make(async (_url, init) => (!init || !init.body) ? new Response(CATALOG)
+        : new Response(text, { status, statusText, headers: { 'Content-Type': text[0] === '<' ? 'text/html' : 'text/plain' } })));
+      const tag = name + ' ' + label;
+      A.eq(err && err.message, name + ' http ' + status + ' ' + SEP[name] + ' ' + statusText, tag + ': the message is the status sentence');
+      const kind = BrowserFriendly.friendlyError(err && err.message).kind;
+      const reason = classifyApiError(err, { model: 'm' }).reason;
+      if (status === 503) A.eq(kind, 'provider_server_error', tag + ': the browser tells it as a provider fault, never a dropped connection (got ' + kind + ')');
+      else {
+        A.ok(kind !== 'content_policy_blocked', tag + ': the browser never calls it a content block (got ' + kind + ')');
+        A.eq(reason, 'auth', tag + ': errorClass reads the 403, not the page\'s policy words (got ' + reason + ')');
+      }
+    }
   }
 
   // Cleanup failure must be observable without replacing the original result or exposing its error text.

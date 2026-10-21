@@ -38,6 +38,13 @@
     'SystemDrive', 'ProgramData', 'ALLUSERSPROFILE'
   ];
   const SECRET_ENV_RE = /(TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|BEARER|CREDENTIAL|COOKIE)/i;
+  // the longest single JSON-RPC line a stdio server may send (chars). Far above any real reply (a base64
+  // screenshot is a few MB), far below V8's ~512M-char string limit, where an unbounded line crashed the host.
+  const MAX_LINE_CHARS = 64 * 1024 * 1024;
+  // what each kept chunk of the open line is charged on top of its characters (the SSE transport's PIECE_COST):
+  // about what V8 spends on one short string plus its array slot, so a drip of tiny chunks cannot hold far more
+  // memory than the cap
+  const PIECE_COST = 48;
 
   function commandBase(command) {
     const s = String(command || '').trim();
@@ -150,7 +157,10 @@
 
     const ledger = deps.ledger;
     const ledgerCommand = String(deps.ledgerCommand || safeLedgerCommand(command, args)).slice(0, 400);
-    let child = null, onMsg = null, closed = false, stdoutBuf = '', stderrBuf = '';
+    const maxLineChars = (typeof deps.maxLineChars === 'number' && deps.maxLineChars > 0) ? deps.maxLineChars : MAX_LINE_CHARS;
+    let child = null, onMsg = null, closed = false, stderrBuf = '', overflowed = false;
+    // the unterminated tail of stdout, kept as the chunks that carried it (joined once, when its newline lands)
+    let lineParts = [], lineChars = 0;
     const pendingIds = new Set();
 
     function deliver(msg) {
@@ -166,16 +176,46 @@
       pendingIds.clear();
       for (const id of ids) deliver({ jsonrpc: JSONRPC, id: id, error: { code: -32000, message: message, [LOCAL_ERROR]: true } });
     }
+    /* A line too long to be a message: the server is broken or hostile. Its bytes are dropped, every waiting
+       call fails with that reason, the manager is told the connection died, and the child is stopped. Stops
+       reading at once — the child may still be writing. */
+    function overflow() {
+      overflowed = true;
+      lineParts = []; lineChars = 0;
+      const cap = maxLineChars >= 1048576 ? Math.round(maxLineChars / 1048576) + ' MiB' : maxLineChars + ' characters';
+      const msg = 'mcp stdio server sent a line with no newline past the ' + cap + ' limit (each chunk held counts its characters plus ' + PIECE_COST + '): connection closed';
+      failAll(msg);
+      onError(new Error(msg));
+      close();
+    }
+    /* Newline-framed JSON-RPC, scanned INCREMENTALLY: only the NEW chunk is searched for '\n', and the open line
+       is kept as its chunks until its newline arrives. This used to append to one string and re-run a regex over
+       the whole unterminated line on every 64 KB chunk (quadratic: a 16 MB reply cost 2.5 s of CPU) with no
+       ceiling, so a server streaming one endless line grew the host until V8's string limit crashed it.
+       THE CAP BOUNDS MEMORY, NOT JUST CHARACTERS (review 2026-10-21): every kept chunk is charged PIECE_COST on top
+       of its length. Counting characters alone, a server writing an endless line 2 characters at a time held 32M
+       strings under a 64 MiB cap — about 1.7 GB for one connector. */
     function parseStdoutChunk(chunk) {
-      stdoutBuf += String(chunk || '');
+      if (overflowed) return;
+      const s = String(chunk || '');
+      let from = 0;
       for (;;) {
-        const i = stdoutBuf.search(/\r?\n/);
-        if (i < 0) break;
-        const line = stdoutBuf.slice(0, i);
-        stdoutBuf = stdoutBuf.slice(stdoutBuf.charAt(i) === '\r' && stdoutBuf.charAt(i + 1) === '\n' ? i + 2 : i + 1);
+        const nl = s.indexOf('\n', from);
+        if (nl < 0) break;
+        if (lineChars + (nl - from) > maxLineChars) return overflow();
+        let line = s.slice(from, nl);
+        if (lineParts.length) { lineParts.push(line); line = lineParts.join(''); lineParts = []; lineChars = 0; }
+        if (line.charCodeAt(line.length - 1) === 13) line = line.slice(0, -1);   // CRLF framing
+        from = nl + 1;
         if (!line.trim()) continue;
         try { deliver(JSON.parse(line)); }
         catch (e) { onError(new Error('mcp stdio returned non-JSON line')); }
+        if (overflowed) return;
+      }
+      if (from < s.length) {
+        lineChars += s.length - from + PIECE_COST;
+        if (lineChars > maxLineChars) return overflow();
+        lineParts.push(from ? s.slice(from) : s);
       }
     }
     function noteStderr(chunk) {
@@ -272,5 +312,5 @@
     return { send, onMessage, close, isClosed: function () { return closed; }, get childPid() { return child && child.pid; } };
   }
 
-  return { makeStdioTransport, _internals: { commandBase, assertAllowedCommand, normalizeArgs, normalizeEnv, buildChildEnv, hostStdioAllowed, redactEnv, safeLedgerCommand } };
+  return { makeStdioTransport, _internals: { commandBase, assertAllowedCommand, normalizeArgs, normalizeEnv, buildChildEnv, hostStdioAllowed, redactEnv, safeLedgerCommand, MAX_LINE_CHARS, PIECE_COST } };
 });

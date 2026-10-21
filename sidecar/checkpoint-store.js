@@ -271,14 +271,32 @@
       return m.status === 'empty' ? m.index : cp.toIndex([]);
     }
 
-    // best-effort size of the snapshot (cosmetic, for the event) — tracked file count + summed bytes.
-    async function measure(aid, scope) {
+    /* measure — best-effort size of the snapshot (cosmetic, for the event): tracked file count + summed bytes of the
+       commit just recorded. Git answers both from the commit's tree in ONE child process (`ls-tree -r`, blob sizes from
+       the object headers). It used to `ls-files` and then fs.statSync every tracked file one at a time on the sidecar's
+       only thread — ~130 µs per stat on Windows, 0.9-2 s of frozen streams per snapshot on a mid-size project (perf
+       review #9, the same stall repoBytes already left behind in #107). core.autocrlf is off and the shadow repo has
+       no filters, so a blob's size IS the file's byte size at commit time. `--format` needs Git 2.36+; an older Git
+       falls back to `-l` (same numbers, longer lines). A gitlink has no blob size and counts 0 bytes. */
+    function sumTreeSizes(stdout, long) {
+      let files = 0, bytes = 0;
+      for (const entry of String(stdout || '').split('\0')) {
+        if (!entry) continue;
+        files++;
+        const meta = long ? entry.slice(0, Math.max(0, entry.indexOf('\t'))) : entry;
+        const size = Number(meta.trim().split(/\s+/).pop());
+        if (isFinite(size) && size > 0) bytes += size;
+      }
+      return { files: files, bytes: bytes };
+    }
+    async function measure(aid, scope, commit) {
+      const rev = cp.isValidId(commit) ? commit : 'HEAD';
       try {
-        const r = await git(aid, scope, ['ls-files']);
-        const files = r.stdout.split('\n').map(s => s.trim()).filter(Boolean);
-        let bytes = 0;
-        for (const rel of files) { try { bytes += fs.statSync(pathMod.join(workTreeFor(aid, scope), rel)).size; } catch (_) {} }
-        return { files: files.length, bytes: bytes };
+        const r = await git(aid, scope, ['ls-tree', '-r', '-z', '--format=%(objectsize)', rev]);
+        if (r.code === 0) return sumTreeSizes(r.stdout, false);
+        const l = await git(aid, scope, ['ls-tree', '-r', '-z', '-l', rev]);
+        if (l.code === 0) return sumTreeSizes(l.stdout, true);
+        return { files: 0, bytes: 0 };
       } catch (e) { return { files: 0, bytes: 0 }; }
     }
 
@@ -584,7 +602,7 @@
           cleanup(); return false;
         }
         try {
-          const size = await measure(aid, scope);
+          const size = await measure(aid, scope, sha);
           const others = existing.snapshots.filter(function (s) { return String((s && s.scopeId) || '') !== String((scope && scope.id) || ''); });
           const fullId = (scope && scope.prefix || '') + sha;
           saveIndex(aid, cp.record(cp.toIndex(others), {
@@ -705,7 +723,7 @@
         if (!cp.isValidId(sha)) { why.reason = 'Git could not read the new restore point'; return null; }
         const fullId = scope.prefix + sha;
         if (!cp.isValidId(fullId)) { why.reason = 'Git could not read the new restore point'; return null; }
-        const size = await measure(aid, scope);
+        const size = await measure(aid, scope, sha);
         try {
           /* THE RESILIENT LOADER, not the sync one. `loadIndex` reads only index.json + index.json.bak and returns
              an EMPTY index on failure — it deliberately never rebuilds, because git is async. snapshot() IS async,

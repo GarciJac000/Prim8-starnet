@@ -417,4 +417,57 @@ keyed.dispose();
   ground.dispose();
 }
 
+// NUMERIC LIGHT KEYS (2026-10-20, "eats my PC's resources"): the map keys rounded alpha to a byte, so a working screen's
+// ±1.5% flicker crossed byte boundaries and re-blitted the station-sized maps several times a second. The maps now hold a
+// 1.5-LSB band around the alpha they were built with; geometry, count and config still rebuild the same frame, and the
+// sample key still follows every exact alpha.
+{
+  const lit = Light.create({ canvasFactory }); lit.setGeometry(station(true));
+  const screens = Array.from({ length: 20 }, (_, i) => ({ x: 14 + (i % 10) * 7, y: 18 + Math.floor(i / 10) * 20, r: 26, c: [98, 255, 158], base: 0.16, seed: i * 0.7 }));
+  const screenK = (now, s) => 0.985 + 0.01 * Math.sin(now / 900 + s) + 0.005 * Math.sin(now / 2400 + s * 1.7);   // propsprites' 'screen' flicker
+  const at = (now, extra) => ({ fixtures: [{ x: 30, y: 30, r: 50, rgb: '255,192,104' }],
+    lights: screens.map(s => ({ x: s.x, y: s.y, r: s.r, c: s.c, a: s.base * screenK(now, s.seed) })).concat(extra || []) });
+  lit.render(output, at(0));
+  const b0 = lit.stats(), bytes = new Set();
+  let exactChanges = 0;
+  for (let f = 1; f <= 600; f++) {
+    const frame = at(f * 16.67), inv = lit.stats().sampleCacheInvalidations;
+    frame.lights.forEach(l => bytes.add(Math.round(l.a * 255)));
+    lit.render(output, frame);
+    if (lit.stats().sampleCacheInvalidations > inv) exactChanges++;
+  }
+  A.ok(bytes.size > 1, '(setup: the flicker really crosses byte boundaries, which the old byte key rebuilt on)');
+  A.eq(lit.stats().dynamicBuilds, b0.dynamicBuilds, '600 frames of screen flicker never rebuild the composed prop map');
+  A.eq(lit.stats().staticBuilds, b0.staticBuilds, '...nor the static fixture map');
+  A.eq(exactChanges, 600, 'the sample cache still follows every exact alpha change');
+  const steady = at(600 * 16.67);
+  lit.render(output, steady); const s1 = lit.stats();
+  steady.lights[3] = Object.assign({}, steady.lights[3], { a: steady.lights[3].a + 3 / 255 });
+  lit.render(output, steady);
+  A.eq(lit.stats().dynamicBuilds, s1.dynamicBuilds + 1, 'a 3/255 step (a light switching state) rebuilds that very frame');
+  lit.render(output, steady);
+  A.eq(lit.stats().dynamicBuilds, s1.dynamicBuilds + 1, '...exactly once');
+  const extra = { x: 70, y: 30, r: 20, c: [255, 120, 200], a: 0.12 };
+  for (const [what, next] of [['adding a light', at(600 * 16.67, [extra])], ['moving a light', at(600 * 16.67, [Object.assign({}, extra, { x: 71 })])],
+    ['recolouring a light', at(600 * 16.67, [Object.assign({}, extra, { x: 71, c: [255, 120, 210] })])],
+    ['a new planar origin', at(600 * 16.67, [Object.assign({}, extra, { x: 71, c: [255, 120, 210], originX: 72 })])], ['removing a light', at(600 * 16.67)]]) {
+    const before = lit.stats().dynamicBuilds; lit.render(output, next);
+    A.eq(lit.stats().dynamicBuilds, before + 1, what + ' rebuilds the prop map the same frame');
+  }
+  const base = at(600 * 16.67), ramp = [];
+  for (let i = 1; i <= 30; i++) {   // a slow fade, 0.6/255 a frame: the map follows it in steps of under 1.5/255
+    const before = lit.stats().dynamicBuilds, frame = at(600 * 16.67);
+    frame.lights[0] = Object.assign({}, base.lights[0], { a: base.lights[0].a + i * 0.6 / 255 });
+    lit.render(output, frame); ramp.push(lit.stats().dynamicBuilds - before);
+  }
+  A.eq(ramp.join(''), '001'.repeat(10), 'a fade rebuilds every third 0.6-LSB step: the map never lags 1.5 LSB behind the light');
+  const lift = lit.stats().dynamicBuilds; lit.configure({ propLift: 0.5 }); lit.render(output, base);
+  A.eq(lit.stats().dynamicBuilds, lift + 1, 'a prop config change rebuilds the prop map');
+  const st0 = lit.stats().staticBuilds; lit.render(output, Object.assign({}, base, { ambient: 0.72 }));
+  A.eq(lit.stats().staticBuilds, st0 + 1, 'an exposure change from prepare() rebuilds the static map (it never bumps configRevision)');
+  const fx = lit.stats().staticBuilds; lit.render(output, Object.assign({}, base, { ambient: 0.72, fixtures: [{ x: 30, y: 30, r: 50, rgb: '255,192,104', gain: 0.5 }] }));
+  A.eq(lit.stats().staticBuilds, fx + 1, 'a fixture dimmed past the band rebuilds the static map');
+  lit.dispose();
+}
+
 A.report('WorldLight spatial illumination');

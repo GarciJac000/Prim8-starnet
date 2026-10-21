@@ -11490,9 +11490,18 @@ const PropSprites = (() => {
   const LIGHT_RESPONSE_TYPES = new Set(('desk desk2 console consoleL pixelrig bench crate boxes goldcrate safe vault rack rackV shelf ' +
     'war_intelcab quarters_lockerbank quarters_minifridge bookshelf stool chair couch booth recliner recliner_r ' +
     'sidetable lowtable glasstable dinertable loungetable longtable bridge_tacticaltable dinerchair podchair plant bookstack toolbox').split(' '));
-  const RESPONSE_LIMIT = 96, RESPONSE_PIXELS = 262144, RESPONSE_SINGLE = 65536;
+  /* 4x the old 96 entries / 256 Ki px (2026-10-20, "eats my PC's resources"). Each on-screen rigid prop looks up one
+     overlay per frame, so a frame's visible props are a cyclic working set, and an LRU smaller than that misses on
+     EVERY lookup: once a view needed more overlays than the old budget held, every one was rebuilt every frame (a mask
+     readback, a pass over every pixel, a new canvas each). Past this budget it is the same plain LRU as before: what is
+     drawn never changes, only what it costs. At most 4 MiB of RGBA overlays; the pixel bound binds first (the smallest
+     overlay, a 1x1 footprint's, is 44 x 68 px: at most 350 of them). */
+  const RESPONSE_LIMIT = 384, RESPONSE_PIXELS = 1048576, RESPONSE_SINGLE = 65536;
   const RESPONSE_SHADE = [8,10,18];
   const lightResponses = new Map();
+  // shadow mask canvas -> Uint8Array, 1 where its alpha >= 250: read back ONCE per mask. shadowMask never repaints a
+  // mask (a lost one is replaced by a new canvas), so a new light on a known mask costs no readback.
+  const maskOpaque = new WeakMap();
   let responsePixels = 0;
   const responseMetrics = { builds: 0, hits: 0, evictions: 0, failures: 0, draws: 0 };
   const responseClamp = (v,a,b) => Math.max(a,Math.min(b,v));
@@ -11528,12 +11537,18 @@ const PropSprites = (() => {
     }
     const w=mask.width,h=mask.height,pixels=w*h;
     if(pixels>RESPONSE_SINGLE)return null;
-    const alpha=mask.getContext('2d').getImageData(0,0,w,h).data;
-    if(alpha.length!==pixels*4)return null;
+    let opaque=maskOpaque.get(mask);
+    if(!opaque||opaque.length!==pixels) {
+      const alpha=mask.getContext('2d').getImageData(0,0,w,h).data;
+      if(alpha.length!==pixels*4)return null;
+      // Ignore the translucent spill already carried by old art. A physical rim
+      // belongs to its opaque casing, not to a halo or a contact shadow on the deck.
+      opaque=new Uint8Array(pixels);
+      for(let i=0;i<pixels;i++)if(alpha[i*4+3]>=250)opaque[i]=1;
+      maskOpaque.set(mask,opaque);
+    }
     let minX=w,minY=h,maxX=-1,maxY=-1;
-    // Ignore the translucent spill already carried by old art. A physical rim
-    // belongs to its opaque casing, not to a halo or a contact shadow on the deck.
-    const solid=(x,y)=>x>=0&&y>=0&&x<w&&y<h&&alpha[(y*w+x)*4+3]>=250;
+    const solid=(x,y)=>x>=0&&y>=0&&x<w&&y<h&&opaque[y*w+x]===1;
     for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(solid(x,y)) {
       minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
     }

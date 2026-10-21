@@ -23,6 +23,52 @@ const { note: failNote } = require('../../failopen');
   const crypto = require('node:crypto');
   const { assertWorkspaceId } = require('../../workspace-reserved.js');
 
+  /* ONE WRITER PER FILE, PROCESS-WIDE (2026-10-20, lost-update fix). Every fs mutation is read -> (await the LSP
+     baseline, up to ~10 s) -> writeFile of a whole file computed from that read. makeFsTools is built PER RUN
+     (index.js), and team.dispatch runs its workers with Promise.all, so two runs editing one project file
+     interleaved: the later writer rewrote the file from its stale read and erased the other's change, and BOTH
+     receipts said read-back-verified (each read back its own bytes). fs.append lost a line 10 runs out of 10.
+     The tails live HERE, at factory scope, so the lead, its workers and any other agent in this process share
+     them; per-instance state could not serialize two runs. Keys are taken in sorted order, so a multi-file
+     fs.patch and a single-file writer can never deadlock. A caller holds a key only for re-read + write +
+     read-back (milliseconds), never across the LSP baseline or a consent prompt, so a queued call never burns
+     its own timeoutMs waiting. SCOPE: in-process only. A shell-side writer or an external editor is not locked,
+     but its window shrinks from the LSP baseline (seconds) to one readFile -> writeFile (milliseconds). Keys
+     are lexical paths, so two symlinked spellings of one file do not share a lock. */
+  const MUTATION_TAILS = new Map();
+  function mutationAbortError() { const e = new Error('fs mutation aborted'); e.name = 'AbortError'; return e; }
+  function waitTurn(prev, signal) {
+    if (!signal || typeof signal.addEventListener !== 'function') return prev;
+    if (signal.aborted) return Promise.reject(mutationAbortError());
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(mutationAbortError());
+      signal.addEventListener('abort', onAbort, { once: true });
+      prev.then(() => { signal.removeEventListener('abort', onAbort); resolve(); });
+    });
+  }
+  async function withFileLocks(keys, signal, fn) {
+    const sorted = Array.from(new Set((keys || []).map(String))).sort();
+    const releases = [];
+    try {
+      for (const k of sorted) {
+        const prev = MUTATION_TAILS.get(k) || Promise.resolve();
+        let release;
+        const gate = new Promise((r) => { release = r; });
+        const tail = prev.then(() => gate);   // the next caller waits for the holder AND for us, even if we leave early
+        MUTATION_TAILS.set(k, tail);
+        /* The entry is dropped only once `tail` itself has SETTLED (the holder ahead of us has let go AND so have
+           we), never at our own release: a waiter aborted while still queued releases early, and deleting the entry
+           then let the next caller start on Promise.resolve() beside the holder that was still writing. */
+        releases.push(() => { release(); tail.then(() => { if (MUTATION_TAILS.get(k) === tail) MUTATION_TAILS.delete(k); }); });
+        await waitTurn(prev, signal);
+        if (signal && signal.aborted) throw mutationAbortError();   // a cancelled tool must not turn into a late write
+      }
+      return await fn();
+    } finally {
+      for (let i = releases.length - 1; i >= 0; i--) releases[i]();
+    }
+  }
+
   function safeAgentId(id) {
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(id || '')) throw new Error('bad agentId');
     // An id equal to a station-owned directory (codex/, channels/, connectors/, plugins/ …) would make that
@@ -70,6 +116,10 @@ const { note: failNote } = require('../../failopen');
     }
     async function readBytesOrMissing(abs) {
       try { return await fsp.readFile(abs); }
+      catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
+    }
+    async function readUtf8OrMissing(abs) {
+      try { return await fsp.readFile(abs, 'utf8'); }
       catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
     }
     function receiptLine(receipt) {
@@ -266,11 +316,27 @@ const { note: failNote } = require('../../failopen');
       const where = String(d.file || '?') + ':' + String(d.line || 1) + ':' + String(d.col || 1);
       return where + (d.code ? ' [' + d.code + ']' : '') + ' ' + String(d.message || 'diagnostic');
     }
+    /* RE-SYNC AN ABANDONED TICKET (2026-10-21). beginEdit sent the language server the PRE-edit text as an open
+       document; finishEdit is the only call that sends it the bytes now on disk. A drifted edit (another run wrote
+       the file during the baseline) or a refusal under the file lock used to skip it, and an open document
+       overrides disk for TypeScript/pyright/rust-analyzer: later diagnostics on OTHER files were computed against a
+       file that matched neither run's write. This still finishes the ticket so the server re-reads disk; the
+       caller discards the delta (it would include the other run's change). */
+    async function resyncDiagnostics(ticket, ctx) {
+      if (!editDiagnostics || !ticket || ticket.failedAtBaseline || !(ticket.items && ticket.items.length)) return;
+      try { await editDiagnostics.finishEdit(ticket, { signal: ctx && ctx.signal }); }
+      catch (e) { if (!(e && e.name === 'AbortError')) failNote('fs.lsp.resync', e); }
+    }
+    // a refusal (or any failure) after the baseline: re-sync the server, then fail exactly as before
+    const resyncThenThrow = (ticket, ctx) => async (e) => { await resyncDiagnostics(ticket, ctx); throw e; };
     async function finishEditDiagnostics(ticket, result, ctx) {
       if (!editDiagnostics || !ticket) return result;
       let delta;
       if (ticket.failedAtBaseline) {
         delta = { status: 'unavailable', reason: ticket.failedAtBaseline, added: [], removed: [], addedCount: 0, removedCount: 0 };
+      } else if (ticket.drifted) {
+        await resyncDiagnostics(ticket, ctx);
+        delta = { status: 'unavailable', reason: ticket.drifted, added: [], removed: [], addedCount: 0, removedCount: 0 };
       } else {
         try { delta = await editDiagnostics.finishEdit(ticket, { signal: ctx && ctx.signal }); }
         catch (e) { delta = { status: 'unavailable', reason: String((e && e.message) || e), added: [], removed: [], addedCount: 0, removedCount: 0 }; }
@@ -305,36 +371,101 @@ const { note: failNote } = require('../../failopen');
        so the write silently reverted the other change — the classic lost update, and the harder kind to spot
        because both sides believe they succeeded.
 
-       SCOPED TO fs.write ON PURPOSE, after tracing what each writer actually does:
-         · fs.append reads the file and appends to what it FINDS, so a concurrent change survives.
-         · fs.edit reads fresh and replaces an exact `find`; a drifted file either still matches (the edit
-           lands on the NEW text, which is right) or misses and errors honestly.
+       THE STAMP WAS SCOPED TO fs.write (superseded: see READ-VERSION CHECK below), after tracing what each writer does:
+         · fs.append appends to what it FINDS on disk.
+         · fs.edit replaces an exact `find`; a drifted file either still matches (the edit lands on the NEW
+           text, which is right) or misses and errors honestly.
          · fs.patch validates every hunk's context against current content before writing anything.
-       All three are read-modify-write inside ONE call and cannot clobber. fs.write is the only writer that
-       replaces a whole file with content composed from a read that may now be old — so it is the only one
-       that needs a stamp, and guarding the others would only manufacture false refusals.
+       fs.write is the only writer that replaces a whole file with content composed from a read that may now be
+       old — so it is the only one that needs a stamp, and stamping the others would only manufacture false
+       refusals.
+
+       CORRECTION (2026-10-20): the note above once said all three "cannot clobber" because each is
+       read-modify-write inside ONE call. Across CONCURRENT calls that was false: each awaits the LSP baseline
+       between its read and its write, so two runs interleaved and the later one rewrote the file from its stale
+       read (reproduced 20/20, both receipts "verified"). Every writer now re-reads the file under the
+       process-wide per-file lock (withFileLocks above) right before it writes, and works from THOSE bytes: an
+       edit or append re-applies onto them, a patch whose source moved refuses before writing anything, and an
+       fs.write over a file this agent read refuses with the error below.
 
        A file this agent never read has no stamp and is never refused: writing a file you did not read is
        "create it", not "clobber it". One refusal per drift — the stamp is dropped so the required re-read
-       re-arms it, and the agent can never be stuck in a loop it has no way to satisfy. */
-    const readStamps = new Map();   // agentId \0 abs -> the mtime this agent last SAW
+       re-arms it, and the agent can never be stuck in a loop it has no way to satisfy.
+
+       READ-VERSION CHECK (2026-10-21). The re-read under the lock only covered a writer that landed WHILE a call
+       was in flight. One that landed BETWEEN this agent's fs.read and its fs.edit / fs.append / fs.patch went
+       unnoticed: the call worked on bytes the agent never saw, said read-back-verified, and re-stamped the file
+       as observed, so the agent's next fs.write from its old read erased the other change. The stamp is now the
+       sha256 of the bytes this run last read or wrote (an mtime missed same-tick writes and older-stamped copies,
+       and refused a touch that changed nothing), and every mutation of a file it has a stamp for refuses BEFORE
+       writing when the disk holds other bytes. fs.write keeps its stale-write error and its one-refusal drop;
+       fs.edit / fs.append / fs.patch keep the stamp, so a blind retry is refused again with the same true reason
+       (dropping it would make fs.edit claim "you have not read" a file it did read) until fs.read re-arms it.
+       A missing file (deleted since) is not a refusal, as before. In-flight drift keeps its re-read behaviour.
+
+       APPEND REFUSES ONLY FOR A RUN THAT READ THE FILE (2026-10-21). Every append stamped the merged file, so two runs
+       that never read a shared log could not take turns: each one's next append, after the other's line, was refused
+       as "changed since you last read or wrote it". fs.append now refuses only when this run fs.read the file (its
+       text may build on what it read); otherwise it appends onto the current bytes, as trunk did. Its stamp moves
+       only when it knew every byte it went on after (a missing file, the bytes of its stamp, or a first touch);
+       otherwise the stamp keeps what the run did see and records `drift`, and so does an fs.edit / fs.append whose
+       bytes another writer changed while it was in flight. fs.write / fs.edit / fs.patch still refuse on every
+       stamp, and a refusal over a drifted stamp says what really happened: this run wrote the file last, on top of
+       another writer's changes it has not read. */
+    // agentId \0 abs -> { hash, read, drift }: hash = sha256 of the bytes this agent last SAW (read or wrote); read =
+    // it fs.read the file this run (its own later writes keep the flag); drift = { op, inFlight } once its op landed on
+    // another writer's bytes it never saw (see APPEND REFUSES ONLY ... above)
+    const readStamps = new Map();
     const stampKey = (aid, abs) => String(aid) + '\0' + (P.sep === '\\' ? String(abs).toLowerCase() : String(abs));
-    async function mtimeOf(abs) { try { const st = await fsp.stat(abs); return Number(st.mtimeMs || 0) || 0; } catch (_) { return 0; } }
-    async function stampSeen(aid, abs) {
-      const m = await mtimeOf(abs);
-      if (m) readStamps.set(stampKey(aid, abs), m); else readStamps.delete(stampKey(aid, abs));
+    // the process-wide mutation lock key for one file (same case rule as pathInside / stampKey)
+    const lockKey = (abs) => (P.sep === '\\' ? P.resolve(String(abs)).toLowerCase() : P.resolve(String(abs)));
+    const DRIFT_REASON = 'the file changed on disk while this edit was in flight (another writer), so a before/after diagnostic comparison would include their change';
+    // `seen` = the bytes this agent now knows the file holds (null = gone: drop the stamp); `hash` = their sha256,
+    // precomputed; `fromRead` = it saw them through fs.read
+    function stampSeen(aid, abs, seen, hash, fromRead) {
+      const key = stampKey(aid, abs), h = hash || sha256(seen), prev = readStamps.get(key);
+      if (h) readStamps.set(key, { hash: h, read: !!(fromRead || (prev && prev.read)), drift: null });
+      else readStamps.delete(key);
     }
-    async function assertFresh(aid, abs, rel) {
-      const key = stampKey(aid, abs);
-      const seen = readStamps.get(key);
-      if (!seen) return;                          // never read here -> nothing to be stale against
-      const now = await mtimeOf(abs);
-      if (!now || now <= seen) return;            // deleted since, or untouched since we looked
-      readStamps.delete(key);                     // one refusal per drift; the re-read below re-arms it
-      const error = new Error('stale write refused: ' + rel + ' changed on disk after you read it — someone else (another agent, or the Commander) edited it. Read it again and re-apply your change on top of the current content, or use fs.edit/fs.patch so your change merges instead of replacing the file.');
+    // this agent's fs.edit / fs.append landed on another writer's bytes: the stamp keeps the bytes it saw, and says how
+    function markDrift(aid, abs, op, inFlight) {
+      const key = stampKey(aid, abs), st = readStamps.get(key);
+      if (st) readStamps.set(key, Object.assign({}, st, { drift: { op, inFlight: !!inFlight } }));
+    }
+    // this agent's stamp when it has one for the file and `bytes` (what is on disk now) are not what it last saw; else null
+    function changedSinceSeen(aid, abs, bytes) {
+      const seen = readStamps.get(stampKey(aid, abs));
+      return seen && bytes != null && sha256(bytes) !== seen.hash ? seen : null;
+    }
+    // why a drifted stamp's file holds bytes this agent never saw (its own op wrote the file last)
+    function unseenChanges(rel, drift) {
+      return rel + ' holds another writer\'s changes that you have not read: they landed '
+        + (drift.inFlight ? 'while an earlier ' + drift.op + ' of yours on it was in flight, and that ' + drift.op + ' was applied on top of them'
+          : 'before an earlier ' + drift.op + ' of yours on it, and that ' + drift.op + ' went on after them');
+    }
+    function staleWriteError(rel, drift) {
+      const error = new Error(drift
+        ? 'stale write refused: ' + unseenChanges(rel, drift) + '. This write would erase them, so nothing was written. fs.read it again and re-apply your change on top of the current content.'
+        : 'stale write refused: ' + rel + ' changed on disk after you read it — someone else (another agent, or the Commander) edited it. Read it again and re-apply your change on top of the current content, or use fs.edit/fs.patch so your change merges instead of replacing the file.');
       error.precondition = { code: 'fresh_read_required', requiredTool: 'fs.read', requiredState: 'current_file_observed' };
-      throw error;
+      return error;
     }
+    // fs.edit / fs.append / fs.patch over a file whose bytes moved since this agent last read or wrote it (`st` = its stamp)
+    function changedSinceReadError(what, rel, st) {
+      const error = new Error(what + ' refused: ' + (st && st.drift ? unseenChanges(rel, st.drift)
+        : rel + ' changed on disk since you last read or wrote it (something else changed it: another agent, the Commander, or a process such as a shell command)')
+        + ' — nothing was written. fs.read it again and redo your change against the current content.');
+      error.precondition = { code: 'fresh_read_required', requiredTool: 'fs.read', requiredState: 'current_file_observed' };
+      return error;
+    }
+    function assertFresh(aid, abs, rel, bytes) {
+      const moved = changedSinceSeen(aid, abs, bytes);
+      if (!moved) return;                       // never read here, deleted since, or still the bytes we saw
+      readStamps.delete(stampKey(aid, abs));    // one refusal per drift; the re-read below re-arms it
+      throw staleWriteError(rel, moved.drift);
+    }
+    // the drifted call's own result names the drift (the LSP line says so only when a language server is attached)
+    const driftNote = (op, rel, what) => '\n[another writer changed ' + rel + ' while this ' + op + ' was in flight: ' + what + ', which you have not read. fs.read it before you rewrite or edit it.]';
 
     const writeTool = {
       name: 'fs.write', capability: 'cabinet', scope: 'write', requiresConsent: true, timeoutMs: 10000,
@@ -345,18 +476,197 @@ const { note: failNote } = require('../../failopen');
         const { abs, base } = await resolveInside(aid, args.path, { scope: 'write', ctx });
         const data = Buffer.from(String(args.content), 'utf8');
         if (data.length > WRITE_BYTES) throw new Error('file too large (' + data.length + ' > ' + WRITE_BYTES + ' bytes)');
-        await assertFresh(aid, abs, args.path);   // refuse to overwrite a file that moved under us
-        let beforeBytes = null;
-        try { beforeBytes = await fsp.readFile(abs); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+        const signal = ctx && ctx.signal, lk = lockKey(abs);
+        // the stamp check and the read both run UNDER the lock: checked before it, a write still landing from
+        // another run (it holds the lock) passed the check, and this write then replaced it. The read can never
+        // be a torn half-file from a concurrent truncating writeFile either.
+        const beforeBytes = await withFileLocks([lk], signal, async () => {
+          const b = await readBytesOrMissing(abs);
+          assertFresh(aid, abs, args.path, b);   // refuse to overwrite a file that moved under us
+          return b;
+        });
         const diagnosticTicket = await beginEditDiagnostics(aid, [{ abs, base, rel: String(args.path), text: beforeBytes ? beforeBytes.toString('utf8') : '' }], ctx);
         await fsp.mkdir(P.dirname(abs), { recursive: true });
-        const receipt = await verifiedMutation({ operation: 'write', path: args.path, abs, expected: data, initial: beforeBytes, mutate: () => fsp.writeFile(abs, data) });
-        await stampSeen(aid, abs);                // our own write is the new baseline, so a rewrite never self-trips
+        const receipt = await withFileLocks([lk], signal, async () => {
+          // re-check under the lock: the LSP baseline above can take seconds, and another run may have written since
+          const current = await readBytesOrMissing(abs);
+          assertFresh(aid, abs, args.path, current);
+          let initial = beforeBytes;
+          if (!sameBytes(current, beforeBytes)) {
+            const key = stampKey(aid, abs);
+            // this agent READ the file and composed its content from that read: replacing their change is the lost update
+            if (readStamps.has(key)) { readStamps.delete(key); throw staleWriteError(args.path); }
+            initial = current;
+            if (diagnosticTicket) diagnosticTicket.drifted = DRIFT_REASON;
+          }
+          const r = await verifiedMutation({ operation: 'write', path: args.path, abs, expected: data, initial, mutate: () => fsp.writeFile(abs, data) });
+          stampSeen(aid, abs, data);                // our own write is the new baseline, so a rewrite never self-trips
+          return r;
+        }).catch(resyncThenThrow(diagnosticTicket, ctx));
         emitDeliverable(ctx, aid, args.path);
         return finishEditDiagnostics(diagnosticTicket,
           { content: 'Wrote ' + args.path + ' (' + data.length + ' bytes).\n' + receiptLine(receipt) + locationLine(args.path, abs, ctx), summary: 'wrote ' + args.path + ' (' + kb(data.length) + ')', mutationReceipt: receipt, receipt }, ctx);
       }
     };
+
+    /* LARGE TEXT PAGES WITHOUT THE WHOLE FILE (2026-10-20). fs.read read the whole file into a Buffer, decoded ALL of
+       it to a string and (numbered) split all of it into lines on EVERY call, to return one ~24k page: on a 40 MB
+       parked output that was ~90-180 ms of blocking CPU and ~240 MB of transient heap per page, so following
+       "next" through it cost minutes and hitched the whole station (above ~512M characters it threw). A plain
+       UTF-8 file above readStreamMinBytes (default 4 MiB) now gets ONE async index pass — a checkpoint per 1 MiB
+       chunk { byte, unit, line } plus the totals — cached per file (size + mtime key, so any edit invalidates it),
+       and each page streams from the nearest checkpoint. Output is byte-identical to the whole-file path (same
+       decoder: Buffer utf8, BOM kept; same trailers; same summary). A document or image (head sniff), a file that
+       is not valid UTF-8, or an fsp without open() keeps the historic path exactly. */
+    const READ_STREAM_MIN = (deps.limits && deps.limits.readStreamMinBytes != null && Number(deps.limits.readStreamMinBytes) >= 0)
+      ? Number(deps.limits.readStreamMinBytes) : 4 * 1024 * 1024;
+    const READ_CHUNK = 1024 * 1024, READ_HEAD = 64 * 1024;
+    const isUtf8 = (() => { try { const f = require('node:buffer').isUtf8; return typeof f === 'function' ? f : null; } catch (_) { return null; } })();
+    const readIndexCache = new Map();   // abs|size|mtimeMs -> index, least recently used first (8 kept)
+    function readPageMax(ctx) {
+      let v = ctx ? ctx.outputMax : null;
+      if (typeof v === 'function') { try { v = v(); } catch (_) { v = null; } }
+      const n = Math.floor(Number(v));
+      return Number.isFinite(n) && n > 0 ? Math.max(2000, Math.min(READ_RETURN, n - 600)) : READ_RETURN;   // headroom: trailer + fence
+    }
+    // the usable length of buf[0..n): trimmed back (at most 3 bytes) so it never ends inside a UTF-8 character
+    function utf8Cut(buf, n, atEof) {
+      if (atEof || n === 0) return n;
+      let i = n - 1, back = 0;
+      while (back < 3 && i >= 0 && (buf[i] & 0xC0) === 0x80) { i--; back++; }
+      if (i < 0) return n;
+      const lead = buf[i], need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+      return (n - i) < need ? i : n;
+    }
+    function readAbortError() { const e = new Error('fs.read aborted'); e.name = 'AbortError'; return e; }
+    /* one pass over the file: checkpoints + totals + the sha256 of the bytes (the read-version stamp), or null when it
+       is not valid UTF-8 (or changed size under us). It stops at the next chunk once `signal` aborts (a cancelled run,
+       or the registry's tool timeout): this pass is the one part of a large read that scales with the whole file, and
+       it used to run to the end of the file after the call had already been given up on. */
+    async function buildReadIndex(fh, size, buf, signal) {
+      const cps = [], hash = crypto.createHash('sha256');
+      let byte = 0, unit = 0, line = 0, lastByte = -1;
+      while (byte < size) {
+        if (signal && signal.aborted) throw readAbortError();
+        const { bytesRead } = await fh.read(buf, 0, Math.min(READ_CHUNK, size - byte), byte);
+        if (!bytesRead) break;
+        const n = utf8Cut(buf, bytesRead, byte + bytesRead >= size);
+        if (n === 0) return null;
+        const piece = buf.subarray(0, n);
+        if (!isUtf8(piece)) return null;
+        cps.push({ byte, unit, line });
+        hash.update(piece);
+        unit += piece.toString('utf8').length;
+        for (let at = piece.indexOf(10); at >= 0; at = piece.indexOf(10, at + 1)) line++;
+        lastByte = piece[n - 1];
+        byte += n;
+      }
+      if (byte !== size) return null;
+      return { size, totalUnits: unit, newlines: line, endsWithNl: lastByte === 10, cps, sha256: hash.digest('hex') };
+    }
+    // decoded text from checkpoint cp to the indexed end, chunk by chunk; fn(str) returns false to stop
+    async function streamReadText(fh, idx, cp, buf, fn) {
+      let byte = cp.byte;
+      while (byte < idx.size) {
+        const { bytesRead } = await fh.read(buf, 0, Math.min(READ_CHUNK, idx.size - byte), byte);
+        if (!bytesRead) break;
+        const n = utf8Cut(buf, bytesRead, byte + bytesRead >= idx.size);
+        if (n === 0) break;
+        if (fn(buf.toString('utf8', 0, n)) === false) return;
+        byte += n;
+      }
+    }
+    // the historic page, computed from the index instead of the whole decoded file (same args, same output)
+    async function largeTextPage(args, fh, idx, buf, pageMax) {
+      const total = idx.totalUnits;
+      if (args.numbered === true && args.raw !== true) {
+        const totalLines = idx.newlines + (idx.endsWithNl ? 0 : 1);
+        const startLine = Math.max(1, Math.floor(Number(args.offset) || 1));
+        const requestedLines = args.limit == null ? totalLines : Math.floor(Number(args.limit) || 0);
+        if (requestedLines <= 0) throw new Error('limit must be a positive number');
+        if (startLine > totalLines) {
+          return { content: '[offset ' + startLine + ' is past the end: ' + args.path + ' has ' + totalLines + ' line' + (totalLines === 1 ? '' : 's') + ']', summary: totalLines + ' lines; nothing at line ' + startLine };
+        }
+        // a checkpoint sits mid-line, so start from one whose line is BEFORE the first wanted line (byte 0 is a line start)
+        let cp = idx.cps[0];
+        for (const c of idx.cps) { if (c.line < startLine - 1) cp = c; else break; }
+        const rows = [];
+        let chars = 0, endLine = startLine - 1, capped = false, li = cp.line, carry = '', stop = false;
+        const take = (lineText) => {
+          if (li >= startLine - 1 && li < totalLines) {
+            if (rows.length >= requestedLines) { stop = true; return; }
+            const row = (li + 1) + '\t' + lineText.replace(/\r$/, '');
+            if (rows.length && chars + row.length + 1 > pageMax) { capped = true; stop = true; return; }
+            rows.push(row); chars += row.length + 1; endLine = li + 1;
+          }
+          li++;
+        };
+        await streamReadText(fh, idx, cp, buf, (s) => {
+          let from = 0, nl;
+          while ((nl = s.indexOf('\n', from)) >= 0) {
+            take(carry + s.slice(from, nl)); carry = ''; from = nl + 1;
+            if (stop) return false;
+          }
+          carry += s.slice(from);
+        });
+        if (!stop && li < totalLines) take(carry);   // the last line, when the file does not end with a newline
+        let out = rows.join('\n');
+        const more = endLine < totalLines;
+        if (more) out += '\n[showing lines ' + startLine + '-' + endLine + ' of ' + totalLines + (capped ? ' (output cap)' : '')
+          + '; next: fs.read {"path":' + JSON.stringify(String(args.path)) + ',"numbered":true,"offset":' + (endLine + 1) + ',"limit":' + Math.min(requestedLines, Math.max(1, endLine - startLine + 1)) + '}]';
+        else if (startLine > 1) out += '\n[showing lines ' + startLine + '-' + endLine + ' of ' + totalLines + '; end of file]';
+        return { content: out, summary: kb(idx.size) + ' read; lines ' + startLine + '-' + endLine + ' of ' + totalLines };
+      }
+      const offset = Math.min(total, Math.max(0, Math.floor(Number(args.offset) || 0)));
+      const requested = args.limit == null ? READ_RETURN : Math.floor(Number(args.limit) || 0);
+      if (requested <= 0) throw new Error('limit must be a positive number');
+      const limit = Math.min(READ_RETURN, requested, pageMax);
+      const end = Math.min(total, offset + limit);
+      let cp = idx.cps[0];
+      for (const c of idx.cps) { if (c.unit <= offset) cp = c; else break; }
+      let at = cp.unit, out = '';
+      if (end > offset) {
+        await streamReadText(fh, idx, cp, buf, (s) => {
+          const a = Math.max(0, offset - at), b = Math.min(s.length, end - at);
+          if (b > a) out += s.slice(a, b);
+          at += s.length;
+          return at < end;
+        });
+      }
+      if (end < total) out += '\n[showing characters ' + offset + '-' + end + ' of ' + total
+        + (limit < Math.min(READ_RETURN, requested) ? ' (page sized to fit this model\'s context window)' : '')
+        + '; next: fs.read {"path":' + JSON.stringify(String(args.path)) + ',"offset":' + end + ',"limit":' + limit + '}]';
+      else if (offset > 0) out += '\n[showing characters ' + offset + '-' + end + ' of ' + total + '; end of file]';
+      return { content: out, summary: kb(idx.size) + ' read; characters ' + offset + '-' + end + ' of ' + total };
+    }
+    // the large-file path, or null = use the historic whole-file path (small file, document, image, not UTF-8)
+    async function readLargeText(aid, abs, args, ctx) {
+      if (!isUtf8 || typeof fsp.open !== 'function' || !(READ_STREAM_MIN < Infinity)) return null;
+      let st;
+      try { st = await fsp.stat(abs); }
+      catch (e) { if (e && e.code === 'ENOENT') throw new Error('no such file: ' + args.path); return null; }
+      if (!st || typeof st.isFile !== 'function' || !st.isFile() || !(Number(st.size) > READ_STREAM_MIN)) return null;
+      const size = Number(st.size);
+      const fh = await fsp.open(abs, 'r');
+      try {
+        const buf = Buffer.allocUnsafe(READ_CHUNK);
+        const { bytesRead } = await fh.read(buf, 0, Math.min(READ_HEAD, size), 0);
+        const head = Buffer.from(buf.subarray(0, bytesRead));
+        if (docExtract && docExtract.sniff(args.path, head)) return null;
+        if (imageWire && imageWire.sniff(args.path, head)) return null;
+        const key = abs + '|' + size + '|' + Number(st.mtimeMs || 0);
+        let idx = readIndexCache.get(key);
+        if (idx) readIndexCache.delete(key);
+        else idx = await buildReadIndex(fh, size, buf, ctx && ctx.signal);
+        if (!idx) return null;
+        readIndexCache.set(key, idx);
+        while (readIndexCache.size > 8) readIndexCache.delete(readIndexCache.keys().next().value);
+        stampSeen(aid, abs, null, idx.sha256, true);   // what this agent believes the file says, as of now (see the stale-write guard)
+        return await largeTextPage(args, fh, idx, buf, readPageMax(ctx));
+      } finally {
+        await fh.close();
+      }
+    }
 
     const readTool = {
       name: 'fs.read', capability: 'cabinet', scope: 'read', requiresConsent: false, timeoutMs: 10000,
@@ -365,10 +675,12 @@ const { note: failNote } = require('../../failopen');
       run: async (args, ctx) => {
         const aid = (ctx && ctx.agentId) || 'agent';
         const { abs } = await resolveInside(aid, args.path, { scope: 'read', ctx });
+        const large = await readLargeText(aid, abs, args, ctx);   // a big plain-text file pages without the whole-file decode
+        if (large) return large;
         let raw;
         try { raw = await fsp.readFile(abs); }
         catch (e) { if (e && e.code === 'ENOENT') throw new Error('no such file: ' + args.path); throw e; }
-        await stampSeen(aid, abs);   // what this agent believes the file says, as of now (see the stale-write guard)
+        stampSeen(aid, abs, raw, null, true);   // what this agent believes the file says, as of now (see the stale-write guard)
 
         /* DOCUMENTS. Decoding a .docx as UTF-8 produced binary noise: the agent could see the file existed and
            had no way to read it, on exactly the formats a Commander keeps real work in. A malformed or
@@ -408,12 +720,7 @@ const { note: failNote } = require('../../failopen');
            Paging a parked 1.4 MB API response with limit 100000 under a 27k budget lost 73k characters per call, and
            following "next" skipped them for good. A page is now sized to what the model will actually see, so "next"
            is always contiguous. No budget passed (a direct call, a test) = READ_RETURN exactly as before. */
-        const pageMax = (() => {
-          let v = ctx ? ctx.outputMax : null;
-          if (typeof v === 'function') { try { v = v(); } catch (_) { v = null; } }
-          const n = Math.floor(Number(v));
-          return Number.isFinite(n) && n > 0 ? Math.max(2000, Math.min(READ_RETURN, n - 600)) : READ_RETURN;   // headroom: trailer + fence
-        })();
+        const pageMax = readPageMax(ctx);
         /* NUMBERED (2026-09-02, coding-tools lane). Line-cited reads are how a coding agent anchors an fs.edit or
            a diagnostic ("main.js:214"). Opt-in, because ~25 test files and the output-parking read-back path
            consume the plain default and a numbered default would change what they parse; `raw: true` is the
@@ -514,21 +821,48 @@ const { note: failNote } = require('../../failopen');
       run: async (args, ctx) => {
         const aid = (ctx && ctx.agentId) || 'agent';
         const { abs, base } = await resolveInside(aid, args.path, { scope: 'write', ctx });
-        let existingBytes = null;
-        try { existingBytes = await fsp.readFile(abs); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+        const signal = ctx && ctx.signal, lk = lockKey(abs);
+        const existingBytes = await withFileLocks([lk], signal, () => readBytesOrMissing(abs));   // never a torn read
+        // a file this run READ that has changed since: its text may build on bytes it never saw (read-version check).
+        // A run that only wrote or appended it appends onto the current bytes, as trunk did.
+        const moved = changedSinceSeen(aid, abs, existingBytes);
+        if (moved && moved.read) throw changedSinceReadError('append', args.path, moved);
         const existing = existingBytes ? existingBytes.toString('utf8') : '';
         const combined = existing + String(args.content);
-        const bytes = Buffer.byteLength(combined, 'utf8');
+        let bytes = Buffer.byteLength(combined, 'utf8');
         if (bytes > WRITE_BYTES) throw new Error('file too large after append (' + bytes + ' > ' + WRITE_BYTES + ' bytes)');
         const diagnosticTicket = await beginEditDiagnostics(aid, [{ abs, base, rel: String(args.path), text: existing }], ctx);
         await fsp.mkdir(P.dirname(abs), { recursive: true });
-        const expected = Buffer.from(combined, 'utf8');
-        const receipt = await verifiedMutation({ operation: 'append', path: args.path, abs, expected, initial: existingBytes, mutate: () => fsp.writeFile(abs, expected) });
-        await stampSeen(aid, abs);   // our own append is the new baseline — a later fs.write must not read as a third-party race
+        let drifted = false;
+        const receipt = await withFileLocks([lk], signal, async () => {
+          // re-read under the lock and append to what is there NOW: another run's line written during our LSP
+          // baseline used to be erased by a whole-file write composed from the older read
+          const current = await readBytesOrMissing(abs);
+          let initial = existingBytes, all = combined;
+          if (!sameBytes(current, existingBytes)) {
+            all = (current ? current.toString('utf8') : '') + String(args.content);
+            bytes = Buffer.byteLength(all, 'utf8');
+            if (bytes > WRITE_BYTES) throw new Error('file too large after append (' + bytes + ' > ' + WRITE_BYTES + ' bytes)');
+            initial = current; drifted = true;
+            if (diagnosticTicket) diagnosticTicket.drifted = DRIFT_REASON;
+          }
+          const expected = Buffer.from(all, 'utf8');
+          const r = await verifiedMutation({ operation: 'append', path: args.path, abs, expected, initial, mutate: () => fsp.writeFile(abs, expected) });
+          // our own append is the new baseline — a later fs.write must not read as a third-party race — when this
+          // agent knew every byte it went on after: a missing file, the bytes of its stamp, or (no stamp, no drift)
+          // a first touch, as trunk. Otherwise the file holds another writer's bytes it never saw: the stamp keeps
+          // what it saw and records the drift, so its next fs.write / fs.edit is refused, saying so, until it reads
+          const st = readStamps.get(stampKey(aid, abs));
+          if (initial == null || (st ? sha256(initial) === st.hash : !drifted)) stampSeen(aid, abs, expected);
+          else markDrift(aid, abs, 'fs.append', drifted);
+          return r;
+        }).catch(resyncThenThrow(diagnosticTicket, ctx));
         emitDeliverable(ctx, aid, args.path);
         const added = Buffer.byteLength(String(args.content), 'utf8');
         return finishEditDiagnostics(diagnosticTicket,
-          { content: 'Appended to ' + args.path + ' (+' + added + ' bytes, now ' + bytes + ').\n' + receiptLine(receipt) + locationLine(args.path, abs, ctx), summary: 'appended ' + args.path + ' (+' + kb(added) + ')', mutationReceipt: receipt, receipt }, ctx);
+          { content: 'Appended to ' + args.path + ' (+' + added + ' bytes, now ' + bytes + ').\n' + receiptLine(receipt) + locationLine(args.path, abs, ctx)
+              + (drifted ? driftNote('fs.append', args.path, 'your text went on after their changes') : ''),
+            summary: 'appended ' + args.path + ' (+' + kb(added) + ')', mutationReceipt: receipt, receipt }, ctx);
       }
     };
 
@@ -553,33 +887,65 @@ const { note: failNote } = require('../../failopen');
       run: async (args, ctx) => {
         const aid = (ctx && ctx.agentId) || 'agent';
         const { abs, base } = await resolveInside(aid, args.path, { scope: 'write', ctx });
-        let initialBytes;
-        try { initialBytes = await fsp.readFile(abs); }
-        catch (e) { if (e && e.code === 'ENOENT') throw new Error('no such file: ' + args.path); throw e; }
+        const signal = ctx && ctx.signal, lk = lockKey(abs);
+        // read under the lock: a concurrent truncating writeFile once produced a false '"find" text not found'
+        const initialBytes = await withFileLocks([lk], signal, () => readBytesOrMissing(abs));
+        if (initialBytes == null) throw new Error('no such file: ' + args.path);
         assertObserved(aid, abs, args.path);
+        // observed, but the file has changed since: "find" would land on bytes the agent never saw (read-version check)
+        const moved = changedSinceSeen(aid, abs, initialBytes);
+        if (moved) throw changedSinceReadError('edit', args.path, moved);
         const txt = initialBytes.toString('utf8');
         const find = String(args.find);
         if (!find) throw new Error('"find" must be a non-empty string');
-        if (txt.indexOf(find) < 0) throw new Error('"find" text not found in ' + args.path + ' — read the file and match it exactly');
-        const count = txt.split(find).length - 1;
         /* UNIQUENESS. Replacing EVERY occurrence silently was the audit's top finding: a "find" like `return x;`
            rewrote five functions when the model meant one, and the result line said "5 replacements" only after
            the damage. Exactly-one-match keeps the historic path; more than one must be asked for explicitly. */
         const replaceAll = args.replace_all === true;
         const expectedCount = args.expected_count == null ? null : Math.floor(Number(args.expected_count));
-        if (expectedCount != null && (!(expectedCount >= 1) || !isFinite(expectedCount))) throw new Error('"expected_count" must be a positive integer');
-        if (expectedCount != null && count !== expectedCount) throw new Error('"find" matches ' + count + ' place' + (count === 1 ? '' : 's') + ' in ' + args.path + ' but expected_count is ' + expectedCount + ' — nothing was changed. Re-read the file and adjust "find" or expected_count.');
-        if (count > 1 && !replaceAll && expectedCount == null) throw new Error('"find" matches ' + count + ' places in ' + args.path + ' — nothing was changed. Include more surrounding text so "find" is unique to the ONE place you mean, or pass { "replace_all": true } to change all ' + count + ', or { "expected_count": ' + count + ' } to confirm that count.');
-        const next = txt.split(find).join(String(args.replace));
-        const bytes = Buffer.byteLength(next, 'utf8');
-        if (bytes > WRITE_BYTES) throw new Error('file too large after edit (' + bytes + ' > ' + WRITE_BYTES + ' bytes)');
+        // the whole match/count/size verdict for one version of the file — run on the first read, and again on the
+        // bytes found under the lock when another writer changed the file in between (same errors either way)
+        function planEdit(text) {
+          if (text.indexOf(find) < 0) throw new Error('"find" text not found in ' + args.path + ' — read the file and match it exactly');
+          const count = text.split(find).length - 1;
+          if (expectedCount != null && (!(expectedCount >= 1) || !isFinite(expectedCount))) throw new Error('"expected_count" must be a positive integer');
+          if (expectedCount != null && count !== expectedCount) throw new Error('"find" matches ' + count + ' place' + (count === 1 ? '' : 's') + ' in ' + args.path + ' but expected_count is ' + expectedCount + ' — nothing was changed. Re-read the file and adjust "find" or expected_count.');
+          if (count > 1 && !replaceAll && expectedCount == null) throw new Error('"find" matches ' + count + ' places in ' + args.path + ' — nothing was changed. Include more surrounding text so "find" is unique to the ONE place you mean, or pass { "replace_all": true } to change all ' + count + ', or { "expected_count": ' + count + ' } to confirm that count.');
+          const next = text.split(find).join(String(args.replace));
+          const bytes = Buffer.byteLength(next, 'utf8');
+          if (bytes > WRITE_BYTES) throw new Error('file too large after edit (' + bytes + ' > ' + WRITE_BYTES + ' bytes)');
+          return { next, count };
+        }
+        let plan = planEdit(txt);
+        // the baseline stays OUTSIDE the lock: it can take ~10 s, and queued edits would time out behind it
         const diagnosticTicket = await beginEditDiagnostics(aid, [{ abs, base, rel: String(args.path), text: txt }], ctx);
-        const expected = Buffer.from(next, 'utf8');
-        const receipt = await verifiedMutation({ operation: 'edit', path: args.path, abs, expected, initial: initialBytes, mutate: () => fsp.writeFile(abs, expected) });
-        await stampSeen(aid, abs);   // our own edit is the new baseline: read -> edit -> write used to refuse with a FABRICATED "someone else edited it" story
+        let drifted = false;
+        const receipt = await withFileLocks([lk], signal, async () => {
+          const current = await readBytesOrMissing(abs);
+          if (current == null) throw new Error('no such file: ' + args.path);
+          let initial = initialBytes;
+          if (!sameBytes(current, initialBytes)) {
+            // another writer landed during the baseline: the edit lands on THEIR text (a vanished or now-ambiguous
+            // "find" refuses with the ordinary errors), never on the stale read that would erase their change
+            plan = planEdit(current.toString('utf8'));
+            initial = current; drifted = true;
+            if (diagnosticTicket) diagnosticTicket.drifted = DRIFT_REASON;
+          }
+          const expected = Buffer.from(plan.next, 'utf8');
+          const r = await verifiedMutation({ operation: 'edit', path: args.path, abs, expected, initial, mutate: () => fsp.writeFile(abs, expected) });
+          // our own edit is the new baseline: read -> edit -> write used to refuse with a FABRICATED "someone else
+          // edited it" story. NOT after a drift: the agent never saw the other writer's bytes now in the file, so
+          // its old stamp stays (marked drifted) and a later fs.write from its stale view is refused until it reads the file again
+          if (!drifted) stampSeen(aid, abs, expected);
+          else markDrift(aid, abs, 'fs.edit', true);
+          return r;
+        }).catch(resyncThenThrow(diagnosticTicket, ctx));
+        const count = plan.count;
         emitDeliverable(ctx, aid, args.path);
         return finishEditDiagnostics(diagnosticTicket,
-          { content: 'Edited ' + args.path + ' (' + count + ' replacement' + (count === 1 ? '' : 's') + ').\n' + receiptLine(receipt), summary: 'edited ' + args.path + ' (' + count + 'x)', mutationReceipt: receipt, receipt }, ctx);
+          { content: 'Edited ' + args.path + ' (' + count + ' replacement' + (count === 1 ? '' : 's') + ').\n' + receiptLine(receipt)
+              + (drifted ? driftNote('fs.edit', args.path, 'your replacement was applied to their version') : ''),
+            summary: 'edited ' + args.path + ' (' + count + 'x)', mutationReceipt: receipt, receipt }, ctx);
       }
     };
 
@@ -598,8 +964,13 @@ const { note: failNote } = require('../../failopen');
           const key = resolved.abs;
           if (plans.has(key)) return plans.get(key);
           let content = null, exists = false;
-          try { content = await fsp.readFile(key, 'utf8'); exists = true; }
-          catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+          // under the per-file lock so a concurrent writer's truncating writeFile is never read half-written
+          const bytes = await withFileLocks([lockKey(key)], ctx && ctx.signal, readBytesOrMissing.bind(null, key));
+          // a file this agent read that has changed since: hunks would match bytes it never saw (read-version check)
+          const moved = changedSinceSeen(aid, key, bytes);
+          if (moved) throw changedSinceReadError('fs.patch', String(rel), moved);
+          content = bytes == null ? null : bytes.toString('utf8');
+          exists = content != null;
           const plan = { rel: String(rel), abs: key, base: resolved.base, exists, content, initialContent: content, touched: false };
           plans.set(key, plan);
           return plan;
@@ -695,56 +1066,75 @@ const { note: failNote } = require('../../failopen');
         const touched = Array.from(plans.values()).filter(p => p.touched);
         const diagnosticTicket = await beginEditDiagnostics(aid,
           touched.map(plan => ({ abs: plan.abs, base: plan.base, rel: plan.rel, text: plan.initialContent == null ? '' : plan.initialContent })), ctx);
-        const patchReceipt = {
-          operation: 'patch', path: touched.map(p => p.rel).join(', '), state: 'attempted', phases: ['attempted'],
-          attemptedBytes: touched.reduce((n, p) => n + (p.content == null ? 0 : Buffer.byteLength(p.content, 'utf8')), 0), writtenBytes: 0, verifiedBytes: 0, sha256: null, files: []
-        };
-        try {
-          // Apply destinations/updated files before deletes. In particular, a move must never
-          // remove the last source copy until its destination was written and read back exactly.
-          const ordered = touched.filter(plan => plan.content != null)
-            .concat(touched.filter(plan => plan.content == null));
-          for (const plan of ordered) {
-            const expected = plan.content == null ? null : Buffer.from(plan.content, 'utf8');
-            const initial = plan.initialContent == null ? null : Buffer.from(plan.initialContent, 'utf8');
-            if (expected) await fsp.mkdir(P.dirname(plan.abs), { recursive: true });
-            const fileReceipt = await verifiedMutation({
-              operation: expected ? 'patch-write' : 'patch-delete', path: plan.rel, abs: plan.abs,
-              expected, initial, mutate: () => expected ? fsp.writeFile(plan.abs, expected) : fsp.rm(plan.abs, { force: true })
-            });
-            await stampSeen(aid, plan.abs);   // our own patch is the new baseline for the stale-write guard (deletes drop the stamp)
-            patchReceipt.files.push(fileReceipt);
-          }
-          patchReceipt.state = 'read-back-verified';
-          patchReceipt.phases.push('written', 'read-back-verified');
-          patchReceipt.writtenBytes = patchReceipt.files.reduce((n, r) => n + r.writtenBytes, 0);
-          patchReceipt.verifiedBytes = patchReceipt.files.reduce((n, r) => n + r.verifiedBytes, 0);
-        } catch (cause) {
-          patchReceipt.files = [];
-          let expectedCount = 0, initialCount = 0;
+        // every touched file, locked together (sorted keys inside withFileLocks: no deadlock with a one-file writer)
+        const patchReceipt = await withFileLocks(touched.map(plan => lockKey(plan.abs)), ctx && ctx.signal, async () => {
+          /* The hunks were matched against the reads above; the baseline then waited, and another run may have
+             written one of these files since. Writing now would rebuild it from the old read and erase that change,
+             so a moved source refuses BEFORE any byte is written. Re-running the same patch re-matches by context,
+             but a re-run over a file this agent has a read stamp for is refused by the read-version check (the stamp
+             still holds the pre-drift bytes) until fs.read re-arms it, so the advice names those files to read first. */
+          const drifted = [];
           for (const plan of touched) {
-            const expected = plan.content == null ? null : Buffer.from(plan.content, 'utf8');
-            const initial = plan.initialContent == null ? null : Buffer.from(plan.initialContent, 'utf8');
-            let actual = null, unreadable = false;
-            try { actual = await readBytesOrMissing(plan.abs); } catch (_) { unreadable = true; }
-            const state = !unreadable && sameBytes(actual, expected) ? 'read-back-verified'
-              : (!unreadable && sameBytes(actual, initial) ? 'failed' : 'partially-applied');
-            if (state === 'read-back-verified') expectedCount++;
-            if (state === 'failed') initialCount++;
-            patchReceipt.files.push({
-              operation: expected ? 'patch-write' : 'patch-delete', path: plan.rel, state,
-              phases: ['attempted', state], attemptedBytes: expected ? expected.length : 0,
-              writtenBytes: actual ? actual.length : 0, verifiedBytes: state === 'read-back-verified' && expected ? expected.length : 0,
-              sha256: sha256(expected), actualSha256: unreadable ? null : sha256(actual)
-            });
+            if (await readUtf8OrMissing(plan.abs) !== plan.initialContent) drifted.push(plan);
           }
-          patchReceipt.state = expectedCount === touched.length ? 'read-back-verified'
-            : (initialCount === touched.length ? 'failed' : 'partially-applied');
-          patchReceipt.phases.push(patchReceipt.state);
-          patchReceipt.writtenBytes = patchReceipt.files.reduce((n, r) => n + r.writtenBytes, 0);
-          patchReceipt.verifiedBytes = patchReceipt.files.reduce((n, r) => n + r.verifiedBytes, 0);
-          throw receiptError('filesystem patch ' + patchReceipt.state + ': ' + ((cause && cause.message) || cause), patchReceipt);
-        }
+          if (drifted.length) {
+            const stamped = drifted.filter(plan => readStamps.has(stampKey(aid, plan.abs)));
+            const next = stamped.length ? 'fs.read ' + stamped.map(plan => plan.rel).join(', ') + ' again, then re-run the fs.patch' : 'Re-run the same fs.patch';
+            throw new Error('fs.patch refused: ' + drifted.map(plan => plan.rel).join(', ') + ' changed on disk while this patch was being prepared (another agent or process wrote '
+              + (drifted.length === 1 ? 'it' : 'them') + ') — nothing was written. ' + next + '; its hunks match by context.');
+          }
+          const patchReceipt = {
+            operation: 'patch', path: touched.map(p => p.rel).join(', '), state: 'attempted', phases: ['attempted'],
+            attemptedBytes: touched.reduce((n, p) => n + (p.content == null ? 0 : Buffer.byteLength(p.content, 'utf8')), 0), writtenBytes: 0, verifiedBytes: 0, sha256: null, files: []
+          };
+          try {
+            // Apply destinations/updated files before deletes. In particular, a move must never
+            // remove the last source copy until its destination was written and read back exactly.
+            const ordered = touched.filter(plan => plan.content != null)
+              .concat(touched.filter(plan => plan.content == null));
+            for (const plan of ordered) {
+              const expected = plan.content == null ? null : Buffer.from(plan.content, 'utf8');
+              const initial = plan.initialContent == null ? null : Buffer.from(plan.initialContent, 'utf8');
+              if (expected) await fsp.mkdir(P.dirname(plan.abs), { recursive: true });
+              const fileReceipt = await verifiedMutation({
+                operation: expected ? 'patch-write' : 'patch-delete', path: plan.rel, abs: plan.abs,
+                expected, initial, mutate: () => expected ? fsp.writeFile(plan.abs, expected) : fsp.rm(plan.abs, { force: true })
+              });
+              stampSeen(aid, plan.abs, expected);   // our own patch is the new baseline for the stale-write guard (deletes drop the stamp)
+              patchReceipt.files.push(fileReceipt);
+            }
+            patchReceipt.state = 'read-back-verified';
+            patchReceipt.phases.push('written', 'read-back-verified');
+            patchReceipt.writtenBytes = patchReceipt.files.reduce((n, r) => n + r.writtenBytes, 0);
+            patchReceipt.verifiedBytes = patchReceipt.files.reduce((n, r) => n + r.verifiedBytes, 0);
+          } catch (cause) {
+            patchReceipt.files = [];
+            let expectedCount = 0, initialCount = 0;
+            for (const plan of touched) {
+              const expected = plan.content == null ? null : Buffer.from(plan.content, 'utf8');
+              const initial = plan.initialContent == null ? null : Buffer.from(plan.initialContent, 'utf8');
+              let actual = null, unreadable = false;
+              try { actual = await readBytesOrMissing(plan.abs); } catch (_) { unreadable = true; }
+              const state = !unreadable && sameBytes(actual, expected) ? 'read-back-verified'
+                : (!unreadable && sameBytes(actual, initial) ? 'failed' : 'partially-applied');
+              if (state === 'read-back-verified') expectedCount++;
+              if (state === 'failed') initialCount++;
+              patchReceipt.files.push({
+                operation: expected ? 'patch-write' : 'patch-delete', path: plan.rel, state,
+                phases: ['attempted', state], attemptedBytes: expected ? expected.length : 0,
+                writtenBytes: actual ? actual.length : 0, verifiedBytes: state === 'read-back-verified' && expected ? expected.length : 0,
+                sha256: sha256(expected), actualSha256: unreadable ? null : sha256(actual)
+              });
+            }
+            patchReceipt.state = expectedCount === touched.length ? 'read-back-verified'
+              : (initialCount === touched.length ? 'failed' : 'partially-applied');
+            patchReceipt.phases.push(patchReceipt.state);
+            patchReceipt.writtenBytes = patchReceipt.files.reduce((n, r) => n + r.writtenBytes, 0);
+            patchReceipt.verifiedBytes = patchReceipt.files.reduce((n, r) => n + r.verifiedBytes, 0);
+            throw receiptError('filesystem patch ' + patchReceipt.state + ': ' + ((cause && cause.message) || cause), patchReceipt);
+          }
+          return patchReceipt;
+        }).catch(resyncThenThrow(diagnosticTicket, ctx));
         for (const plan of touched) if (plan.content != null) emitDeliverable(ctx, aid, plan.rel);
         return finishEditDiagnostics(diagnosticTicket, {
           content: 'Applied patch: ' + touched.length + ' file' + (touched.length === 1 ? '' : 's') + ' changed.\n' + receiptLine(patchReceipt),
@@ -806,6 +1196,9 @@ const { note: failNote } = require('../../failopen');
     // { ok, code, timedOut, stopped } — ok=false means "fall back to the walker".
     function runRg(bin, argv, absDir, onLine, budgetMs, signal) {
       return new Promise((resolve) => {
+        // an already-cancelled run spawns nothing (its abort event fired before we could listen for it);
+        // the caller sees its clock aborted and throws
+        if (signal && signal.aborted) return resolve({ ok: false, aborted: true });
         let child;
         try { child = spawnFn(bin, argv, { cwd: absDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
         catch (_) { return resolve({ ok: false }); }
@@ -835,8 +1228,9 @@ const { note: failNote } = require('../../failopen');
         });
       });
     }
-    // Longest line handed to a MODEL-SUPPLIED regex, and the wall-clock ceiling for the whole content scan.
+    // Longest line handed to a MODEL-SUPPLIED regex, and the wall-clock ceiling for the whole search (walk included).
     const SEARCH_MATCH_CHARS = 2000, SEARCH_TIME_BUDGET_MS = 8000;
+    const SEARCH_BUDGET_MS = (deps.limits && Number(deps.limits.searchBudgetMs) > 0) ? Number(deps.limits.searchBudgetMs) : SEARCH_TIME_BUDGET_MS;
 
     /* CATASTROPHIC-BACKTRACKING FLOOR (measured 2026-07-26).
        `fs.search { regex: true }` compiles the MODEL's string and runs it synchronously over every line of
@@ -983,9 +1377,19 @@ const { note: failNote } = require('../../failopen');
       const rules = parseGitignore(text);
       return rules.length ? { baseRel, rules } : null;
     }
+    /* THE WALK IS BUDGETED AND STOPPABLE (2026-10-20). The walker awaited one fsp.stat per file, in sequence, while
+       it built the list — 2.7-9.7 s for 6,000 files where the readdir-only walk took 21-67 ms — and the 8 s budget
+       timer was armed only AFTER the walk returned, so a 20k-file tree reached the 20 s tool timeout. Nothing
+       checked ctx.signal either: a search with an already-aborted signal still ran ~15 s and answered "(no
+       matches)". Now a plain file costs no stat here (readdir already says it is a file; size and mtime are
+       taken where they are needed: the content scan's own stat, or a target:"files" hit), the run's ONE clock
+       (stats.clock, see searchClock) is checked at every directory and entry, an expiry ends the walk as a
+       truncated, timed-out walk, and an abort throws. A FIFO / socket / device entry is skipped outright:
+       readFile on a FIFO blocks forever on POSIX. */
     async function collectFiles(absDir, prefix, acc, stats, baseReal, ignoreStack) {
       const maxFiles = stats.maxFiles || SEARCH_MAX_FILES;
       if (stats.files >= maxFiles) { stats.truncated = true; return; }
+      if (walkStopped(stats)) return;
       let entries;
       try { entries = await fsp.readdir(absDir, { withFileTypes: true }); }
       catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
@@ -997,22 +1401,84 @@ const { note: failNote } = require('../../failopen');
       }
       for (const ent of entries) {
         if (stats.files >= maxFiles) { stats.truncated = true; return; }
+        if (walkStopped(stats)) return;
         if (ent.name.charAt(0) === '.') continue;                 // hidden (matches ripgrep's default)
         const rel = prefix ? (prefix + '/' + ent.name) : ent.name;
         const abs = P.join(absDir, ent.name);
+        const isLink = typeof ent.isSymbolicLink === 'function' && ent.isSymbolicLink();
         // a link (or a Windows junction) must PROVE it still lands inside the jail before we read or descend
-        if (typeof ent.isSymbolicLink === 'function' && ent.isSymbolicLink()) {
+        if (isLink) {
           if (baseReal && !pathInside(await realpathOrSelf(abs), baseReal)) { stats.skippedLinks = (stats.skippedLinks || 0) + 1; continue; }
         }
         let isDir = ent.isDirectory(), st = null;
-        if (!isDir) {
+        const plainFile = !isLink && !isDir && typeof ent.isFile === 'function' && ent.isFile();
+        if (!isDir && !plainFile) {
+          if (!isLink && specialEntry(ent)) continue;                // FIFO / socket / device: never read
           try { st = await fsp.stat(abs); } catch (e) { continue; }
           isDir = !!(st.isDirectory && st.isDirectory());          // an in-jail symlinked DIRECTORY reads as a file in readdir
+          if (!isDir && specialEntry(st)) continue;                  // a link to a FIFO / socket / device
         }
         if (stack.length && gitignored(stack, rel, isDir)) { stats.ignored = (stats.ignored || 0) + 1; continue; }
         if (isDir) { if (ent.name !== 'node_modules') await collectFiles(abs, rel, acc, stats, baseReal, stack); continue; }
-        stats.files++; acc.push({ rel, abs, mtimeMs: st.mtimeMs || 0, size: Number(st.size) || 0 });
+        stats.files++;
+        acc.push(st ? { rel, abs, mtimeMs: st.mtimeMs || 0, size: Number(st.size) || 0 } : { rel, abs, mtimeMs: null, size: null });
       }
+    }
+    function specialEntry(x) {
+      return ['isFIFO', 'isSocket', 'isBlockDevice', 'isCharacterDevice'].some((m) => typeof x[m] === 'function' && x[m]());
+    }
+    function searchAbortError() { const e = new Error('fs.search aborted'); e.name = 'AbortError'; return e; }
+    function budgetNote(clock) {
+      return '\n\n[search stopped at the ' + Math.round(clock.budgetMs / 1000) +
+        's budget — these are the matches found so far; narrow with file_glob or a more specific query]';
+    }
+    // the walk's view of the run clock: an abort throws, an expiry marks the walk cut (truncated + timed out)
+    function walkStopped(stats) {
+      const clock = stats && stats.clock;
+      if (!clock) return false;
+      if (clock.aborted) throw searchAbortError();
+      if (clock.expired) { stats.truncated = true; stats.timedOut = true; return true; }
+      return false;
+    }
+    /* ONE DEADLINE PER SEARCH: a TIMER plus the run's abort signal, never a clock read (the determinism law; see
+       the content-scan note below). The abort listener is live from the top of the call; the TIMER starts at
+       clock.start(), right before the first walk or rg spawn, so a consent card for a new folder (resolveInside
+       waits on the Commander) or the one-time rg probe never spends the search budget. It covers the walk and
+       the content scan. disarm() runs in the caller's finally. */
+    function searchClock(signal, budgetMs) {
+      const clock = { expired: false, aborted: false, budgetMs };
+      let timer = null;
+      clock.start = () => {
+        if (timer) return;
+        timer = setTimeout(() => { clock.expired = true; }, budgetMs);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      };
+      const onAbort = () => { clock.aborted = true; };
+      const listens = !!(signal && typeof signal.addEventListener === 'function');
+      if (signal && signal.aborted) clock.aborted = true;
+      else if (listens) signal.addEventListener('abort', onAbort, { once: true });
+      clock.disarm = () => {
+        if (timer) clearTimeout(timer);
+        if (listens && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onAbort);
+      };
+      return clock;
+    }
+    /* Run start(item) for items IN ORDER with at most `width` in flight, handing each result to each(item, result)
+       (awaited) in item order. stop() is asked before every launch and after every result (it throws on abort).
+       Returns true when it stopped with work left. start() must never reject. */
+    async function inOrderWindow(items, width, start, each, stop) {
+      const q = [];
+      let i = 0;
+      const top = () => { while (q.length < width && i < items.length && !stop()) { q.push([items[i], start(items[i])]); i++; } };
+      top();
+      while (q.length) {
+        const [item, p] = q.shift();
+        const result = await p;
+        await each(item, result);
+        if (stop()) return q.length > 0 || i < items.length;
+        top();
+      }
+      return i < items.length;
     }
     // `note` (optional) carries an honest reason the result set is partial for a reason OTHER than paging —
     // today, the scan hitting its wall-clock budget. Never silently truncate.
@@ -1034,6 +1500,11 @@ const { note: failNote } = require('../../failopen');
         gitignore: { type: 'boolean' }, max_files: { type: 'number' }
       } },
       run: async (args, ctx) => {
+        // ONE deadline for the whole search: abort live from here, the timer started before anything walks (see searchClock); always disarmed
+        const clock = searchClock(ctx && ctx.signal, SEARCH_BUDGET_MS);
+        try { return await searchRun(args, ctx, clock); } finally { clock.disarm(); }
+        // the historic run() body, unchanged in place except that it now reads the run's one clock
+        async function searchRun(args, ctx, clock) {
         args = args || {};
         const q = String(args.query != null ? args.query : '');
         if (!q) throw new Error('"query" must be a non-empty string');
@@ -1064,7 +1535,7 @@ const { note: failNote } = require('../../failopen');
         const target = ({ grep: 'content', find: 'files' })[args.target] || args.target || 'content';
         const cx = Math.max(0, Math.min(10, Number(args.context) || 0));
         const maxFiles = Math.max(1, Math.min(SEARCH_MAX_FILES_CEILING, Math.floor(Number(args.max_files)) || SEARCH_MAX_FILES));
-        const stats = { files: 0, truncated: false, maxFiles, gitignore: args.gitignore !== false && !onlyName, skippedLarge: [] };
+        const stats = { files: 0, truncated: false, maxFiles, gitignore: args.gitignore !== false && !onlyName, skippedLarge: [], clock };
         const maxBytes = onlyName ? SEARCH_NAMED_FILE_BYTES : SEARCH_MAX_FILE_BYTES;
         if (onlyName && startStat && startStat.size > maxBytes) stats.skippedLarge.push(P.relative(base, P.join(abs, onlyName)).split(P.sep).join('/'));
         const signal = ctx && ctx.signal;
@@ -1094,6 +1565,10 @@ const { note: failNote } = require('../../failopen');
         const rgCommon = ['--no-require-git', '--no-messages', '--max-filesize', String(maxBytes), '-g', '!node_modules', '--sort', 'path'];
         if (!stats.gitignore) rgCommon.push('--no-ignore');
         const rgRel = (p) => { const n = String(p).replace(/\\/g, '/').replace(/^\.\//, ''); return startPrefix ? startPrefix + '/' + n : n; };
+        // the budget starts HERE, after the path is resolved (a consent card may have waited on the Commander) and
+        // rg is known; a search cancelled during that wait stops before it walks or spawns anything
+        if (clock.aborted) throw searchAbortError();
+        clock.start();
 
         // ---- target 'files': glob over names, newest first ----
         if (target === 'files') {
@@ -1101,28 +1576,40 @@ const { note: failNote } = require('../../failopen');
           const re = globToRe((!hasSlash && q.charAt(0) !== '*') ? ('*' + q) : q, ic);   // bare name -> suffix match (rg --files -g *name)
           const nameOf = (rel) => hasSlash ? rel : rel.split('/').pop();
           const wanted = (rel) => (!onlyName || rel === onlyRel) && re.test(nameOf(rel));
+          /* newest-first needs an mtime, so only the glob HITS are stat'ed (the walk no longer stats every file), 16
+             at a time, in path order. A hit that cannot be stat'ed is dropped, as before. The stats are NOT under
+             the budget: they are bounded by the hits already found (trunk stat'ed every file with no budget at
+             all), and stopping them on an expired clock threw away every name a cut walk or rg had found and
+             answered "(no files matching …)". An abort still stops them. */
+          async function stampHits(list) {
+            const out = [];
+            await inOrderWindow(list, 16,
+              (f) => (f.mtimeMs != null ? Promise.resolve(f.mtimeMs) : fsp.stat(f.abs).then((st) => st.mtimeMs || 0, () => null)),
+              (f, m) => { if (m != null) out.push({ rel: f.rel, mtimeMs: m }); },
+              () => { if (clock.aborted) throw searchAbortError(); return false; });
+            return out;
+          }
           let hits = null;
           if (rg) {
             const rels = [];
-            const r = await runRg(rg, rgCommon.concat(['--files'], onlyName ? ['--', onlyName] : []), abs, (line) => { rels.push(line); if (!onlyName && rels.length >= maxFiles) { stats.truncated = true; return false; } }, SEARCH_TIME_BUDGET_MS, signal);
+            const r = await runRg(rg, rgCommon.concat(['--files'], onlyName ? ['--', onlyName] : []), abs, (line) => { rels.push(line); if (!onlyName && rels.length >= maxFiles) { stats.truncated = true; return false; } }, clock.budgetMs, signal);
+            if (clock.aborted) throw searchAbortError();   // a cancelled rg listing is not "(no files matching …)"
             if (r.ok) {
               stats.files = rels.length; stats.engine = 'rg';
-              if (r.timedOut) stats.truncated = true;
-              hits = [];
-              for (const p of rels) {
-                const rel = rgRel(p);
-                if (!wanted(rel)) continue;
-                let st; try { st = await fsp.stat(P.join(base, rel)); } catch (_) { continue; }
-                hits.push({ rel, mtimeMs: st.mtimeMs || 0 });
-              }
+              if (r.timedOut) { stats.truncated = true; stats.timedOut = true; }   // killed at the budget: the note says so
+              const wantedRels = [];
+              for (const p of rels) { const rel = rgRel(p); if (wanted(rel)) wantedRels.push({ rel, abs: P.join(base, rel), mtimeMs: null }); }
+              hits = await stampHits(wantedRels);
             }
           }
-          if (!hits) { const all = await walkAll(); stats.engine = 'walk'; hits = all.filter(f => wanted(f.rel)); }
+          if (!hits) { const all = await walkAll(); stats.engine = 'walk'; hits = await stampHits(all.filter(f => wanted(f.rel))); }
           hits.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));   // newest first; path tiebreak = determinism
           const total = hits.length, page = hits.slice(offset, offset + limit);
-          if (!page.length) return { content: '(no files matching ' + q + ')', summary: '0 files' };
+          // a listing the clock cut short says so; "(no files matching)" from a cut walk would be a false negative
+          const filesNote = stats.timedOut ? budgetNote(clock) : '';
+          if (!page.length) return { content: '(no files matching ' + q + ')' + filesNote, summary: '0 files' };
           const truncated = stats.truncated || total > offset + limit;
-          return { content: page.map(f => f.rel).join('\n') + searchHint(truncated, offset, limit, total),
+          return { content: page.map(f => f.rel).join('\n') + searchHint(truncated, offset, limit, total, filesNote || undefined),
                    summary: total + ' file' + (total === 1 ? '' : 's') + ' matched' + (truncated ? ' (showing ' + page.length + ')' : ''), engine: stats.engine };
         }
 
@@ -1187,7 +1674,8 @@ const { note: failNote } = require('../../failopen');
               h.idxs.push(idx); totalMatches++;
               if (totalMatches >= SEARCH_MAX_MATCHES) { stats.truncated = true; return false; }
             }
-          }, SEARCH_TIME_BUDGET_MS, signal);
+          }, clock.budgetMs, signal);
+          if (clock.aborted) throw searchAbortError();
           if (r.ok) {
             stats.engine = 'rg';
             fileHits = Array.from(byFile.values());
@@ -1210,24 +1698,51 @@ const { note: failNote } = require('../../failopen');
              reason the station stops answering. A TIMER, not a clock read — the determinism law bans ambient
              time in backend logic, and browser.js's waitForSettle already sets this precedent. It works here
              because the check sits between files, with an `await fsp.readFile` in between, so the loop turns
-             and the timer can fire. A partial answer that SAYS it is partial beats a frozen process. */
-          let expired = false;
-          const budgetTimer = setTimeout(() => { expired = true; }, SEARCH_TIME_BUDGET_MS);
-          if (budgetTimer && typeof budgetTimer.unref === 'function') budgetTimer.unref();
-          for (const f of candidates) {
-            if (expired) { timedOut = true; stats.truncated = true; break; }
-            if (f.size > maxBytes) { stats.skippedLarge.push(f.rel); continue; }   // named below, never a silent miss
-            let buf; try { buf = await fsp.readFile(f.abs); } catch (e) { continue; }
-            if (buf.length > maxBytes) { stats.skippedLarge.push(f.rel); continue; }
-            if (buf.indexOf(0) >= 0) continue;   // binary
+             and the timer can fire. A partial answer that SAYS it is partial beats a frozen process.
+             The timer is now the run's ONE clock (searchClock), armed before the walk, so a slow walk counts
+             against the same 8 s, and an abort stops the scan. Files are read through an ordered window of 16
+             (stat -> size cap -> readFile), consumed in path order: sequential stat+read of 6,000 small files took
+             33-68 s against 3-9 s windowed, with the same results in the same order. Only a file up to 1 MiB is
+             PREFETCHED; a bigger one is read when its turn comes, so the window holds at most ~16 MiB of file
+             bytes plus the one large file being searched.
+             A FLOOR: the first SCAN_FLOOR candidates are searched even once the clock has expired. A walk that spent
+             the whole budget otherwise left the scan nothing — it read not one of the files the walk had found and
+             answered "(no matches)" for text sitting in the first of them (trunk, whose walk was unbudgeted, found it).
+             stats.scanned counts the files actually read and searched, for the summary of a cut scan. */
+          if (stats.timedOut) timedOut = true;   // the walk itself ran out of budget
+          const PREFETCH_MAX = 1024 * 1024, SCAN_FLOOR = 16;
+          let reached = 0;
+          stats.scanned = 0;
+          const readOrSkip = (abs) => fsp.readFile(abs).then((buf) => ({ buf }), () => ({ skip: true }));
+          const cut = await inOrderWindow(candidates, 16, async (f) => {
+            let size = f.size;
+            if (size == null) {
+              try { size = Number((await fsp.stat(f.abs)).size) || 0; } catch (e) { return { skip: true }; }
+              // an abort that landed during the stat: no read starts after it (the search is already rejecting)
+              if (clock.aborted) return { skip: true };
+            }
+            if (size > maxBytes) return { large: true };
+            return size > PREFETCH_MAX ? { later: true } : readOrSkip(f.abs);
+          }, async (f, res) => {
+            reached++;
+            if (res.large) { stats.skippedLarge.push(f.rel); return; }   // named below, never a silent miss
+            if (res.later) res = clock.aborted ? { skip: true } : await readOrSkip(f.abs);
+            if (res.skip) return;
+            const buf = res.buf;
+            if (buf.length > maxBytes) { stats.skippedLarge.push(f.rel); return; }
+            stats.scanned++;
+            if (buf.indexOf(0) >= 0) return;   // binary
             const lines = buf.toString('utf8').split(/\r?\n/), idxs = [];
             for (let i = 0; i < lines.length; i++) if (matcher(lines[i])) idxs.push(i);
             if (idxs.length) { fileHits.push({ rel: f.rel, idxs, lines, maxIdx: lines.length - 1 }); totalMatches += idxs.length; }
-          }
-          clearTimeout(budgetTimer);
+          }, () => {
+            if (clock.aborted) throw searchAbortError();
+            return clock.expired && reached >= SCAN_FLOOR;
+          });
+          // a cut scan's summary says how many of the candidates it searched (the walk count is not files scanned)
+          if (cut) { timedOut = true; stats.truncated = true; stats.scanOf = candidates.length; }
         }
-        if (timedOut) stats.timedOutNote = '\n\n[search stopped at the ' + Math.round(SEARCH_TIME_BUDGET_MS / 1000) +
-          's budget — these are the matches found so far; narrow with file_glob or a more specific query]';
+        if (timedOut) stats.timedOutNote = budgetNote(clock);
         if (stats.skippedLarge.length) stats.timedOutNote = (stats.timedOutNote || '') + '\n\n[NOT searched — over the '
           + Math.round(maxBytes / (1024 * 1024)) + ' MB per-file search limit: ' + stats.skippedLarge.slice(0, 10).join(', ')
           + (stats.skippedLarge.length > 10 ? ' and ' + (stats.skippedLarge.length - 10) + ' more' : '')
@@ -1255,7 +1770,8 @@ const { note: failNote } = require('../../failopen');
         const flat = [];
         for (let fi = 0; fi < fileHits.length; fi++) for (const idx of fileHits[fi].idxs) flat.push({ fi, idx });
         const total = flat.length;
-        if (!total) return { content: '(no matches for ' + q + ')' + missNote, summary: '0 matches in ' + stats.files + ' file(s) scanned' + (stats.skippedLarge.length ? ', ' + stats.skippedLarge.length + ' too large' : ''), engine: stats.engine };
+        const scannedCount = stats.scanOf != null ? stats.scanned + ' of ' + stats.scanOf : stats.files;
+        if (!total) return { content: '(no matches for ' + q + ')' + missNote, summary: '0 matches in ' + scannedCount + ' file(s) scanned' + (stats.skippedLarge.length ? ', ' + stats.skippedLarge.length + ' too large' : ''), engine: stats.engine };
         const pageRefs = flat.slice(offset, offset + limit);
         const truncated = stats.truncated || total > offset + limit;
         let body;
@@ -1284,12 +1800,13 @@ const { note: failNote } = require('../../failopen');
         }
         return { content: body + searchHint(truncated, offset, limit, total, stats.timedOutNote),
                  summary: total + ' match' + (total === 1 ? '' : 'es') + ' in ' + fileHits.length + ' file(s)' + (truncated ? ' (showing ' + pageRefs.length + ')' : ''), engine: stats.engine };
+        }   // searchRun
       }
     };
 
     return {
       writeTool, readTool, listTool, appendTool, editTool, patchTool, searchTool,
-      _internals: { resolveInside, outputPlacement, workspaceRoot, safeAgentId, walk, collectFiles, globToRe, pathInside, parsePatch, fuzzyFindAndReplace, parseGitignore, gitignored, rgBinary },
+      _internals: { resolveInside, outputPlacement, workspaceRoot, safeAgentId, walk, collectFiles, globToRe, pathInside, parsePatch, fuzzyFindAndReplace, parseGitignore, gitignored, rgBinary, withFileLocks, lockKey },
       register(reg) { [writeTool, readTool, listTool, appendTool, editTool, patchTool, searchTool].forEach(t => reg.register(t)); return reg; }
     };
   }

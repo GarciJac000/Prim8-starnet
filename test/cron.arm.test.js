@@ -82,13 +82,13 @@ function boot(port, workspaces, attemptsLeft, extraEnv) {
   };
 
   try {
-    // ---- seed a routine that is DUE NOW so the FIRST tick processes it (proving the timer is live). A `once`
-    //      schedule with a PAST ISO timestamp is due the instant the scheduler notices it; with no key it takes
-    //      the no-capability path but STILL drives a cron.tick (plan.fire.length>=1) — a non-mockable "the timer
-    //      ran" signal that doesn't depend on any model spend. ----
-    const create = await j('POST', '/api/cron', { name: 'Due now', prompt: 'do a thing', schedule: '2020-01-01T00:00:00Z', agentId: 'cron_arm' });
-    A.eq(create.status, 200, 'POST /api/cron (valid, past one-shot) -> 200');
-    A.eq(create.body.job.schedule.kind, 'once', 'past ISO parsed to a one-shot (due immediately)');
+    // ---- seed a routine that is DUE within a second so the first live tick processes it (proving the timer is
+    //      live). With no key it takes the no-capability path but STILL drives a cron.tick (plan.fire.length>=1) — a
+    //      non-mockable "the timer ran" signal that doesn't depend on any model spend. (A PAST one-shot used to be the
+    //      seed; that is refused now — stored, it fired the moment it was saved. sweep/autonomy 2026-10-20) ----
+    const create = await j('POST', '/api/cron', { name: 'Due now', prompt: 'do a thing', schedule: 'in 1s', agentId: 'cron_arm' });
+    A.eq(create.status, 200, 'POST /api/cron (valid, one-shot due in 1s) -> 200');
+    A.eq(create.body.job.schedule.kind, 'once', 'a relative "in 1s" parsed to a one-shot (due a second later)');
 
     // ---- INERT-WHEN-OFF (the must-not-regress invariant) ----
     const offList = await j('GET', '/api/cron');

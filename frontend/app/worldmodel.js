@@ -4375,30 +4375,113 @@ const WorldModel = (() => {
         }
         return out;
       }
+      /* PATH SCRATCH + EDGE MEMO (2026-10-20, idle-CPU lane). path() allocated and filled a fresh
+         COLS*ROWS Int32Array on EVERY call, then re-proved every BFS edge from scratch: two footPoint
+         objects, a clearFootSegment walk and a dozen "x,y" strings + Set lookups per edge. One idle
+         wander() decision makes up to 48 calls on the same geometry, so the same edges were re-proved
+         dozens of times a second (an all-unreachable burst measured ~80 ms on a 20-room station).
+         Everything an edge's verdict depends on EXCEPT the caller's `extra` is fixed once this geo is
+         projected: floor, blockedTiles, canStep's doors, mouth lanes and wall faces never change after.
+           · seen/prev/queue are per-geo scratch arrays; a generation stamp replaces the per-call fill.
+           · a geo's FIRST call runs the old per-edge test as-is: the builder validates on throwaway geos
+             that answer one question, and those must not pay to build a memo they never read again.
+           · from the second call, edgeMemo[cur*4+d] holds an edge's extra-independent verdict, worked
+             out once: -1 = closed, else 1 + the offset in edgeTiles of every tile whose `extra`
+             membership the old test asked. It is filled by running that UNCHANGED test (walkable +
+             canStep + clearFootSegment) with a recording `extra` that blocks nothing, so the memo
+             cannot drift from the real check.
+           · per call, the edge is open iff none of its recorded tiles is in `extra`. A plain Set/Map
+             is read once into a generation-stamped tile mask (only the exact "x,y" keys walkable()
+             builds count); any other has()-object is asked per tile, once per call.
+         BFS order, smoothPath and every answer are identical — test/path-oracle.test.js runs a verbatim
+         copy of the old path() against this one on seeded random stations and `extra` shapes. */
+      const N = COLS * ROWS;
+      let pathGen = 0, pathSeen = null, pathPrev = null, pathQueue = null, exStamp = null, exVal = null, edgeMemo = null, exAsk = null;
+      const edgeTiles = [], probeKeys = [];
+      const probeExtra = { has(k) { probeKeys.push(k); return false; } };   // records each walkable(…, extra) lookup
+      function probeEdge(cx, cy, nx, ny) {
+        probeKeys.length = 0;
+        if (!walkable(nx, ny, probeExtra) || !canStep(cx, cy, nx, ny)) return -1;
+        const a = footPoint(cx, cy), b = footPoint(nx, ny);
+        if (!clearFootSegment(a.x, a.y, b.x, b.y, probeExtra)) return -1;
+        const at = edgeTiles.length;
+        edgeTiles.push(0);
+        for (const k of probeKeys) {   // walkable() asks only in-grid tiles, so k is always "<digits>,<digits>"
+          let x = 0, y = 0, i = 0, c;
+          while ((c = k.charCodeAt(i++)) !== 44) x = x * 10 + c - 48;
+          while (i < k.length) y = y * 10 + k.charCodeAt(i++) - 48;
+          const t = idx(x, y);
+          if (edgeTiles.indexOf(t, at + 1) < 0) edgeTiles.push(t);
+        }
+        edgeTiles[at] = edgeTiles.length - at - 1;
+        return at + 1;
+      }
+      function loadExtra(extra) {   // false = nothing extra blocks this call
+        exAsk = null;
+        if (!extra) return false;
+        const proto = Object.getPrototypeOf(extra);
+        if (proto !== Set.prototype && proto !== Map.prototype) { exAsk = extra; return true; }
+        for (const k of extra.keys()) {
+          if (typeof k !== 'string') continue;
+          const c = k.indexOf(',');
+          if (c < 0) continue;
+          const x = +k.slice(0, c), y = +k.slice(c + 1);
+          if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= COLS || y >= ROWS || x + ',' + y !== k) continue;
+          const t = idx(x, y);
+          exStamp[t] = pathGen; exVal[t] = 1;
+        }
+        return true;
+      }
+      function inExtra(t) {
+        if (exStamp[t] === pathGen) return exVal[t] === 1;
+        if (!exAsk) return false;
+        exStamp[t] = pathGen;
+        return (exVal[t] = exAsk.has((t % COLS) + ',' + ((t / COLS) | 0)) ? 1 : 0) === 1;
+      }
       function path(sx, sy, tx, ty, extra) {
         if (!walkable(tx, ty, extra)) return null;
         if (sx === tx && sy === ty) return [];
-        const prev = new Int32Array(COLS * ROWS).fill(-1);
         const start = idx(sx, sy), target = idx(tx, ty);
-        prev[start] = start;
-        const q = [start]; let head = 0;
-        while (head < q.length) {
-          const cur = q[head++];
+        // a start index off the grid or between tiles never expanded in the old BFS (every neighbour it
+        // could name is void or fails canStep), so it always came back null
+        if (!Number.isInteger(start) || start < 0 || start >= N) return null;
+        if (!pathSeen) { pathSeen = new Uint32Array(N); pathPrev = new Int32Array(N); pathQueue = new Int32Array(N); }
+        else if (!edgeMemo) { exStamp = new Uint32Array(N); exVal = new Uint8Array(N); edgeMemo = new Int32Array(N * 4); }
+        if (++pathGen === 0xffffffff) { pathSeen.fill(0); if (exStamp) exStamp.fill(0); pathGen = 1; }
+        const gen = pathGen, memo = edgeMemo, hasExtra = memo !== null && loadExtra(extra);
+        pathSeen[start] = gen; pathPrev[start] = start;
+        pathQueue[0] = start;
+        let head = 0, tail = 1;
+        while (head < tail) {
+          const cur = pathQueue[head++];
           if (cur === target) break;
           const cx = cur % COLS, cy = (cur / COLS) | 0;
           for (let d = 0; d < 4; d++) {
             const nx = cx + (d === 0 ? 1 : d === 1 ? -1 : 0), ny = cy + (d === 2 ? 1 : d === 3 ? -1 : 0);
             if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
             const ni = idx(nx, ny);
-            if (prev[ni] !== -1 || !walkable(nx, ny, extra) || !canStep(cx, cy, nx, ny)) continue;
-            const a=footPoint(cx,cy),b=footPoint(nx,ny);
-            if(!clearFootSegment(a.x,a.y,b.x,b.y,extra))continue;
-            prev[ni] = cur; q.push(ni);
+            if (pathSeen[ni] === gen) continue;
+            if (memo) {
+              const m = cur * 4 + d;
+              let e = memo[m];
+              if (e === 0) e = memo[m] = probeEdge(cx, cy, nx, ny);
+              if (e < 0) continue;
+              if (hasExtra) {
+                let open = true;
+                for (let i = e, end = e + edgeTiles[e - 1]; i < end; i++) if (inExtra(edgeTiles[i])) { open = false; break; }
+                if (!open) continue;
+              }
+            } else {   // first call on this geo: the old test, verbatim
+              if (!walkable(nx, ny, extra) || !canStep(cx, cy, nx, ny)) continue;
+              const a = footPoint(cx, cy), b = footPoint(nx, ny);
+              if (!clearFootSegment(a.x, a.y, b.x, b.y, extra)) continue;
+            }
+            pathSeen[ni] = gen; pathPrev[ni] = cur; pathQueue[tail++] = ni;
           }
         }
-        if (prev[target] === -1) return null;
+        if (pathSeen[target] !== gen) return null;
         const out = []; let cur = target;
-        while (cur !== start) { out.push({ x: cur % COLS, y: (cur / COLS) | 0 }); cur = prev[cur]; }
+        while (cur !== start) { out.push({ x: cur % COLS, y: (cur / COLS) | 0 }); cur = pathPrev[cur]; }
         out.reverse();
         return smoothPath(out, sx, sy, extra);   // collapse the BFS staircase into straight runs + diagonals
       }

@@ -39,6 +39,10 @@ const Harness = (() => {
   let contextByKey = {};     // agentId\0streamId -> { used, model, runId, sentEstimate, live }
   let runModels = {};        // runId -> model from agent.run.start, for events that omit model
   let runConv = {};          // runId -> { key, sentEstimate } registered by chat() at run.start
+  /* CONTEXT REVISION (idle CPU piece 3, 2026-10-20): bumped by every write to contextByKey / overheadByModel (and a run's
+     registration), so a reader that memoizes on it — chat.js contextRef, which the 1 s station tick reads — recomputes
+     exactly when a reading can move, and does nothing while nothing has. */
+  let contextRev = 0;
   /* HARNESS OVERHEAD, LEARNED FROM A REAL REQUEST (agentId\0model -> tokens).
      A request carries far more than the visible dialogue: system prompt, every tool schema, and the
      sidecar's manual/capability/skill/memory dressing. On a seeded station that measured ~13.1k tokens
@@ -74,7 +78,7 @@ const Harness = (() => {
   })();
   function rememberOverhead(key, cal) {
     if (!cal) return;
-    overheadByModel[key] = cal;
+    overheadByModel[key] = cal; contextRev++;
     try {
       const keys = Object.keys(overheadByModel);
       if (keys.length > OVERHEAD_MAX) { for (const k of keys.slice(0, keys.length - OVERHEAD_MAX)) delete overheadByModel[k]; }
@@ -99,6 +103,7 @@ const Harness = (() => {
   function registerRun(runId, agentId, streamId, messages) {
     if (!runId) return;
     runConv[runId] = { key: convKey(agentId, streamId), sentEstimate: estOf(messages), calibrated: false, agentId: String(agentId || 'agent') };
+    contextRev++;
   }
 
   // Fold ONE token-bearing agent.cost payload into the per-conversation context occupancy. Called from
@@ -129,6 +134,7 @@ const Harness = (() => {
       used: payload.tokensIn, model: m, runId: payload.runId || '',
       sentEstimate: reg ? reg.sentEstimate : -1, baseline: baseline || 0, live: true
     };
+    contextRev++;
   }
   // A run ended: its measurement stops being "what the model is holding right now". The reading stays
   // (it is still the last real thing we know) but drops out of live mode, so contextState projects the
@@ -141,6 +147,7 @@ const Harness = (() => {
     if (rec && rec.runId === rid) rec.live = false;
     else { for (const k in contextByKey) { if (contextByKey[k] && contextByKey[k].runId === rid) contextByKey[k].live = false; } }
     delete runConv[rid];
+    contextRev++;
   }
 
   // Desktop (Tauri) build: the BYOK key lives in the OS keychain — never in localStorage and
@@ -726,6 +733,16 @@ const Harness = (() => {
       : '';
     return 'the station refused the key check (HTTP ' + status + (t && !/^[{<]/.test(t) ? ' ' + t : '') + ')' + hint;
   }
+  // the key check's failure in words a first-time user can act on: an unreachable or overloaded PROVIDER is not a
+  // key problem, and "fetch failed (ECONNREFUSED)" / "credential probe HTTP 503" say nothing to a beginner. Same
+  // classifier the run errors use (Friendly); the raw cause rides along in brackets. Anything else passes through.
+  function keyCheckLine(why) {
+    let kind = '';
+    try { kind = (typeof Friendly !== 'undefined' && Friendly.friendlyError) ? Friendly.friendlyError(new Error(why)).kind : ''; } catch (_) {}
+    if (kind === 'provider_unreachable') return 'couldn’t reach the AI provider — check your internet connection, VPN or proxy, then try again (' + why + ')';
+    if (kind === 'provider_server_error') return 'the AI provider’s servers are having trouble right now — wait a moment and try again (' + why + ')';
+    return why;
+  }
   async function postKeyCheck(route, body) {
     const r = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const text = await r.text().catch(() => '');
@@ -764,7 +781,7 @@ const Harness = (() => {
     // and the next prompt re-measures): blank the gauge honestly rather than show a stale fill.
     // The learned overheads survive — they are keyed BY MODEL, so switching back re-uses the
     // calibration that model already earned instead of going blind again.
-    if ((m || '') !== prev) { contextByKey = {}; runConv = {}; }
+    if ((m || '') !== prev) { contextByKey = {}; runConv = {}; contextRev++; }
   };
   const getProv = () => normalizeProviderId(localStorage.getItem(LS.prov) || 'openrouter');
   const setProv = p => { selectionRevision++; localStorage.setItem(LS.prov, normalizeProviderId(p || 'openrouter')); };
@@ -991,10 +1008,11 @@ const Harness = (() => {
     const p = normalizeProviderId(provider || getProv());
     const candidate = cleanKey(key);
     if (!candidate) return setKey('', p);
+    const hadKey = hasStoredCredential(p);   // a first-time WAKE has no previous key to keep — never claim one
     const checkModel = String(model || '').trim() || (p === getProv() ? getModel() : '');
     const { r, j, text } = await postKeyCheck('/api/providers/validate', { provider: p, key: candidate, baseUrl: getBaseUrl(p) || '', model: checkModel });
     if (!r.ok || !j.credentialVerified) {
-      throw new Error(keyCheckFailure(r.status, j, text) + ' — your previous key is unchanged');
+      throw new Error(keyCheckLine(keyCheckFailure(r.status, j, text)) + (hadKey ? ' — your previous key is unchanged' : ' — nothing was saved'));
     }
     const stored = await Promise.resolve(setKey(candidate, p));
     return Object.assign({}, j, { stored: true }, (stored && stored.engine) ? { engine: stored.engine } : {});
@@ -1667,8 +1685,12 @@ const Harness = (() => {
   // Durable interrupted-run recovery. Listing is read-only; preparation is accepted only when the sidecar's
   // journal proves there is no uncertain dispatched mutation. The returned token is one-shot and consumed by
   // the ordinary /api/run path, so recovery does not create a privileged second execution route.
-  async function runRecoveries() {
-    const r = await fetch('/api/run-recoveries?limit=100', { cache: 'no-store' });
+  // filter (optional): { streamId, agentId } — the sidecar then lists only that conversation's journals, so its
+  // interrupted run is found even behind hundreds of others (a plain first page of 100 missed it, perf 10-19)
+  async function runRecoveries(filter) {
+    let qs = 'limit=100';
+    for (const k of ['streamId', 'agentId']) if (filter && filter[k] != null) qs += '&' + k + '=' + encodeURIComponent(String(filter[k]));
+    const r = await fetch('/api/run-recoveries?' + qs, { cache: 'no-store' });
     if (!r.ok) throw new Error('recovery list unavailable');
     const j = await r.json();
     return Array.isArray(j && j.recoveries) ? j.recoveries : [];
@@ -1730,7 +1752,7 @@ const Harness = (() => {
     canRestartEngine: () => !!tauriCoreNow(),
     isDesktop: () => DESKTOP,   // lets the UI tell a desktop keychain-store failure (token saved locally) from a browser no-op
     getSelectionRevision, getKey, setKey, setKeyPool, validateAndSetKeyPool, keyPoolSize, storeChannelToken, getModel, setModel, getProv, setProv, getBaseUrl, setBaseUrl, getReasoningEffort, setReasoningEffort, clearLegacyReasoningOff, normalizeReasoningEffort, init, configured, refreshCreditsConfigured, creditsEpoch: () => creditsEpoch, hasStoredCredential, setDesktopConfigured,
-    listModels, probeProvider, validateAndSetKey, priceOf, contextLimitOf, contextState, chat, cancel, haltAll, consent, consentAck, consentArgs, consentAnswer, summonAck, notebook,
+    listModels, probeProvider, validateAndSetKey, priceOf, contextLimitOf, contextState, contextRevision: () => contextRev, chat, cancel, haltAll, consent, consentAck, consentArgs, consentAnswer, summonAck, notebook,
     runRecoveries, prepareAutomaticRecovery, resolveRunRecovery, prepareReviewedRecovery,
     memoryProposals, memoryTurnin, memoryVeto, memoryReset, memoryRecords, memoryDeclined, memoryRestore, memoryPending, memoryPin, memoryEdit, memoryForget,
     studyProposals, studyPending,
@@ -1749,7 +1771,7 @@ const Harness = (() => {
     setTotals: t => { totals = { tokens: t.tokens || 0, cost: t.cost || 0, calls: t.calls || 0 }; },
     resetTotals: () => {
       totals = { tokens: 0, cost: 0, calls: 0 }; contextByKey = {}; runModels = {}; runConv = {};
-      overheadByModel = Object.create(null);
+      overheadByModel = Object.create(null); contextRev++;
       try { localStorage.removeItem(LS_OVERHEAD); } catch (_) {}   // a wipe must clear the persisted calibration too
     }
   };

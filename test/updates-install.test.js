@@ -24,7 +24,7 @@ function makeCase(opts) {
     if (cmd === 'open_external_url') { opened.push(args && args.url); return {}; }
     if (cmd === 'starnet_update_status') return { desktop: true, currentVersion: '1.0.0', pending: null };
     if (cmd === 'starnet_update_check') return { available: true, checkedAt: 10, update: { version: '2.0.0', body: '' } };
-    if (cmd === 'starnet_update_install') { installCalls++; if (o.installFails) throw new Error('native failed'); return {}; }
+    if (cmd === 'starnet_update_install') { installCalls++; if (o.installError) throw o.installError; if (o.installFails) throw new Error('native failed'); return {}; }
     return {};
   };
   const fetch = async (url, init) => {
@@ -155,6 +155,21 @@ async function ready(c) { await c.updates.init(); await c.updates.check(true, 't
     await handlers['up-install-force:click']();
     A.eq(c.prepareForce, [false, true], 'INSTALL ANYWAY re-asks the sidecar with force');
     A.eq(c.installCalls(), 1, 'and the forced, drained install proceeds');
+  }
+  {
+    // A refused download is the updater working. Tauri rejects the invoke with the plugin's bare Display text
+    // (minisign-verify 0.2.5 / reqwest): the Commander must read that NOTHING was installed, not a crypto library error.
+    const sig = makeCase({ installError: 'The signature verification failed' });
+    await ready(sig); const refused = await sig.updates.install();
+    A.ok(/^Update refused: the download did not match the signed StarNet release\./.test(refused.error), 'a bad signature reads as a refusal: ' + refused.error);
+    A.ok(/Nothing was installed; your current StarNet is unchanged\./.test(refused.error), 'and says the current install is untouched');
+    A.ok(/\(The signature verification failed\)$/.test(refused.error), 'the raw updater text stays as the detail');
+    const key = makeCase({ installError: 'The signature was created with a different key than the one provided' });
+    await ready(key); A.ok(/^Update refused:/.test((await key.updates.install()).error), 'a wrong-key release is a refusal too');
+    const net = makeCase({ installError: 'error decoding response body' });
+    await ready(net); const cut = await net.updates.install();
+    A.ok(/^The update download did not finish\. Nothing was installed/.test(cut.error), 'a dropped download says nothing was installed: ' + cut.error);
+    A.eq(net.isPreparedFrozen(), false, 'and the station is writable again');
   }
   {
     // the forward-version gate has no Update Center: it opens the same manual installer through this export

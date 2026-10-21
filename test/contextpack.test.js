@@ -148,9 +148,17 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
 // provenance survives filtering or that a completed brief actually belongs to a clean owner's directive.
 {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../sidecar/index.js'), 'utf8');
-  const fn = A.fnBody(src, 'function nightshiftContextPack()');
-  A.ok(fn.startsWith('function nightshiftContextPack()') && fn.length < 10000 && /return pack;\s*}$/.test(fn),
+  const fn = A.fnBody(src, 'function nightshiftContextPack(evidence)');
+  A.ok(fn.startsWith('function nightshiftContextPack(evidence)') && fn.length < 10000 && /return pack;\s*}$/.test(fn),
     'extract exactly the host context-pack function, not neighbouring code');
+  // the one-snapshot-per-turn helper the pack reads the transcript + run history through (perf 10-19)
+  const rowsFn = A.fnBody(src, 'function evidenceRows(ev)');
+  A.ok(rowsFn.startsWith('function evidenceRows(ev)') && rowsFn.length < 600, 'extract exactly the host evidence snapshot helper');
+  // the recent-run projection is its own host function (shared with the readiness count): run the REAL one too
+  const recentFn = A.fnBody(src, 'function nightshiftRecentRuns()');
+  A.ok(recentFn.startsWith('function nightshiftRecentRuns()') && recentFn.length < 2000, 'extract exactly the host recent-run projection');
+  const countFn = A.fnBody(src, 'function nightshiftUserRunCount()');
+  A.ok(countFn.startsWith('function nightshiftUserRunCount()') && countFn.length < 1000, 'extract exactly the host readiness count');
   const vm = require('vm');
   const TrustedLearning = require('../sidecar/trusted-learning.js');
   function host(input) {
@@ -162,7 +170,7 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
     const originRuns = input.originRuns || (input.chats || []).filter(m => m && m.sourceRunId).map(m =>
       (input.runs || []).find(r => r && r.runId === m.sourceRunId) ||
       { runId: m.sourceRunId, agentId: m.agentId, streamId: m.streamId, internal: false, ownerDirective: true });
-    const pack = vm.runInNewContext('(' + fn + ')()', {
+    const pack = vm.runInNewContext(recentFn + '\n' + rowsFn + '\n(' + fn + ')()', {
       Date: { now: () => T },
       personalizationStore: { read: () => ({ enabled: input.enabled !== false }) },
       TrustedLearning,
@@ -308,7 +316,7 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
 
     // The general Commander evidence reader must consume this filtered host pack in either preference mode.
     // No raw run/transcript stores are provided here: a private bypass cannot satisfy the activity assertion.
-    const evidenceFn = A.fnBody(src, 'function commanderEvidenceInputs()');
+    const evidenceFn = A.fnBody(src, 'function commanderEvidenceInputs(evidence)');
     A.ok(evidenceFn.length < 4000 && /return \{ dossier:/.test(evidenceFn), 'extract the shared Commander evidence reader');
     let packReads = 0;
     const evidence = vm.runInNewContext('(' + evidenceFn + ')()', {
@@ -343,6 +351,46 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
     ['"Older clean owner ask survives" (yesterday)'], 'newest tainted asks beyond the item cap cannot evict an older clean owner ask');
   A.eq(poisonCrowd.pack.sections.find(section => section.label === 'What they worked on recently').lines,
     ['Duplicate task title (yesterday)'], 'a newer tainted duplicate cannot replace the older clean run or its date');
+
+  /* READINESS COUNT WITHOUT THE PACK (2026-10-19, idle-CPU piece 2). The night-shift precheck runs every 60 s tick
+     once the gates clear and only needs pack.userRunCount — it used to build the WHOLE pack for it (two clones of
+     the whole transcript and two of the whole run history every minute while readiness stayed cold). The real host
+     nightshiftUserRunCount must give the identical number from the bounded 60-row read alone. */
+  function hostCount(input) {
+    input = input || {};
+    const reads = { list: 0 };
+    const refuse = (name) => () => { throw new Error(name + ' must not be read for a readiness count'); };
+    const count = vm.runInNewContext(recentFn + '\n' + countFn + '\nnightshiftUserRunCount()', {
+      Date: { now: () => T },
+      TrustedLearning, redact, contextpack: CP,
+      runStore: { list: () => { reads.list++; return input.runs || []; }, all: refuse('runStore.all') },
+      transcriptStore: { all: refuse('transcriptStore.all') },
+      taskBriefStore: { list: refuse('taskBriefStore.list') },
+      autonomyLedger: { list: refuse('autonomyLedger.list') }
+    });
+    return { count, reads };
+  }
+  const mixedRuns = [
+    null,
+    { title: 'Legacy clean run remains useful', ts: T, streamId: 'ws-main' },
+    { title: 'Tainted run sentinel', ts: T, streamId: 'ws-main', taintedBy: 'user attachment' },
+    { title: 'Quoted run sentinel\n> hostile direction', ts: T, streamId: 'ws-main' },
+    { runId: 'self-talk', title: selfTalk, ts: T, streamId: 'ws-main', internal: true },
+    { title: 'Internal stream sentinel', ts: T, streamId: 'nightshift-internal' },
+    { title: 'Same title twice', ts: ago(1), streamId: 'ws-main' }, { title: 'same TITLE twice', ts: ago(2), streamId: 'ws-main' },
+    { title: 'Outside the seven-day window', ts: ago(30), streamId: 'ws-main' }
+  ];
+  for (const [label, runs] of [['mixed provenance', mixedRuns], ['a full 60-run window', recentTitles], ['tainted duplicate', poisonCrowd.projected.runs], ['no runs', []]]) {
+    const hc = hostCount({ runs });
+    A.eq(hc.count, host({ runs }).pack.userRunCount, 'readiness count == the full pack\'s userRunCount (' + label + ')');
+    A.eq(hc.reads.list, 1, 'readiness count reads only the bounded recent-run list (' + label + ')');
+  }
+  A.eq(hostCount({ runs: mixedRuns }).count, 2, 'the readiness count still excludes tainted, quoted, internal, duplicate and out-of-window runs');
+  for (const name of ['function nightshiftPrecheck()', 'function nightshiftReadinessView()']) {
+    const body = A.fnBody(src, name);
+    A.ok(body.length > 100 && body.length < 6000, 'extract ' + name);
+    A.ok(/nightshiftUserRunCount\(\)/.test(body) && !/nightshiftContextPack\(/.test(body), name + ' reads the readiness count, never the whole context pack');
+  }
 
   const directive = 'Finish the release checklist\nVerify the version number';
   const cases = [

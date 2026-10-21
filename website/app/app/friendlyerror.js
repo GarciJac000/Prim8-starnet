@@ -404,13 +404,20 @@
      PER-MINUTE limit is not, and Gemini phrases one as "Quota exceeded for quota metric", which a bare
      /quota/ test swallowed. OpenAI's `insufficient_quota` is an empty wallet and stays billing. */
   const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)/;
-  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|rpm|tpm|requests per/;
+  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|\brpm\b|\btpm\b|requests per/;
+  // OpenRouter's free-model DAILY cap names itself — and says "requests per day", which the veto above would eat
+  const DAILY_FREE_CAP_RE = /free-models-per-day/;
+  function quotaSpent(low) { return DAILY_FREE_CAP_RE.test(low) || (QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low)); }
   const TERMINAL_BILLING_RE = /insufficient[_ ]?quota|exceeded your current quota|out of credit|add credits|payment required/;
   /* Mirrored from sidecar/providers/errorClass.js (REJECTED_KEY_RE / NO_CREDIT_RE) — keep the two in step. xAI
      answers a bad key with HTTP 400 "Incorrect API key provided", and a team with no prepaid credits with 403
      "…doesn't have any credits yet. You can purchase credits on https://console.x.ai/…" (2026-09-27). */
   const REJECTED_KEY_RE = /incorrect api key|invalid api key|api key (?:is )?(?:invalid|not valid|incorrect)|invalid x-api-key/;
-  const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low/;
+  const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low|key limit exceeded/;
+  // mirrored from errorClass.js: an upstream region refusal is the model being unavailable here, not a bad key
+  const REGION_REFUSAL_RE = /unsupported_country_region_territory|country,? region,? or territory not supported|not available in your (?:country|region)/;
+  // a provider adapter's own failure sentence ("openrouter http 403 — …", "openai-compatible http 403 - …")
+  const PROVIDER_HTTP_RE = /\b(?:openrouter|anthropic|gemini|codex|openai-compatible|grok \(xai\)|kimi for coding|xai) http \d{3}\b/;
   // the ONE sentence both classifier paths use for "no model is picked": the sidecar guard and the page preflight
   const NO_MODEL_RE = /\bno model selected\b/;
   /* WHICH grok failures mean "this account can't use Grok sign-in" (the allowlist yank)? Only ones that carry the
@@ -464,7 +471,9 @@
     if (s) {
       // OUR OWN sidecar's token gate (crash+respawn → stale X-StarNet-Token): a "sidecar HTTP 403" throw or a
       // "forbidden token/origin/host" body means reload for the fresh boot token — never the provider-key door.
-      if (s === 403 && (/sidecar http/.test(low) || /\bforbidden\b/.test(low))) return 'stale_session';
+      // …but a PROVIDER's own "Forbidden" (its adapter label names it) is the provider's refusal, never this page's token
+      if (s === 403 && (/sidecar http/.test(low) || (/\bforbidden\b/.test(low) && !PROVIDER_HTTP_RE.test(low)))) return 'stale_session';
+      if (s === 403 && REGION_REFUSAL_RE.test(low)) return 'model_not_found';
       if (s === 401 || s === 403) return NO_CREDIT_RE.test(low) ? 'billing' : 'auth';
       if (s === 402) return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
       if (s === 404) return 'model_not_found';
@@ -475,7 +484,7 @@
          `insufficient_quota` with 429 — neither clears by waiting, and offering ↻ Try again on either is a
          doomed instruction. Mirrors the same split in sidecar/providers/errorClass.js; keep the two in step. */
       if (s === 429) {
-        if (QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low)) return 'quota_exhausted';
+        if (quotaSpent(low)) return 'quota_exhausted';
         if (TERMINAL_BILLING_RE.test(low)) return 'billing';
         return 'rate_limit';
       }
@@ -499,7 +508,7 @@
     // message patterns (no status / in-band error text)
     // in-band provider overload phrasing, mirrored from sidecar/providers/errorClass.js — keep the two in step
     if (/overloaded|over capacity|temporarily unavailable|try again later/.test(low)) return 'provider_server_error';
-    if (QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low)) return 'quota_exhausted';
+    if (quotaSpent(low)) return 'quota_exhausted';
     if (/rate limit|too many requests|rate-limit/.test(low)) return 'rate_limit';
     // (kept in step with sidecar/providers/errorClass.js; a sign-in SUBSCRIPTION's "quota"/"insufficient" is re-read as its
     // spent plan allowance in friendlyError, which knows the provider — never "out of credit")
@@ -705,13 +714,21 @@
     // provider only: a sign-in subscription was turned into quota_exhausted above
     if (kind === 'billing') {
       const provider = providerFromRaw(raw);
-      const userMessage = provider && PROVIDER_PROSE[provider] ? 'Your ' + PROVIDER_PROSE[provider] + ' account is out of credit — top it up, then try again.' : k.msg;
+      // OpenRouter's per-KEY credit limit: the key and the account may both be fine — the limit set on the key is the lever
+      const nm = PROVIDER_PROSE[provider] || 'provider';
+      const userMessage = /key limit exceeded/.test(raw.toLowerCase())
+        ? 'This ' + nm + " key reached the credit limit set on it — raise that key's limit in your " + nm + ' key settings, or use a different key.'
+        : provider && PROVIDER_PROSE[provider] ? 'Your ' + PROVIDER_PROSE[provider] + ' account is out of credit — top it up, then try again.' : k.msg;
       return { userMessage: userMessage, kind: kind, retryable: k.retryable, action: k.action, provider: provider, raw: raw };
     }
     // a spent plan allowance names the plan when it is a sign-in subscription's (quotaMessage); otherwise the neutral copy
     if (kind === 'quota_exhausted') {
       const provider = providerFromRaw(raw);
-      return { userMessage: quotaMessage(provider), kind: kind, retryable: k.retryable, action: k.action, provider: provider, raw: raw };
+      // OpenRouter's free-model daily cap is not a plan: the levers are a paid model, credits, or tomorrow
+      const msg = DAILY_FREE_CAP_RE.test(raw.toLowerCase())
+        ? "OpenRouter's daily limit for free models is used up — it resets tomorrow (UTC), not in seconds. To keep working now, pick a paid model in the COMMS model dock, or add credits on OpenRouter to raise the free limit."
+        : quotaMessage(provider);
+      return { userMessage: msg, kind: kind, retryable: k.retryable, action: k.action, provider: provider, raw: raw };
     }
     if (kind === 'spend_unknown') {
       return { userMessage: spendUnknownMessage(raw), kind: kind, retryable: k.retryable, action: k.action, raw: raw };

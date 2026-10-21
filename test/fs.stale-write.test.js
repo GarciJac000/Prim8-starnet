@@ -4,8 +4,10 @@
    agent read it and the moment it writes back. Nothing noticed, so the write silently reverted the other
    change — the classic lost update, and the harder kind to spot because both sides believe they succeeded.
 
-   The guard is scoped to fs.write alone, and these assertions are the reason: fs.edit / fs.append / fs.patch
-   are read-modify-write inside ONE call and cannot clobber, so guarding them would only invent false refusals.
+   The read STAMP was once scoped to fs.write alone, on the theory that fs.edit / fs.append / fs.patch apply to
+   what is on disk when they write. They then landed on bytes the agent never saw and re-stamped the file as
+   observed, so the agent's next fs.write erased the other change: since 2026-10-21 they refuse too (block 6;
+   test/fs.read-version.test.js covers the check, test/fs.concurrent-mutations.test.js the in-flight re-read).
    Uses a real temp dir with explicitly stamped mtimes so the drift is genuine, not simulated. */
 'use strict';
 const A = require('./_assert.js');
@@ -78,20 +80,26 @@ async function rejects(p, re, msg) {
     A.ok(/Wrote d\.js/.test(r.content), 'three writes in a row all succeed (the guard is not a rate limit)');
   }
 
-  // ---- 6. NO FALSE REFUSALS on the writers that merge. This is why the guard is fs.write-only. ----
+  // ---- 6. the merging writers refuse too (2026-10-21 read-version check): they used to land on bytes the agent never
+  // saw and re-stamp the file as observed, so the agent's next fs.write erased the other change. Full coverage lives in
+  // test/fs.read-version.test.js; this pins that the old "never refused" promise is gone and the way out still works.
   {
     await writeTool.run({ path: 'e.js', content: 'alpha beta' }, CTX);
     await readTool.run({ path: 'e.js' }, CTX);
     await externalChange('e.js', 'alpha GAMMA');
-    // fs.edit re-reads and replaces an exact match, so it lands on the CURRENT text — no clobber, no refusal.
+    await rejects(editTool.run({ path: 'e.js', find: 'alpha', replace: 'omega' }, CTX), /^edit refused: e\.js changed on disk since you last read or wrote it/, 'fs.edit over a file that changed since the read is refused');
+    A.eq(await fsp.readFile(absOf('e.js'), 'utf8'), 'alpha GAMMA', "the external writer's change is untouched");
+    await readTool.run({ path: 'e.js' }, CTX);
     const r = await editTool.run({ path: 'e.js', find: 'alpha', replace: 'omega' }, CTX);
-    A.ok(/Edited e\.js/.test(r.content), 'fs.edit is never refused — it merges by construction');
-    A.eq(await fsp.readFile(absOf('e.js'), 'utf8'), 'omega GAMMA', "the external writer's change survived the edit");
+    A.ok(/Edited e\.js/.test(r.content), 'after a re-read the edit lands');
+    A.eq(await fsp.readFile(absOf('e.js'), 'utf8'), 'omega GAMMA', 'on the current text');
 
     await readTool.run({ path: 'e.js' }, CTX);
     await externalChange('e.js', 'THEIRS');
+    await rejects(appendTool.run({ path: 'e.js', content: '+mine' }, CTX), /^append refused: e\.js changed on disk since you last read or wrote it/, 'fs.append likewise');
+    await readTool.run({ path: 'e.js' }, CTX);
     const ap = await appendTool.run({ path: 'e.js', content: '+mine' }, CTX);
-    A.ok(/Appended to e\.js/.test(ap.content), 'fs.append is never refused — it appends to what it finds');
+    A.ok(/Appended to e\.js/.test(ap.content), 'after a re-read the append lands');
     A.eq(await fsp.readFile(absOf('e.js'), 'utf8'), 'THEIRS+mine', 'the append preserved the other content');
   }
 

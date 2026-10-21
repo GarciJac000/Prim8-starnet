@@ -38,6 +38,24 @@
     return rateLimits;
   }
 
+  /* SHARED MODEL CATALOG (providers/catalog-cache.js). A run builds a fresh adapter, and each adapter kept its /models
+     list on that instance: the run's context was sized from a COLD catalog (131072 assumed for a 1M Gemini, for a
+     65536 Ollama) and every fresh adapter re-fetched the list on its first stream. Attached once at boot, like the
+     rate-limit tracker. A keyed adapter gets a scope per (provider, base URL, credential fingerprint), so one key's
+     list never answers for another; an OAuth adapter (codex, grok, kimi) gets no list scope, because its token
+     rotates and accounts must never share a list, and reads only the key-independent window facts. Absent = every
+     adapter behaves exactly as before. */
+  let catalogCache = null;
+  function attachCatalogCache(cache) {
+    catalogCache = (cache && typeof cache.bind === 'function' && typeof cache.scopeOf === 'function') ? cache : null;
+    if (typeof openrouter.attachCatalogCache === 'function') openrouter.attachCatalogCache(catalogCache);
+    return catalogCache;
+  }
+  function catalogFor(id, baseUrl, credential, keyed) {
+    if (!catalogCache) return {};
+    return { catalogCache, catalogScope: keyed ? catalogCache.scopeOf(id, baseUrl, credential) : null };
+  }
+
   // Ollama's default port, or a host named for it (a reverse proxy like ollama.lan). Anything else stays generic.
   function looksLikeOllama(baseUrl) {
     try { const u = new URL(String(baseUrl || '')); return u.port === '11434' || /ollama/i.test(u.hostname); }
@@ -106,13 +124,13 @@
     if (rateLimits && typeof opts.fetch === 'function') opts = Object.assign({}, opts, { fetch: rateLimits.wrapFetch(id, opts.fetch) });
 
     if (profile.adapter === 'codex') {
-      return codex.makeCodexProvider({
+      return codex.makeCodexProvider(Object.assign({
         fetch: opts.fetch,
         token: opts.token,
         renewToken: opts.renewToken,   // optional 401-recovery seam — the host's force-refresh (see codex.js header)
         baseUrl: opts.baseUrl || profile.baseUrl,
         reasoningEffort: opts.reasoningEffort
-      });
+      }, catalogFor(id, opts.baseUrl || profile.baseUrl, null, false)));
     }
     if (profile.adapter === 'openrouter') {
       return openrouter.makeOpenRouterProvider({
@@ -147,7 +165,7 @@
       const mergedHeaders = (profile.extraHeaders || opts.headers)
         ? Object.assign({}, profile.extraHeaders || {}, opts.headers || {})
         : undefined;
-      return openaiCompatible.makeOpenAICompatibleProvider({
+      return openaiCompatible.makeOpenAICompatibleProvider(Object.assign({
         fetch: opts.fetch,
         clock: opts.clock,
         // device-OAuth errors must carry the provider's NAME (e.g. "Grok (xAI) http 401 - …") so a mid-run
@@ -196,25 +214,25 @@
         headers: mergedHeaders,
         // run attribution header (starnet only — the profile names it; see openai-compatible requestHeaders)
         runIdHeader: typeof profile.runIdHeader === 'string' ? profile.runIdHeader : undefined
-      });
+      }, catalogFor(id, opts.baseUrl || profile.baseUrl, opts.key, !isDeviceOAuth)));
     }
     if (profile.adapter === 'anthropic') {
-      return anthropic.makeAnthropicProvider({
+      return anthropic.makeAnthropicProvider(Object.assign({
         fetch: opts.fetch,
         clock: opts.clock,
         key: opts.key,
         baseUrl: opts.baseUrl || profile.baseUrl,
         reasoningEffort: opts.reasoningEffort
-      });
+      }, catalogFor(id, opts.baseUrl || profile.baseUrl, opts.key, true)));
     }
     if (profile.adapter === 'gemini') {
-      return gemini.makeGeminiProvider({
+      return gemini.makeGeminiProvider(Object.assign({
         fetch: opts.fetch,
         clock: opts.clock,
         key: opts.key,
         baseUrl: opts.baseUrl || profile.baseUrl,
         reasoningEffort: opts.reasoningEffort
-      });
+      }, catalogFor(id, opts.baseUrl || profile.baseUrl, opts.key, true)));
     }
     if (profile.adapter === 'claude-cli') {
       // A local child process, not HTTP: no fetch/key/baseUrl — the CLI's own sign-in is the credential.
@@ -235,6 +253,7 @@
     defaultReasoningEffortForProvider: registry.defaultReasoningEffortForProvider,
     providerRequiresKey: registry.providerRequiresKey,
     providerRequiresBaseUrl: registry.providerRequiresBaseUrl,
-    attachRateLimits: attachRateLimits
+    attachRateLimits: attachRateLimits,
+    attachCatalogCache: attachCatalogCache
   };
 });
