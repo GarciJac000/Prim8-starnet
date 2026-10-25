@@ -48,6 +48,10 @@ async function lostAckThenDeath(opts) {
   headDoc.workstreams = headDoc.workstreams.concat([{ id: 'S2', history: [turn('user', 'two')] }]);
   const head = host.saveStore.save('agent', Object.assign({}, headDoc, { _saveRevision: cs.revision(), _saveClient: cs.writerId(), updatedAt: Date.now(), _saveDirty: true }), { compareRevision: true });
   A.ok(head.ok === true, 'fixture: the station writes the window\'s unacknowledged save');
+  if (opts && opts.legacyFile) {   // a station file written by 0.14.0 or earlier: its wrapper names no writer
+    const p = path.join(root, 'agent.save.json'), w = JSON.parse(fs.readFileSync(p, 'utf8'));
+    delete w.revision; delete w.client; fs.writeFileSync(p, JSON.stringify(w));
+  }
   await tick();
   // …and the window's cache holds its newest edit on the revision it last heard (never sent: the window dies here)
   const newest = clone(headDoc); newest.workstreams.push({ id: 'S3', history: [turn('user', 'three')] });
@@ -79,25 +83,32 @@ async function lostAckThenDeath(opts) {
       A.eq([cached._saveDirty, cached._saveRevision], [false, host.saveStore.load('agent')._saveRevision], 'a: the browser cache is clean at the station revision');
     }
 
-    // ================= b. a cache OLDER than the head that same window wrote gives way to the station file =================
+    // ================= b. a cache that reads OLDER than the head its own window wrote: the station file is the base =================
+    // (the cache could not take the newer saves — or the clock stepped back: review 10-25 #4 — so it may still hold
+    // something the station file lacks; that comes back into the station and the cache is kept whole beside it)
     {
       const { root, cache } = await lostAckThenDeath({ cacheExtra: { updatedAt: 1 } });
-      const stale = JSON.parse(cache.get('starnet.save')); stale.workstreams = stale.workstreams.filter(w => w.id !== 'S2' && w.id !== 'S3');
-      cache.set('starnet.save', JSON.stringify(stale));             // the cache could not take the newer saves: it holds S1 only
-      const before = fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8');
+      const stale = JSON.parse(cache.get('starnet.save'));
+      stale.workstreams = stale.workstreams.filter(w => w.id !== 'S2' && w.id !== 'S3').concat([{ id: 'S0-unsent', history: [turn('user', 'only in this cache')] }]);
+      stale.agent = Object.assign({}, stale.agent, { name: 'OLD-NAME' });
+      cache.set('starnet.save', JSON.stringify(stale));
       const host = sidecar(root);
       const Z = page(host, cache);
       const resumed = await Z.reconcile(stale);
-      A.eq(titles(resumed), ['general', 'S1', 'S2'], 'b: the window resumes the station file, which holds that window\'s newer save');
+      A.eq(titles(resumed), ['general', 'S1', 'S2', 'S0-unsent'], 'b: the window resumes the station file, with the cache\'s one session brought into it');
+      A.eq(resumed.agent.name, 'NOVA', 'b: the station file\'s newer crew stands over the older cache');
       await Z.flush({ force: true });
       A.eq(Z.health().conflict, null, 'b: no conflict');
-      A.eq(fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8'), before, 'b: the older cache never replaced the station file');
+      A.eq(titles(host.saveStore.load('agent')), titles(resumed), 'b: the station file holds what the window resumed');
+      const note = Z.mergeNotice();
+      A.ok(note && note.base === 'station' && note.added === 1 && /^agent\.save-conflict-kept-\d+-/.test(String(note.kept)), 'b: reported, with the cache kept whole under its own name (' + JSON.stringify(note) + ')');
+      A.eq(JSON.parse(fs.readFileSync(path.join(root, note.kept), 'utf8')).agent.name, 'OLD-NAME', 'b: nothing the cache held is lost');
       A.eq(JSON.parse(cache.get('starnet.save'))._saveDirty, false, 'b: the cache now holds the station file, clean');
     }
 
     // ================= c. a cache from 0.14.0 or earlier is MERGED at boot, never refused =================
     {
-      const { root, cache } = await lostAckThenDeath({ legacy: true,
+      const { root, cache } = await lostAckThenDeath({ legacy: true, legacyFile: true,
         headExtra: d => ({ workstreams: d.workstreams.concat([{ id: 'only-on-station', history: [turn('user', 'made by a routine')] }, { id: 'deleted-in-window', history: [turn('user', 'x')] }]),
           stationStats: { ratingSyncAt: 50, xp: 70 }, agent: Object.assign({}, d.agent, { stats: { xp: 70 } }) }),
         cacheExtra: { deletedIds: ['deleted-in-window'], stationStats: { ratingSyncAt: 10, xp: 5 } } });
@@ -105,7 +116,7 @@ async function lostAckThenDeath(opts) {
       legacy.workstreams = legacy.workstreams.filter(w => w.id !== 'only-on-station' && w.id !== 'deleted-in-window');
       legacy.agent = Object.assign({}, legacy.agent, { stats: { xp: 5 } });
       cache.set('starnet.save', JSON.stringify(legacy));
-      A.ok(!('_saveClient' in legacy), 'fixture: the cache names no window (0.14.0)');
+      A.ok(!('_saveClient' in legacy), 'fixture: the cache names no window (0.14.0), and neither does the station file');
       const stationBefore = fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8');
       const host = sidecar(root);
       const Z = page(host, cache);
@@ -171,6 +182,93 @@ async function lostAckThenDeath(opts) {
       A.eq(fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8'), before, 'e: the station file is untouched');
       A.eq([Z.mergeNotice(), backups(root).length], [null, 0], 'e: nothing was merged');
       A.eq(conflictFiles(root).length, 1, 'e: the copy is preserved beside the station');
+    }
+
+    // ================= f. a STALE SECOND TAB is never the base over the live one (hostile review 10-25 #2) =================
+    {
+      const root = workspace();
+      const host0 = sidecar(root);
+      const shared = new Map();                                     // two tabs of one browser share the cache
+      const live = page(host0, shared), stale = page(host0, shared);
+      await live.reconcile(null); await stale.reconcile(null);
+      const start = stationDoc({ workstreams: [{ id: 'general', title: null, history: [turn('user', 'hi')] }, { id: 'OLD', history: [turn('user', 'old')] }] });
+      persist(live, shared, start); await live.flush({ force: true });
+      // the live tab renames its agent and deletes OLD
+      const moved = Object.assign(clone(start), { agent: Object.assign({}, start.agent, { name: 'RENAMED' }), deletedIds: ['OLD'], workstreams: start.workstreams.filter(w => w.id !== 'OLD') });
+      persist(live, shared, moved); await live.flush({ force: true });
+      await tick();
+      // the stale tab (still on the first save) writes the shared cache last, with one session of its own; it is refused
+      const staleDoc = Object.assign(clone(start), { workstreams: start.workstreams.concat([{ id: 'stale-tab', history: [turn('user', 's')] }]) });
+      persist(stale, shared, staleDoc); A.eq(await stale.flush({ force: true }), false, 'fixture: the stale tab is refused');
+      const host = sidecar(root);
+      const Z = page(host, shared);                                  // the stale tab is reloaded
+      const resumed = await Z.reconcile(JSON.parse(shared.get('starnet.save')));
+      A.eq(resumed.agent.name, 'RENAMED', 'f: the live tab\'s rename stands');
+      A.ok(!titles(resumed).includes('OLD'), 'f: the live tab\'s delete stands');
+      A.ok(titles(resumed).includes('stale-tab'), 'f: the stale tab\'s own session is brought in');
+      A.eq(Z.mergeNotice() && Z.mergeNotice().base, 'station', 'f: the station file was the base');
+      A.eq(host.saveStore.load('agent').agent.name, 'RENAMED', 'f: and the station file still says so');
+    }
+
+    // ================= g. the dead window's id rides ONE resend, never this page's later saves (review #3) =================
+    {
+      const { root, cache, writer } = await lostAckThenDeath();
+      const host = sidecar(root);
+      let firstPost = true;
+      // the dead window is not dead after all: its own newer save lands between this page's read and its resend
+      const proxy = { fetch: (u, o) => {
+        if (firstPost && o && o.method === 'POST' && String(u) === '/api/save') {
+          firstPost = false;
+          const cur = host.saveStore.load('agent');
+          const doc4 = Object.assign(clone(cur), { workstreams: cur.workstreams.concat([{ id: 'X-by-A', history: [turn('user', 'a')] }]), _saveClient: writer, updatedAt: Date.now() + 5000, _saveDirty: true });
+          A.ok(host.saveStore.save('agent', doc4, { compareRevision: true }).ok, 'fixture: the first window\'s own newer save lands first');
+        }
+        return host.fetch(u, o);
+      } };
+      const Z = page(proxy, cache);
+      const resumed = await Z.reconcile(JSON.parse(cache.get('starnet.save')));
+      A.eq(await Z.flush({ force: true }), false, 'g: the resend as the first window is refused — that window saved newer since');
+      persist(Z, cache, Object.assign(clone(resumed), { workstreams: resumed.workstreams.concat([{ id: 'Z-later', history: [turn('user', 'z')] }]) }));
+      A.eq(await Z.flush({ force: true }), false, 'g: this page\'s next save is its own: refused, never passed off as the first window');
+      A.ok(titles(host.saveStore.load('agent')).includes('X-by-A'), 'g: the first window\'s newer save stays in the station file');
+      A.ok(conflictFiles(root).length >= 1, 'g: this page\'s work is preserved beside it');
+    }
+
+    // ================= h. the merge's answer never arrived: the page reads again and resumes the merge (review #1) =================
+    {
+      const { root, cache } = await lostAckThenDeath({ legacy: true, legacyFile: true,
+        headExtra: d => ({ workstreams: d.workstreams.concat([{ id: 'ONLY-ON-STATION', history: [turn('user', 'r')] }]) }) });
+      const legacy = JSON.parse(cache.get('starnet.save')); legacy.workstreams = legacy.workstreams.filter(w => w.id !== 'ONLY-ON-STATION');
+      cache.set('starnet.save', JSON.stringify(legacy));
+      const host = sidecar(root);
+      const proxy = { fetch: async (u, o) => {
+        const r = await host.fetch(u, o);
+        if (String(u) === '/api/save/adopt') throw new Error('the answer was lost');   // the merge landed; the page never hears
+        return r;
+      } };
+      const Z = page(proxy, cache);
+      const resumed = await Z.reconcile(legacy);
+      A.ok(titles(resumed).includes('ONLY-ON-STATION') && titles(resumed).includes('S3'), 'h: the page resumes the merge it never heard about (' + titles(resumed) + ')');
+      A.ok(Z.mergeNotice() && Z.mergeNotice().late === true, 'h: and says a merge happened');
+      await Z.flush({ force: true });
+      persist(Z, cache, Object.assign(clone(resumed), { workstreams: resumed.workstreams.concat([{ id: 'after', history: [turn('user', 'after')] }]) }));
+      A.eq(await Z.flush({ force: true }), true, 'h: its next save lands');
+      A.ok(titles(host.saveStore.load('agent')).includes('ONLY-ON-STATION'), 'h: and the station file\'s own session is still there');
+    }
+
+    // ================= i. two pages booting on the same old cache: the second moves nothing under the first (review #5) =================
+    {
+      const { root, cache } = await lostAckThenDeath({ legacy: true, legacyFile: true });
+      const copy = new Map(cache);                                   // the app and a restored tab both read the cache at boot
+      const host = sidecar(root);
+      const P1 = page(host, cache), P2 = page(host, copy);
+      const r1 = await P1.reconcile(JSON.parse(cache.get('starnet.save')));
+      const rev1 = host.saveStore.load('agent')._saveRevision;
+      await P2.reconcile(JSON.parse(copy.get('starnet.save')));
+      A.eq(host.saveStore.load('agent')._saveRevision, rev1, 'i: the second page\'s merge brings nothing, so it writes nothing');
+      persist(P1, cache, Object.assign(clone(r1), { workstreams: r1.workstreams.concat([{ id: 'P1-next', history: [turn('user', 'p')] }]) }));
+      A.eq(await P1.flush({ force: true }), true, 'i: the first page is not frozen: its next save lands');
+      A.eq(P1.health().conflict, null, 'i: with no conflict');
     }
   } catch (e) {
     A.ok(false, 'threw: ' + (e && e.stack || e));

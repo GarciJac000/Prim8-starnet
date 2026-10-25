@@ -55,7 +55,7 @@ function sidecar(root, storeFs) {
   const api = vm.runInNewContext("let _remoteLooksMemo = { stamp: '', looks: null };\nlet _stationEpochMemo = { stamp: '', epoch: 1 };\n" + handlers.join('\n') +
     '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore, handleSaveAdopt })', {
     saveStore, workspaceDegraded: false, growthRatings: { latestTs: () => 0 }, readBody: async req => req.body, failNote: () => {},
-    observeDeletedSessions: () => [],   // the deleted-session ledger feed every landed station save calls (qa/bugs/3e926b6a)
+    observeDeletedSessions: () => [], Buffer,   // the deleted-session ledger feed every landed station save calls (qa/bugs/3e926b6a)
     require: m => { if (m === './save-restore.js') return require('../sidecar/save-restore.js'); throw new Error('unexpected require ' + m); },
     publicWorkspaceLineage: () => ({ version: 1, priorInstallEvidence: false, onboardingAllowed: true, evidence: [] }), URL
   });
