@@ -6021,9 +6021,11 @@ const App = (() => {
     const merge = (typeof CloudSave !== 'undefined' && CloudSave.mergeNotice) ? CloudSave.mergeNotice() : null;
     if (merge) {
       const n = merge.added + merge.extended + merge.copied, s = k => k === 1 ? '' : 's';
-      const line = merge.base === 'window'
+      const line = merge.late
+        ? 'Your unsent changes from last time were merged into the station file before this window opened. The station file from before is kept beside it.'
+        : merge.base === 'window'
         ? 'Your newest changes from last time had not reached the station file; they are in it now' + (n ? ', with ' + n + ' session' + s(n) + ' only the station file held' : '') + '. The station file from before is kept as ' + (merge.backup || 'a backup beside it') + '.'
-        : 'The station file was newer than this window’s unsent changes, so it was kept' + (n ? ', with ' + n + ' session' + s(n) + ' from this window added' : '') + '. This window’s whole save is kept beside it' + (merge.kept ? ' as ' + merge.kept : '') + '.';
+        : 'The station file was kept over this window’s unsent changes from last time' + (n ? ', with ' + n + ' session' + s(n) + ' from this window added' : '') + '. This window’s whole save is kept beside it' + (merge.kept ? ' as ' + merge.kept : '') + '.';
       setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify(line, 'warn'); } catch (_) {} }, 1500);
     }
     // a window's refused save left on the station may hold sessions this station lacks: offer them back once it is up
