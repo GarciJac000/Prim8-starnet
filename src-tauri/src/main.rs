@@ -86,9 +86,10 @@ struct AppState {
     // Set once setup has built the main window. Before that a second launch must not treat the
     // missing window as a dead instance (see webview_recovery::second_launch_action).
     main_window_built: AtomicBool,
-    // This instance was started by `starnet` (the terminal) with `--background`: its window is parked hidden
-    // and, until someone opens it, the terminal sessions' end decides whether it keeps running (see
-    // terminal_sessions_over). Cleared the moment a person opens StarNet, and once that decision is made.
+    // This instance was started by `starnet` (the terminal) with `--background`: its window starts parked and
+    // it runs while the terminal sessions do; their end decides whether it keeps running (terminal_sessions_over,
+    // which leaves an open window alone). Cleared once that decision is made, or by a window close with no
+    // session left alive.
     launched_for_terminal: AtomicBool,
     // The `starnet` processes it runs for (the one that started it and any that joined), checked by
     // watch_terminal_sessions. Read and changed together with launched_for_terminal, under this lock.
@@ -2873,7 +2874,7 @@ fn decide_close(app: &AppHandle, st: &AppState) {
 
 /// Started for the terminal (terminal_session.rs): every 2 s, drop the `starnet` sessions that have exited. When none
 /// is left, decide once (terminal_sessions_over). A crashed or closed terminal counts as ended — the app watches the
-/// process and never waits for a goodbye. Stops the moment a person opens StarNet: it is theirs then.
+/// process and never waits for a goodbye. Stops once that decision is made, or a window close found no session left.
 fn watch_terminal_sessions(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -2903,9 +2904,22 @@ fn watch_terminal_sessions(app: AppHandle) {
     });
 }
 
+/// Is a `starnet` session this StarNet runs for still alive? (The ones that have exited are dropped.)
+fn terminal_sessions_live(st: &AppState) -> bool {
+    let mut pids = st
+        .terminal_pids
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !st.launched_for_terminal.load(Ordering::SeqCst) {
+        return false;
+    }
+    pids.retain(|pid| terminal_session::terminal_running(*pid));
+    !pids.is_empty()
+}
+
 /// Every `starnet` session this StarNet ran for has ended. If nobody has opened the window meanwhile, decide exactly
 /// as a window close does — a station with routines armed (or the close-to-tray preference) stays in the tray and an
-/// idle one quits, leaving nothing running unseen. A StarNet a person opened is theirs: the terminal never closes it.
+/// idle one quits, leaving nothing running unseen. A window that is open is a person's: the terminal never closes it.
 fn terminal_sessions_over(app: &AppHandle, st: &AppState) {
     let visible = app
         .get_webview_window("main")
@@ -2928,7 +2942,7 @@ fn terminal_sessions_over(app: &AppHandle, st: &AppState) {
 
 /// A second launch with the terminal's flags: another `starnet` session attaching to the running station. A StarNet
 /// the terminal started runs for this session too, so the first one ending never closes the station under it; a
-/// StarNet a person opened is theirs and only notes it. Never a window, either way.
+/// StarNet a person started is theirs and only notes it. Never a window, either way.
 fn join_terminal_session(app: &AppHandle, pid: u32) {
     let joined = app
         .try_state::<AppState>()
@@ -3121,9 +3135,16 @@ fn build_main_window(
                         app2.exit(0);
                         return;
                     };
-                    // a person closed it: whatever the terminal started, this close is theirs to decide
-                    state.launched_for_terminal.store(false, Ordering::SeqCst);
-                    decide_close(&app2, state.inner());
+                    let st = state.inner();
+                    // closed while a `starnet` session it runs for is still alive: it keeps running for that
+                    // session, and the session's end decides exactly as this close would have — never a
+                    // station closed under a terminal that is still using it
+                    if terminal_sessions_live(st) {
+                        stay_resident_or_quit(&app2, st, "a starnet session still uses this station");
+                        return;
+                    }
+                    st.launched_for_terminal.store(false, Ordering::SeqCst);
+                    decide_close(&app2, st);
                 });
             }
         });
@@ -5037,10 +5058,8 @@ fn main() {
                 join_terminal_session(app, pid);
                 return;
             }
-            // a person opening StarNet: it is theirs now — the terminal sessions ending never close it
-            if let Some(state) = app.try_state::<AppState>() {
-                state.launched_for_terminal.store(false, Ordering::SeqCst);
-            }
+            // a person opening StarNet: revealed as always. The terminal sessions it runs for stay tracked — their end
+            // never closes a window that is open, and a close while one is alive waits for it (terminal_sessions_live)
             let win = app.get_webview_window("main");
             // No managed state yet = setup is still booting the sidecar: this instance is starting.
             let (built, rebuilding) = app
