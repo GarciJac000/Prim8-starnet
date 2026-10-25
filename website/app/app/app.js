@@ -1634,7 +1634,9 @@ const App = (() => {
     const worksignal = (typeof WorkSignalStore !== 'undefined') ? WorkSignalStore.serialize() : undefined;   // the capability-usage histogram (adaptive recruitment)
     const roster = liveAgents();
     const dossier = (typeof DossierStore !== 'undefined') ? DossierStore.serialize() : undefined;   // the station-wide Commander model
-    const saveState = Object.assign({ _saveDirty: true, _saveRevision: typeof CloudSave !== 'undefined' && CloudSave.revision ? CloudSave.revision() : 0, agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, reasoningMigrated: '0125' /* = REASONING_MIGRATION; a literal so persist() also runs when lifted alone */, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize());
+    // _saveClient: the window whose work this is (CloudSave.writerId), in the browser cache too, so a reopened window can
+    // prove a cached save left behind by a crash is that window's newer work (cloudsave reconcile)
+    const saveState = Object.assign({ _saveDirty: true, _saveRevision: typeof CloudSave !== 'undefined' && CloudSave.revision ? CloudSave.revision() : 0, _saveClient: typeof CloudSave !== 'undefined' && CloudSave.writerId ? CloudSave.writerId() : undefined, agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, reasoningMigrated: '0125' /* = REASONING_MIGRATION; a literal so persist() also runs when lifted alone */, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize());
     // #121 WRITE-THROUGH: build the envelope ONCE and always queue it for the station file. The browser cache holds the
     // whole save under one key and refuses it past the browser's per-site cap; gating the station file on that write
     // froze BOTH copies at the first failure, so every restart reverted the station.
@@ -6013,6 +6015,16 @@ const App = (() => {
         try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify(line, recovery.kind === 'recovered' ? 'warn' : 'bad'); } catch (_) {}
         try { if (typeof CloudSave !== 'undefined' && CloudSave.ackRecovery) CloudSave.ackRecovery(); } catch (_) {}
       }, 1500);
+    }
+    // A REOPENING WINDOW'S UNSENT SAVE WAS MERGED into the station file (cloudsave reconcile → POST /api/save/adopt): say so
+    // once, with where the copies from before the merge are kept. Never claims more than the station's answer.
+    const merge = (typeof CloudSave !== 'undefined' && CloudSave.mergeNotice) ? CloudSave.mergeNotice() : null;
+    if (merge) {
+      const n = merge.added + merge.extended + merge.copied, s = k => k === 1 ? '' : 's';
+      const line = merge.base === 'window'
+        ? 'Your newest changes from last time had not reached the station file; they are in it now' + (n ? ', with ' + n + ' session' + s(n) + ' only the station file held' : '') + '. The station file from before is kept as ' + (merge.backup || 'a backup beside it') + '.'
+        : 'The station file was newer than this window’s unsent changes, so it was kept' + (n ? ', with ' + n + ' session' + s(n) + ' from this window added' : '') + '. This window’s whole save is kept beside it' + (merge.kept ? ' as ' + merge.kept : '') + '.';
+      setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify(line, 'warn'); } catch (_) {} }, 1500);
     }
     // THE BOOT OFFER (StationUI.offerPreservedSaves) IS HELD for 0.14.0: its final review left two cases where a closed
     // window's copy could stop being offered (a transient read error settles it; "Not now" hides older copies never shown).
