@@ -1460,9 +1460,11 @@ function runDashboard(station, opts) {
     if (a && !((a.onboarded === undefined) ? !a.purpose : !a.onboarded)) return false;   // the app's own needsAwakening
     ui.wake = { log: [], ask: null, stage: { title: 'THE AWAKENING', detail: '' }, speaker: 'STARNET', feedKey: null, note: '', typing: false, ff: false };
     paint();
-    // one setup at a time: the app open on this station is mid-setup itself, and a prior install's station is the app's to recover
+    /* one setup at a time: the app runs this station (open, or in the background for a terminal) and its page holds the
+       setup it started — a save written from here would leave that page stale. Quitting it never helps now: `starnet`
+       starts it again. A prior install's station is the app's to recover. */
     if (station.mode === 'attached' && station.workspace) {
-      await wakeIO.say([{ text: 'the StarNet app is open on this station and its setup isn’t finished. finish creating your Overseer in the StarNet window — or quit the app and run starnet again to do it here.', cps: 60 }], { who: 'STARNET' });
+      await wakeIO.say([{ text: 'StarNet’s setup isn’t finished on this station. open StarNet — it’s already running — and finish creating your Overseer in its window, then come back here.', cps: 60 }], { who: 'STARNET' });
       return true;
     }
     if (!a && !boot && r.json.lineage && r.json.lineage.priorInstallEvidence) {
