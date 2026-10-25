@@ -1357,7 +1357,8 @@ const Chat = (() => {
     wireCrewCapture(); // P3.2: record each dispatched worker's forwarded run-end spend so a 👍 on a crew run splits XP honestly (registers once)
     wireCuriosity();   // Commander Dossier: one gentle "tell me about X" nudge after a clean run (registers once)
     wireConnectorRequired();   // beginner seam Lane 1: a run that hit an unwired connector earns the ⇄ CONNECT chip
-    wireBgExit();      // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
+    wireKeySaved();    // keys.save: a key pasted into chat now lives in KEYS — its bubble + saved history show the placeholder (registers once)
+    wireBgExit();     // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
     wireSkillAside();  // A2: after a background review distills a skill, ONE quiet "distilled this run…" aside (registers once)
     wireIdBar();       // COMMS agent selector: a change switches to (or mints) a workstream bound to that agent (registers once)
     load(opts.ws);
@@ -9080,6 +9081,52 @@ const Chat = (() => {
       CONNECTOR_NEEDED.set(p.runId, p);
       if (CONNECTOR_NEEDED.size > 40) CONNECTOR_NEEDED.delete(CONNECTOR_NEEDED.keys().next().value);
     });
+  }
+  /* A KEY PASTED INTO CHAT, SAVED (keys.save, 2026-10-25). The agent stored a key the Commander pasted here in KEYS. The
+     page holds the paste in two places the sidecar's redaction never reaches: the bubble on screen and this
+     workstream's history (the desk save, and what the next turn re-sends to the model). On keys.save's OK result (the
+     contract's own agent.tool_call + agent.tool_result, paired by callId — no new event) the sidecar swaps every saved
+     key for its placeholder (POST /api/servicekeys/scrub), and only a turn that came back changed is rewritten, so
+     nothing is claimed for a paste the sidecar did not find. */
+  const KEY_SAVE_CALLS = new Map();   // callId -> runId of an in-flight keys.save (bounded)
+  let keySavedWired = false;
+  function wireKeySaved() {
+    if (keySavedWired || typeof U === 'undefined' || !U.bus) return;
+    keySavedWired = true;
+    U.bus.on('agent.tool_call', p => {
+      if (!p || !p.callId || !p.runId || !/^keys[._]save$/.test(String(p.name || ''))) return;
+      KEY_SAVE_CALLS.set(p.callId, p.runId);
+      if (KEY_SAVE_CALLS.size > 40) KEY_SAVE_CALLS.delete(KEY_SAVE_CALLS.keys().next().value);
+    });
+    U.bus.on('agent.tool_result', p => {
+      const runId = p && p.callId ? KEY_SAVE_CALLS.get(p.callId) : null;
+      if (!runId) return;
+      KEY_SAVE_CALLS.delete(p.callId);
+      if (p.ok && !p.isError) scrubSavedKeys(runId).catch(() => {});
+    });
+  }
+  // returns how many of the Commander's turns now show the placeholder (the number aids testing)
+  async function scrubSavedKeys(runId) {
+    let ws = null;
+    if (typeof Workstreams !== 'undefined' && Workstreams.all) { try { ws = Workstreams.all().find(w => (w.runIds || []).indexOf(runId) >= 0) || null; } catch (_) {} }
+    ws = ws || activeWs;
+    const turns = ws && Array.isArray(ws.history) ? ws.history.filter(m => m && m.role === 'user' && typeof m.content === 'string' && m.content) : [];
+    if (!turns.length || typeof Harness === 'undefined' || !Harness.api) return 0;
+    const raw = turns.map(m => m.content);
+    const r = await Harness.api.post('/api/servicekeys/scrub', { texts: raw });
+    const out = r && r.ok && r.j && Array.isArray(r.j.texts) && r.j.texts.length === raw.length ? r.j.texts : null;
+    if (!out) return 0;
+    const swapped = new Map();
+    out.forEach((t, i) => { if (typeof t === 'string' && t !== raw[i]) { turns[i].content = t; swapped.set(raw[i], t); } });
+    if (!swapped.size) return 0;
+    try { App.persist(); } catch (_) {}
+    if (log && isActiveWs(ws)) {
+      for (const body of log.querySelectorAll('.cmsg.user > .body')) {
+        const t = swapped.get(body.textContent);
+        if (t != null) body.textContent = t;
+      }
+    }
+    return swapped.size;
   }
   // returns true iff a chip was rendered (the bool aids testing)
   function offerConnectorDoor(runId, originWs) {

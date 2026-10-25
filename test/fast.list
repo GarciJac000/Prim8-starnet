@@ -251,6 +251,7 @@ test/servicekeys.test.js
 test/servicekeys.env.test.js
 test/onepassword.test.js
 test/web-request.test.js
+test/keys-save.test.js
 test/servicekeys-catalog.test.js
 test/tools.test.js
 test/capgate.test.js

@@ -137,6 +137,7 @@ test/browser-mac-keys.e2e.test.js
 test/browser-minimized-window.e2e.test.js
 test/browser.stepin.e2e.test.js
 test/servicekeys.http.test.js
+test/keys-save.http.test.js
 test/servicekeys.shell.e2e.test.js
 test/servicekeys-1password.http.test.js
 test/skills.gate.http.test.js

@@ -97,6 +97,7 @@ const Todo = require('./tools/builtin/todo.js');
 const DeliverableTool = require('./tools/builtin/deliverable.js');   // deliverable_note — the agent NAMES its finished work (prose only; never status/crew)
 const { makeImageTools } = require('./tools/builtin/image.js');           // STUDIO: image_generate / image_analyze (OpenRouter multimodal)
 const { makeConnectorTools } = require('./tools/builtin/connectors.js');  // WEB: connectors.list — what the station HAS wired, and what it could (read-only, no secrets)
+const KeyTools = require('./tools/builtin/keys.js');  // WEB: keys.save — a key pasted into chat becomes a KEYS entry, spent by name
 const { makeVoiceTools } = require('./tools/builtin/voice.js');           // STUDIO: voice_generate — speech saved into the workspace as a playable clip
 const { makeResolveTools } = require('./tools/builtin/resolve.js');       // STUDIO: DaVinci Resolve — FCPXML timelines (free) + live Studio control (Hermes-plugin port)
 const { makeSpotifyTools } = require('./tools/builtin/spotify.js');       // JUKEBOX: control/query the user's Spotify
@@ -12167,6 +12168,7 @@ const ROUTES = [
   { m: 'GET', exact: '/api/servicekeys', h: handleServiceKeysList },
   { m: 'POST', exact: '/api/servicekeys', h: handleServiceKeyUpsert },
   { m: 'POST', exact: '/api/servicekeys/toggle', h: handleServiceKeyToggle },
+  { m: 'POST', exact: '/api/servicekeys/scrub', h: handleServiceKeyScrub },
   { m: 'GET', exact: '/api/servicekeys/catalog', h: handleServiceKeysCatalog },
   { m: 'POST', exact: '/api/servicekeys/autonomy', h: handleServiceKeyAutonomy },
   { m: 'POST', exact: '/api/servicekeys/remove', h: handleServiceKeyRemove },
@@ -15093,6 +15095,47 @@ async function handleServiceKeyUpsert(req, res) {
   if (record.ref) await serviceKeyRefs.refresh(record, { timeoutMs: 60000 });
   applyServiceKeysEnv();
   return json(saved ? 200 : 500, { ok: saved, saved, key: publicServiceKey(record), error: saved ? undefined : 'key is active for this session but could not be verified on disk' });
+}
+/* A KEY PASTED INTO CHAT (keys.save, 2026-10-25): the same upsert, catalog policy, env apply and verified persist as
+   POST /api/servicekeys, for a value the host found in the Commander's own message (tools/builtin/keys.js). A catalog
+   platform keeps its own name and docs. refuseReplace (a run that has read content the Commander did not write) may
+   add a key but never swap a saved one for a different value. */
+function saveServiceKeyFromChat(input) {
+  const asked = String((input && input.name) || '').trim();
+  const key = String((input && input.key) || '');
+  const catalog = serviceKeysCatalog.byId(serviceKeysMod.slug(asked));
+  const name = catalog ? catalog.name : asked;
+  const id = serviceKeysMod.slug(name);
+  const prev = serviceKeys.find(row => row && row.id === id) || null;
+  const prevLive = prev ? (liveServiceKeys().find(row => row && row.id === id) || null) : null;
+  const brief = (row) => ({ name: row.name, envVar: row.envVar, autonomous: row.autonomous === true, unattendedSupported: row.unattendedSupported !== false });
+  if (prevLive && prevLive.key === key) return { ok: true, record: brief(prev), existed: true, sameValue: true, saved: true };
+  if (prev && input && input.refuseReplace) {
+    return { ok: false, error: name + ' already has a saved key, and this run has read content the Commander did not write, so it cannot replace it. '
+      + 'Ask the Commander to paste the new key in a fresh message, or replace it in TOOLSETS & CONNECTORS → KEYS.' };
+  }
+  const r = serviceKeysMod.upsert(serviceKeys, {
+    name, key, docsUrl: (input && input.docsUrl) || (catalog && catalog.docsUrl) || undefined,
+    unattendedSupported: !(catalog && catalog.unattendedSupported === false),
+    unattendedReason: catalog && catalog.unattendedReason
+  }, Date.now(), { reservedEnv: SERVICEKEYS_RESERVED_ENV });
+  if (r.error) return { ok: false, error: r.error };
+  serviceKeys = r.list.map(applyServiceKeyCatalogPolicy);
+  const record = serviceKeys.find(row => row.id === r.record.id) || r.record;
+  serviceKeyRefs.drop(record.id);   // a pasted key replaces a 1Password reference: forget the value read for it
+  applyServiceKeysEnv();
+  const saved = saveServiceKeys();  // verified read-back; false = live for this session, said so in the tool result
+  return { ok: true, record: brief(record), existed: !!prev, sameValue: false, saved };
+}
+/* POST /api/servicekeys/scrub { texts:[...] } -> { texts } — each text with every saved service key's value replaced by
+   its placeholder (keys.keyPlaceholder). COMMS calls it on `servicekey.saved` so the Commander's bubble and the desk
+   save stop holding a key that now lives in KEYS. Returns only what it was sent, minus secrets; never a value. */
+async function handleServiceKeyScrub(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 1 << 22)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  if (!Array.isArray(body.texts) || body.texts.length > 500) return json(400, { error: 'texts must be an array of at most 500 strings' });
+  const keys = liveServiceKeys();
+  return json(200, { texts: body.texts.map(t => (typeof t === 'string' ? KeyTools.nameSavedKeys(t, keys) : t)) });
 }
 async function handleServiceKeyToggle(req, res) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
@@ -20180,6 +20223,16 @@ function latestUserText(list) {
   }
   return '';
 }
+// The newest `n` user turns' text, newest first (keys.save looks for a pasted key in these).
+function recentUserTexts(list, n) {
+  const msgs = Array.isArray(list) ? list : [];
+  const out = [];
+  for (let i = msgs.length - 1; i >= 0 && out.length < n; i--) {
+    const t = userMsgText(msgs[i]);
+    if (t != null) out.push(t);
+  }
+  return out;
+}
 /* A FILE NAME IS NOT A HOST (soak 10-15): DomainTask.classify asks whether a dotted name ("about.me", "logo.ai") is a
    file that already exists where this run's relative paths land — its project folder when it has one, and the agent's
    own workspace — so naming that file never turns the run into a one-site check that withholds team.* and web_search.
@@ -20852,6 +20905,17 @@ async function runOnceCore(o) {
     connectorCatalog: connectorCatalog,
     keysCatalog: serviceKeysCatalog,
     signInUnavailable: connectorSignInUnavailable
+  }).register(registry);
+  // A KEY PASTED INTO CHAT (keys.save): the value is found only in the COMMANDER'S OWN turns of this run. A run that
+  // did not come from them — self-talk, a trigger/forwarded/group entry, a paired phone or non-owner sender (host power
+  // withheld), a delegated worker, a routine — has no owner texts, so the tool can save nothing there.
+  const keyOwnerRun = !internal && !untrustedEntryRun && !hostPowerWithheld && !o.delegatedBy && !o.syntheticTrigger
+    && (surface === 'interactive' || ownerTrusted);
+  const keyOwnerTexts = () => keyOwnerRun ? recentUserTexts(messages, KeyTools.OWNER_TURNS) : null;
+  KeyTools.makeKeyTools({
+    ownerTexts: keyOwnerTexts,
+    save: saveServiceKeyFromChat,
+    tainted: () => !!execution.taintedBy()
   }).register(registry);
   // HARNESS SELF-KNOWLEDGE: always-present COMPUTER grant, local/read-only and secret-free. The reader
   // closes over this run's identity while every mutable section is collected fresh at call time from the
@@ -21650,6 +21714,14 @@ async function runOnceCore(o) {
          carry why and how to enable it. An unknown signal leaves the tool advertised.
      KILL SWITCH: SKYNET_TOOL_SEARCH=0 advertises everything, these included, exactly as before deferral. */
   const deferralOff = String((process.env && process.env.SKYNET_TOOL_SEARCH) || '').trim() === '0';
+  /* keys.save rides ONLY a task run whose Commander's own recent turns hold a key-shaped string. There it is ADVERTISED
+     (a model that must first think to search for it would never save the paste); on every other run it is not granted
+     at all, so the request, the deferred index and tool.search stay byte-identical to before. */
+  if (resolved.tools.indexOf('keys.save') >= 0) {
+    resolved.deferred = (resolved.deferred || []).filter(n => n !== 'keys.save');
+    const ownerTexts = keyOwnerTexts();
+    if (!(isTask && ownerTexts && KeyTools.hasKeyCandidate(ownerTexts))) resolved.tools = resolved.tools.filter(n => n !== 'keys.save');
+  }
   /* DIRECT-DOMAIN WITHHOLDING — what a bounded one-host check may not even see: delegation and open web search, the
      two typo-cascade routes. web_request (issue #58) and the browser stay ADVERTISED; the dispatch guards below
      confine their URL-taking calls to the named host + subdomains (DomainTask.isTargetRequest / isTargetNavigate).
