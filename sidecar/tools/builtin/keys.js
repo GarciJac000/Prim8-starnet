@@ -150,7 +150,7 @@
         if (!r || !r.record) return { isError: true, content: 'could not save the key: ' + String((r && r.error) || 'unknown error'), summary: 'not saved' };
         const rec = r.record;
         const envVar = String(rec.envVar);
-        if (typeof d.onSaved === 'function') { try { d.onSaved(envVar); } catch (_) {} }   // the run's transcript hold lets go
+        if (typeof d.onSaved === 'function') d.onSaved(envVar);   // the run's transcript hold lets go (the host flips a flag)
         const lines = [
           (r.sameValue ? 'This key was already saved in KEYS as ' : (r.existed ? 'Replaced the saved key for ' + rec.name + ' — it is now in KEYS as ' : 'Saved ' + rec.name + '\'s key in KEYS as ')) + envVar + '.'
             + (r.saved === false ? ' WARNING: it works for this session but could not be verified on disk — tell the Commander it may not survive a restart.' : ''),
