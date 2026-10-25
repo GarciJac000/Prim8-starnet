@@ -27690,9 +27690,10 @@ function serveSaveConflicts(req, res) {
       if (read && Date.now() - started > 30) { more = !!state.doc; break; }   // no station = nothing settles: never "more"
       read++;
       const got = saveStore.readConflictState('agent', f.name);
-      // a copy that could not be READ this instant (locked, EBUSY/EACCES) may still hold lost work: never settled, and the page
-      // asks again (`more`) — settling it here hid it from every later boot while it stayed unchanged
-      if (got.status === 'unreadable') { more = !!state.doc; continue; }
+      // a copy that could not be READ this instant (locked, EBUSY/EACCES) may still hold lost work: never settled — settling it
+      // hid it from every later boot while it stayed unchanged — and never `more` either (a copy that stays unreadable made
+      // the page ask 25 times, each ask re-reading the whole station: re-review N2). A later boot reads it again.
+      if (got.status === 'unreadable') continue;
       const doc = got.doc;
       if (!doc) { if (state.doc) settle.push(f); continue; }   // gone, or does not parse: nothing it could offer
       // a copy from before a station RESET, while the station is from after it, is erased work: listed, never offered back
@@ -27805,13 +27806,15 @@ async function handleSaveAdopt(req, res) {
     const doc = r.doc;
     if (windowBase) { keepStationGrowth(doc, station); keepTerminalApprovals(doc, station); }
     const at = Date.now();
+    const added = r.added.length + r.extended.length + r.copied.length;
+    // too big for POST /api/save to take: refused BEFORE anything is written (the window's save is then preserved once, by the
+    // ordinary path — never a kept copy too, on every boot)
+    if ((windowBase || added) && Buffer.byteLength(JSON.stringify(doc)) > (16 << 20) - (64 << 10)) return json(200, { ok: false, error: 'the merged station would be too large to save', tooLarge: true });
     // the station file is the base: the window's crew, floor and settings changes are not in the merge, so its whole save is
     // kept beside the station under a name of its own (restorable and downloadable, like a refused save's copy)
     const kept = windowBase ? null : saveStore.preserve('agent', Object.assign({}, body, { _saveClient: ('kept-' + at + (writer ? '-' + writer : '')).slice(0, 80) }));
-    const added = r.added.length + r.extended.length + r.copied.length;
     if (!windowBase && !added) return json(200, { ok: true, revision: Number(station._saveRevision) || 0, updatedAt: Number(station.updatedAt) || 0, doc: station,
       base: 'station', added: 0, extended: 0, copied: 0, backup: null, ...(kept ? { kept } : {}) });
-    if (Buffer.byteLength(JSON.stringify(doc)) > (16 << 20) - (64 << 10)) return json(200, { ok: false, error: 'the merged station would be too large to save', tooLarge: true, ...(kept ? { kept } : {}) });
     const backup = saveStore.backup('agent', 'adopt-' + at);
     Object.assign(doc, { updatedAt: Math.max(at, (Number(station.updatedAt) || 0) + 1, (Number(body.updatedAt) || 0) + 1),
       _saveRevision: Number(station._saveRevision) || 0, _saveClient: 'adopt-' + (by || at), _saveDirty: false });

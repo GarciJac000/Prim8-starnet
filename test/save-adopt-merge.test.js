@@ -256,6 +256,66 @@ async function lostAckThenDeath(opts) {
       A.ok(titles(host.saveStore.load('agent')).includes('ONLY-ON-STATION'), 'h: and the station file\'s own session is still there');
     }
 
+    // ================= j. the resend meets a PASSING refusal: the page still continues that window's work (re-review N1) =================
+    {
+      const { root, cache } = await lostAckThenDeath();
+      const host = sidecar(root);
+      let failNext = true;
+      const proxy = { fetch: async (u, o) => {
+        if (failNext && o && o.method === 'POST' && String(u) === '/api/save') { failNext = false; throw new Error('the station file was locked for a moment'); }
+        return host.fetch(u, o);
+      } };
+      const Z = page(proxy, cache);
+      const resumed = await Z.reconcile(JSON.parse(cache.get('starnet.save')));
+      await tick(); await tick();
+      // the page saves again before the retry: the newer save replaces the refused one
+      const next = persist(Z, cache, Object.assign(clone(resumed), { workstreams: resumed.workstreams.concat([{ id: 'S4', history: [turn('user', 'four')] }]) }));
+      A.eq(await Z.flush({ force: true }), true, 'j: the save that replaced the refused resend lands');
+      A.eq(Z.health().conflict, null, 'j: no conflict — still one window\'s work');
+      A.eq(titles(host.saveStore.load('agent')), titles(next), 'j: the station file holds all of it');
+      persist(Z, cache, Object.assign(clone(next), { workstreams: next.workstreams.concat([{ id: 'S5', history: [turn('user', 'five')] }]) }));
+      A.eq(await Z.flush({ force: true }), true, 'j: and the page\'s own saves land after it');
+    }
+
+    // ================= k. a lost answer from a merge that wrote nothing: asked once more (re-review N3) =================
+    {
+      const { root, cache } = await lostAckThenDeath({ legacy: true });
+      // no session the station lacks — only a crew change — so the merge brings nothing in and writes nothing
+      const legacy = JSON.parse(cache.get('starnet.save')); legacy.workstreams = legacy.workstreams.filter(w => w.id !== 'S3');
+      legacy.agent = Object.assign({}, legacy.agent, { name: 'RENAMED-IN-WINDOW' });
+      cache.set('starnet.save', JSON.stringify(legacy));
+      const host = sidecar(root);
+      let adopts = 0;
+      const proxy = { fetch: async (u, o) => {
+        const r = await host.fetch(u, o);
+        if (String(u) === '/api/save/adopt' && ++adopts === 1) throw new Error('the answer was lost');
+        return r;
+      } };
+      const Z = page(proxy, cache);
+      const resumed = await Z.reconcile(legacy);
+      A.eq(adopts, 2, 'k: the merge was asked once more');
+      A.eq(titles(resumed), titles(host.saveStore.load('agent')), 'k: the page resumes the station file');
+      persist(Z, cache, Object.assign(clone(resumed), { workstreams: resumed.workstreams.concat([{ id: 'after', history: [turn('user', 'after')] }]) }));
+      A.eq(await Z.flush({ force: true }), true, 'k: its next save lands — not frozen');
+    }
+
+    // ================= l. a tab reopened while ANOTHER StarNet tab is live never merges under it =================
+    {
+      const { root, cache } = await lostAckThenDeath({ legacy: true, legacyFile: true });
+      class Channel extends BroadcastChannel { constructor(n) { super(n); this.unref(); } }
+      const host = sidecar(root);
+      const liveCache = new Map();
+      const L = page(host, liveCache, { BroadcastChannel: Channel });   // a live tab of this station, already open
+      await L.reconcile(null);
+      const before = fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8');
+      const Z = page(host, cache, { BroadcastChannel: Channel });
+      await Z.reconcile(JSON.parse(cache.get('starnet.save')));
+      await Z.flush({ force: true });
+      A.eq([Z.mergeNotice(), backups(root).length], [null, 0], 'l: the reopened tab hears the live one and merges nothing');
+      A.eq(fs.readFileSync(path.join(root, 'agent.save.json'), 'utf8'), before, 'l: the station file is untouched');
+      A.ok(conflictFiles(root).length >= 1, 'l: the reopened tab\'s save is preserved beside it, as before');
+    }
+
     // ================= i. two pages booting on the same old cache: the second moves nothing under the first (review #5) =================
     {
       const { root, cache } = await lostAckThenDeath({ legacy: true, legacyFile: true });

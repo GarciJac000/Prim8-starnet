@@ -97,7 +97,7 @@ try {
   console.log('boot 2        ', JSON.stringify(await probe()), '|', fileLine());
   console.log('merge notice  ', JSON.stringify(await evalJS(cdp, `CloudSave.mergeNotice ? CloudSave.mergeNotice() : 'n/a'`)),
     '| backups', fs.readdirSync(fixture.workspace).filter(n => /\.save-before-adopt-/.test(n)).length);
-  console.log('on screen     ', JSON.stringify(await evalJS(cdp, `(() => { const t = document.body.innerText || ''; const i = t.search(/newest changes from last time|station file was newer than this window/i); return i < 0 ? null : t.slice(i, i + 220); })()`)));
+  console.log('on screen     ', JSON.stringify(await evalJS(cdp, `(() => { const t = document.body.innerText || ''; const i = t.search(/newest changes from last time|unsent changes from last time/i); return i < 0 ? null : t.slice(i, i + 220); })()`)));
 
   // 4. the Commander keeps working
   await evalJS(cdp, `(() => { Workstreams.create('S3 made after reopening'); App.persist(); CloudSave.flush({ force: true }); return true; })()`);

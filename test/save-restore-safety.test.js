@@ -336,7 +336,7 @@ function stationUi(cloudSave, uiStore) {
       const r = host.saveStore.save('agent', copy, { compareRevision: true });
       A.ok(r.conflict === true, 'fixture: a closed window\'s save is preserved beside the station');
       const busy = await host.conflicts();
-      A.ok(busy.conflicts.length === 0 && busy.more === true, '3e: an unreadable copy offers nothing yet and asks the page to ask again (' + JSON.stringify(busy) + ')');
+      A.ok(busy.conflicts.length === 0 && !busy.more, '3e: an unreadable copy offers nothing this boot, and does not make the page ask again and again (' + JSON.stringify(busy) + ')');
       locked = false;
       const later = await host.conflicts();
       A.ok(later.conflicts.some(c => c.file === r.recovery && c.restorable === 1), '3e: once it can be read, it is offered — it was never settled (' + JSON.stringify(later) + ')');
