@@ -54,6 +54,10 @@ const USAGE = [
   '  starnet watch                        print the live events of the station, one line each (--json: one object each)',
   '  starnet flow                         list workflows; flow run <name> "<text>" sends one job and waits',
   '',
+  'StarNet app closed? starnet starts its station in the background: the app\'s keys, no window (the tray shows it runs).',
+  '  When the last starnet session ends it closes again, unless routines are armed or StarNet is set to stay in the tray',
+  '  (the same as closing its window). Opening StarNet while it runs shows that same station.',
+  '',
   'Folder: starnet works in the trusted project you start it in. Started in one not trusted yet, the dashboard asks',
   '  TRUST THIS FOLDER? (y trusts it, the same as adding it under PROJECTS in the app); your home folder is never asked',
   'Dashboard keys: tab switch agent · ↑↓ your earlier messages · @name message · y/n/v answer an ask · ctrl+c quit',
@@ -84,8 +88,8 @@ const USAGE = [
   '  --workspace <dir>  workspace to boot when no station is reachable (env STARNET_WORKSPACES)',
   '  --name <NAME>      agent name used by a first-time bootstrap (default OVERSEER)',
   '  --no-spawn         never boot a station; fail (exit 3) if none is reachable',
-  '  --spawn            always boot a station for this run (never attach to a running one); the desktop app\'s own',
-  '                     station is never booted from here while the app is closed: add --workspace <dir> for a separate one',
+  '  --spawn            always boot a station for this run (never attach to a running one); StarNet\'s own station is',
+  '                     never booted without its keys: plain starnet starts it, add --workspace <dir> for a separate one',
   '',
   'Exit codes: 0 done · 1 run failed · 2 usage · 3 no station / not configured · 4 cancelled · 5 stopped early · 6 nothing to answer',
   '',
@@ -196,14 +200,17 @@ function parseArgs(argv, env, ctx) {
      3. a live desktop owner whose port we could not resolve → refuse to spawn INTO that workspace (one
         sidecar per WORKSPACES dir is a hard invariant) — unless the operator picked another workspace;
      4. the desktop app's station (desktop.station: it holds a save; desktop.appRan: the app has run there) with
-        the app CLOSED → refuse, unless the operator picked another workspace. The app keeps
-        that station's keys, key pools, bot tokens and credits token in the OS keychain and gives them only to
-        the sidecar it spawns: a terminal-booted one would be a keyless copy of the real station (agents fail,
-        bots stay offline, routines fire and fail). --spawn alone gets the same refusal: with no --workspace it
-        boots the default workspace, which IS that station (it holds a save), so the reason names --workspace;
+        the app CLOSED → START THE APP in the background (launch-app: desktop.appExe `--background`, window
+        parked, no window opens), unless the operator picked another workspace. The app keeps that station's keys,
+        key pools, bot tokens and credits token in the OS keychain and gives them only to the sidecar it spawns,
+        so the terminal never boots that station itself — that would be a keyless copy of the real station (agents
+        fail, bots stay offline, routines fire and fail). No app to start (desktop.appExe '') → refuse and say so.
+        --no-spawn (a question: status, ls, …) → refuse, saying `starnet` starts it. --spawn alone refuses too:
+        with no --workspace it boots the default workspace, which IS that station, so the reason names both ways;
      5. --no-spawn → refuse; otherwise → spawn. */
-const DESKTOP_CLOSED = 'StarNet isn\'t running — open the StarNet app first (it holds your keys), then run starnet again';
-const DESKTOP_CLOSED_SPAWN = DESKTOP_CLOSED + ' (--spawn would boot that same station without them; add --workspace <dir> for a separate terminal-only station)';
+const DESKTOP_CLOSED = 'StarNet isn\'t running — run `starnet` to start it (in the background: your keys stay in the app, no window opens)';
+const DESKTOP_CLOSED_SPAWN = '--spawn would boot StarNet\'s own station without the keys the app keeps — run plain `starnet` to start it with them (no window opens), or add --workspace <dir> for a separate terminal-only station';
+const DESKTOP_NO_APP = 'StarNet\'s station keeps its keys in the StarNet app, and the app was not found on this computer — reinstall StarNet, set STARNET_APP_EXE to the app, or add --workspace <dir> for a separate terminal-only station';
 function chooseStation(input) {
   const o = input || {};
   const d = o.desktop || {};
@@ -220,7 +227,11 @@ function chooseStation(input) {
   if (d.ownerAlive && !d.port && !o.workspaceOverride) {
     return { mode: 'refuse', reason: 'the desktop app owns the default workspace (pid ' + d.ownerPid + ') but its port could not be discovered — pass --port <n> to attach, or --workspace <dir> to boot a separate station' };
   }
-  if (desktopClosed) return { mode: 'refuse', reason: DESKTOP_CLOSED };
+  if (desktopClosed) {
+    if (o.noSpawn) return { mode: 'refuse', reason: DESKTOP_CLOSED };
+    if (!d.appExe) return { mode: 'refuse', reason: DESKTOP_NO_APP };
+    return { mode: 'launch-app', exe: d.appExe };
+  }
   if (o.noSpawn) return { mode: 'refuse', reason: 'no station reachable and --no-spawn was given' };
   return { mode: 'spawn' };
 }
@@ -257,6 +268,19 @@ function parseStartupLog(text) {
     if (m) out = { pid: Number(m[1]), port: Number(m[2]), listening: m[3] === 'true' };
   }
   return out;
+}
+/* The app's own path, from the line it writes at every start: `startup exe=Ok("C:\\Users\\…\\skynet-desktop.exe") …`
+   (Rust's Debug of current_exe(): \\ \" \' \n \t \r and \u{…} escaped). The LAST start wins; '' when there is none. */
+function parseStartupExe(text) {
+  let raw = null;
+  const re = /startup exe=Ok\("((?:[^"\\]|\\.)*)"\)/g;
+  let m;
+  while ((m = re.exec(String(text || '')))) raw = m[1];
+  if (raw === null) return '';
+  return raw.replace(/\\u\{([0-9a-fA-F]{1,6})\}|\\(.)/g, (all, hex, ch) => {
+    if (hex) { const n = parseInt(hex, 16); return n <= 0x10ffff ? String.fromCodePoint(n) : ''; }
+    return ch === 'n' ? '\n' : ch === 't' ? '\t' : ch === 'r' ? '\r' : ch === '0' ? '\0' : ch;
+  });
 }
 
 // ---- agent selection ---------------------------------------------------------------------------
@@ -552,7 +576,7 @@ function splitSse(buf) {
 function cliStreamId(agentId) { return ('cli-' + String(agentId || 'agent').replace(/[^A-Za-z0-9_-]/g, '')).slice(0, 64); }
 
 module.exports = {
-  EXIT, USAGE, DEFAULT_PORT, DEFAULT_AGENT_ID, DESKTOP_CLOSED, DESKTOP_CLOSED_SPAWN,HEADLESS_PLACED, RUN_STOP_REASONS,
-  parseArgs, chooseStation, parseListeningPort, parseStartupLog, pickAgent, buildRunBody,
+  EXIT, USAGE, DEFAULT_PORT, DEFAULT_AGENT_ID, DESKTOP_CLOSED, DESKTOP_CLOSED_SPAWN, DESKTOP_NO_APP, HEADLESS_PLACED, RUN_STOP_REASONS,
+  parseArgs, chooseStation, parseListeningPort, parseStartupLog, parseStartupExe, pickAgent, buildRunBody,
   makeRunTracker, exitCodeForReason, bootstrapDocs, inferProvider, jsonResult, splitNdjson, splitSse, cliStreamId, isTaskText
 };

@@ -126,6 +126,11 @@ the chosen agent's conversation beside it, and every approval as a card you answ
 (`v` shows the full request first). It reads the same state the app does, so it never shows work the
 station cannot prove.
 
+StarNet doesn't have to be open. With it closed, `starnet` starts it in the background: the same station
+with your keys (they stay in the app's keychain), and no window opens; the tray icon shows it's running.
+When the last `starnet` session ends it closes again, unless routines are armed or StarNet is set to stay
+in the tray (the same as closing its window). Opening StarNet while it runs shows that same station.
+
 | Platform | The command |
 | --- | --- |
 | **Windows** | `%LOCALAPPDATA%\StarNet\bin\starnet.cmd` |
