@@ -93,7 +93,12 @@ const HOST = '127.0.0.1';
    follows the EFFECTIVE execution backend (local cmd.exe / /bin/sh, Docker or SSH sh). Measured on Windows (the longest
    line, it carries the PowerShell wrapper): 61,331 -> 61,266 tool bytes, 22,092 / 22,313 / 25,260 -> 22,234 / 22,455 /
    25,402 system chars (+142, all in the per-run note, never the cached prefix). Intended move: system budgets +142, tool
-   budgets -65, so each keeps its previous headroom. */
+   budgets -65, so each keeps its previous headroom.
+   FILES BEFORE THE SHELL 2026-10-25 (gpt-5.6-luna read a named project with dir / Select-String / type on v0.14.0): the
+   work-discipline block now opens with "read, list and search files with fs_read / fs_list / fs_search, full paths
+   included, not shell_exec", and fs_read / fs_list say they take a full path. Paid for in place by dropping the shell
+   listing diagnostic and folding the Bash-style /c sentence into the cwd rule: trunk 29e8ce01c 22,232 / 22,453 / 25,400
+   chars, 61,266 / 66,096 bytes -> 22,243 / 22,464 / 25,411, 61,278 / 66,108. No budget moved. */
 const BUDGET = {
   'default-new-install': { systemChars: 22282, tools: 79, toolBytes: 61285 },
   'fully-granted-floor': { systemChars: 22502, tools: 79, toolBytes: 61285 },

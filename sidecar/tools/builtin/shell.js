@@ -877,7 +877,14 @@
         const refusal = sandboxRefusal(environment, aid);
         if (refusal) throw refusal;
         const deny = remoteOwner ? null : escapesWorkspace(cmd);
-        if (deny) throw new Error('refused: ' + deny);
+        /* FILES BEFORE THE SHELL (2026-10-25): "use paths inside your workspace" was the whole answer to `type C:\proj\notes.md`,
+           so a model holding the file tools told the Commander the file was inaccessible. A path refusal names the route that
+           reaches it — only when the host says this run carries the file tools (ctx.fileToolsOnWire), and the cwd route only
+           where cwd may leave the workspace (the local backend). */
+        if (deny) throw new Error('refused: ' + deny + (/^(parent-directory|drive-absolute|drive-root)/.test(deny) && ctx.fileToolsOnWire === true
+          ? '. To read, list or search files there, call fs_read / fs_list / fs_search with the full path instead'
+            + (environmentBackendId === 'local' ? '; to run a command there, pass that folder as cwd' : '')
+          : ''));
         const jailRoot = environment ? environment.ensureWorkspace(aid) : P.join(ROOT, aid);
         // A project root is host-minted from the session's still-live blessing. Keep its shell cwd run-scoped:
         // two concurrent projects owned by the same agent must never inherit one another's `cd` state.
