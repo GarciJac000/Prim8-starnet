@@ -77,13 +77,39 @@ const CloudSave = (() => {
      station over a fresh one long after a later START FRESH. A send that got no answer (an outage) keeps it armed. */
   let restoreArmed = false, restoreSeq = 0;
   /* WHOSE WORK A CACHED SAVE IS (support reports 10-15…10-25: one window, the station "went back"). Every save this page
-     writes names this page (`_saveClient`), in the browser cache too, so a page that died after its save landed but before
-     the next one was sent left that next save in the cache NAMED. The reopened page sends that one save under the dead
-     window's id (push opts.asClient) — the station file names that window as its head's writer, and a newer save from it
-     lands (savestore ownHead). Only that one save: everything this page saves after it is this page's own. */
+     writes names its window (`_saveClient`), in the browser cache too, so a page that died after its save landed but before
+     the next one was sent left that next save in the cache NAMED. The reopened page continues that window's work: it sends
+     under the dead window's id (`inherited`), which the station file names as its head's writer, so a newer save from it
+     lands (savestore ownHead) — until the station gives one of those saves a REAL answer. Accepted: the station holds this
+     page's line on its own revision, later saves are this page's own. Refused as a conflict: someone else wrote since, and
+     this page is behind for real (hostile review 10-25 #3). A passing refusal (a locked file, a growth catch-up, an outage)
+     keeps it, or the save that replaces the refused one would be sent as a stranger on the old revision (re-review N1). */
+  let inherited = null;
   let lastHead = null;                 // GET /api/save's `head`: { client, requestUpdatedAt, revision } when the store can prove it
   const CLIENT_RE = /^[A-Za-z0-9_-]{1,80}$/;
-  function writerId() { return clientId; }
+  function writerId() { return inherited || clientId; }
+  /* ANOTHER LIVE STARNET PAGE IN THIS BROWSER (re-review 10-25): two tabs share one browser cache, so a tab reopened while
+     another runs is not a crash recovery. Every page answers a reopening page's "anyone here?"; a reopening page that hears an
+     answer neither resends nor merges a dirty cache (that would move the station under the live tab): its save is preserved,
+     as before. No BroadcastChannel (an old webview, a test) = nobody answers. */
+  let pagesChannel = null;
+  try {
+    if (typeof BroadcastChannel === 'function') {
+      pagesChannel = new BroadcastChannel('starnet-pages');
+      pagesChannel.addEventListener('message', e => { const m = e && e.data; if (m && m.ping && m.from !== clientId && !retired) { try { pagesChannel.postMessage({ pong: m.ping, from: clientId }); } catch (_) {} } });
+    }
+  } catch (_) { pagesChannel = null; }
+  function anotherPageOpen(ms) {
+    if (!pagesChannel) return Promise.resolve(false);
+    return new Promise(resolve => {
+      const ping = clientId + ':' + now();
+      let done = false, t = null;
+      const on = e => { if (e && e.data && e.data.pong === ping) finish(true); };
+      const finish = v => { if (done) return; done = true; if (t) clearTimeout(t); try { pagesChannel.removeEventListener('message', on); } catch (_) {} resolve(v); };
+      try { pagesChannel.addEventListener('message', on); pagesChannel.postMessage({ ping, from: clientId }); } catch (_) { finish(false); return; }
+      t = setTimeout(() => finish(false), ms);
+    });
+  }
 
   function now() { return Date.now(); }
   function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
@@ -194,10 +220,11 @@ const CloudSave = (() => {
         if (body && typeof body === 'object') {
           if (armed && typeof body.ok === 'boolean') restoreArmed = false;   // the station answered the import's save: disarmed
           degraded = (body.ok === false && body.degraded === true);   // any parsed answer re-proves (or clears) the degraded verdict
-          if (body.conflict) { conflict = body; if (body.recovery) preservedSeq = Math.max(preservedSeq, docSeq); markFail(); return false; }
+          if (body.conflict) { inherited = null; conflict = body; if (body.recovery) preservedSeq = Math.max(preservedSeq, docSeq); markFail(); return false; }
           if (body.ok && Number.isInteger(body.revision)) {
             revision = body.revision;
             landedSeq = Math.max(landedSeq, docSeq);
+            inherited = null;   // the station holds this page's line on its own revision now: later saves are this page's own
             // bug 5c019483: the station file was missing (no save, no backup) and THIS window's copy became it. Latched
             // for the save light, which says so once: the station is back on disk because this window held it.
             if (body.seeded === true) seeded = { revision: body.revision, at: now() };
@@ -291,14 +318,13 @@ const CloudSave = (() => {
   //   opts.raw (idle CPU piece 3, 2026-10-20): the exact string Save.write produced for this doc. The clone is then one parse
   //   of it instead of a stringify + parse, and the ACK can tell the cache still holds this doc by comparing strings.
   //   opts.restore: RESTORE BACKUP's write of the chosen backup (see restoreArmed).
-  //   opts.asClient: reconcile's resend of a dead window's cached save, under that window's id (this doc only)
   function push(doc, opts) {
     if (!isSave(doc) || retired) return;
     if (opts && opts.restore === true) { restoreArmed = true; restoreSeq = pushSeq + 1; }   // this push and every later one
     const raw = opts && typeof opts.raw === 'string' ? opts.raw : null;
     doc = raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(doc));
     doc._saveRevision = revision;
-    doc._saveClient = (opts && CLIENT_RE.test(String(opts.asClient || ''))) ? opts.asClient : clientId;
+    doc._saveClient = writerId();
     latestLocal = doc;
     pending = doc;                     // keep only the newest
     pendingRaw = raw;                  // …with the string it was cloned from (null: the old compare path)
@@ -421,9 +447,12 @@ const CloudSave = (() => {
     const founded = d => Number(d && d.agent && d.agent.createdAt);   // the same station (never a cache of another one)
     const ownHeadBehind = !!writer && !!lastHead && lastHead.client === writer && lastHead.revision === revision && num(local._saveRevision) < revision
       && (founded(local) === founded(remote) || (Number.isNaN(founded(local)) && Number.isNaN(founded(remote))));
-    if (ownHeadBehind && num(local.updatedAt) > num(lastHead.requestUpdatedAt)) {
+    const dirtyBehind = isSave(local) && local._saveDirty && num(local._saveRevision) !== revision;
+    const liveTab = dirtyBehind && await anotherPageOpen(250);   // a second tab, not a crash recovery: preserved as before
+    if (!liveTab && ownHeadBehind && num(local.updatedAt) > num(lastHead.requestUpdatedAt)) {
       revision = num(local._saveRevision);
-      push(local, { asClient: writer });   // this one save only, sent now: a stalled POST must never block local boot
+      inherited = writer;   // this page continues that window's work until the station answers one of its saves for real
+      push(local);          // sent now: a stalled POST must never block local boot
       flush({ force: true });
       return local;
     }
@@ -435,9 +464,11 @@ const CloudSave = (() => {
     // and this window resumes the merge. When no answer came, the merge may still have landed: read the station again and
     // resume it if it did. Only a refused merge takes the old path: the save is preserved as a conflict copy.
     let merged = null;
-    if (isSave(local) && local._saveDirty && num(local._saveRevision) !== revision) {
+    if (dirtyBehind && !liveTab) {
       const before = revision;
-      const answer = await adoptMerge(local);
+      // no answer: ask once more — safe to repeat (it finds nothing to add, or this page's own merge), and the only way to
+      // learn of a merge that wrote nothing (re-review N3)
+      const answer = (await adoptMerge(local)) || (await adoptMerge(local));
       if (answer && !answer.refused) merged = answer;
       else if (!answer) {
         let again = null;
