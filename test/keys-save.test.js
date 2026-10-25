@@ -145,5 +145,85 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     A.eq(KT.nameSavedKeys('', ks), '', 'empty text');
   }
 
+  // ---- F. the run transcript holds its rows until keys.save succeeds (transcript-run.js o.hold) ----
+  {
+    const { makeRunTranscript } = require('../sidecar/transcript-run.js');
+    const fakeStore = () => {
+      const rows = [];
+      return { rows, appendStrict: e => { rows.push('user:' + e.content); return e; },
+        appendNewStrict: (sid, aid, msgs) => { let n = 0; for (const m of msgs || []) { if (m.__done) continue; m.__done = true; rows.push(m.role + ':' + (m.content || (m.tool_calls ? 'calls' : ''))); n++; } return n; } };
+    };
+    const turn = (id, name) => ({ role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name, arguments: '{}' } }] });
+    const reply = (id, content) => ({ role: 'tool', tool_call_id: id, content });
+
+    // the live run's real order (2026-10-25): a Task Brief step FIRST, the save a turn later
+    let saved = false;
+    const s = fakeStore();
+    const rt = makeRunTranscript({ store: s, streamId: 's', agentId: 'a', runId: 'r', hold: () => !saved });
+    rt.setDirective('key ' + PASTE);
+    const brief = turn('b1', 'brief_proceed'), briefOk = reply('b1', 'Task Brief settled.');
+    const save = turn('k1', 'keys_save'), saveOk = reply('k1', 'saved');
+    rt.start([]);
+    A.eq(s.rows, [], 'held: nothing written before the first model call');
+    rt.checkpoint({ phase: 'assistant', messages: [brief] });
+    rt.checkpoint({ phase: 'tool_results', messages: [brief, briefOk] });
+    A.eq(s.rows, [], 'held through a first tool batch that is NOT the save (the bug the live run caught)');
+    rt.checkpoint({ phase: 'assistant', messages: [brief, briefOk, save] });
+    A.eq(s.rows, [], 'held: the save call itself waits');
+    saved = true;   // the host's onSaved
+    rt.checkpoint({ phase: 'tool_results', messages: [brief, briefOk, save, saveOk] });
+    A.eq(s.rows, ['user:key ' + PASTE, 'assistant:calls', 'tool:Task Brief settled.', 'assistant:calls', 'tool:saved'], 'once saved: directive, then every held turn, in order');
+    A.ok(rt.directiveWritten(), 'the directive is durable from then on');
+
+    const s2 = fakeStore();
+    const rt2 = makeRunTranscript({ store: s2, streamId: 's', agentId: 'a', runId: 'r2', hold: () => true });
+    rt2.setDirective('key ' + PASTE + ' just answer');
+    rt2.start([]);
+    rt2.drain([{ role: 'assistant', content: 'ok' }]);
+    A.eq(s2.rows, ['user:key ' + PASTE + ' just answer', 'assistant:ok'], 'a run that never calls a tool: the strict run-end drain releases the hold');
+
+    const s3 = fakeStore();
+    const rt3 = makeRunTranscript({ store: s3, streamId: 's', agentId: 'a', runId: 'r3' });
+    rt3.setDirective('hello');
+    rt3.start([]);
+    A.eq(s3.rows, ['user:hello'], '(control) without the hold the directive lands before the first model call, as before');
+  }
+
+  // ---- G. the task brief that captured the paste is scrubbed (taskbrief-store.js scrubText) ----
+  {
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+    const { makeTaskBriefStore } = require('../sidecar/taskbrief-store.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'starnet-keys-brief-'));
+    try {
+      const store = makeTaskBriefStore({ fs, path, workspaces: dir });
+      await store.prepare({ key: 'k', text: 'here is my saleshandy api key ' + PASTE, runId: 'r1' }, 1);
+      const keys = [{ key: PASTE, envVar: 'SALESHANDY_API_KEY' }];
+      A.eq(await store.scrubText(t => KT.nameSavedKeys(t, keys)), true, 'scrub reports a change');
+      const b = store.read().briefs[0];
+      A.eq([b.originalDirective, b.currentInput], ['here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]', 'here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]'], 'directive + input named');
+      const file = path.join(dir, 'task-briefs.json');
+      A.ok(fs.readFileSync(file, 'utf8').indexOf(PASTE) < 0, 'the store file no longer holds the key');
+      A.ok(!fs.existsSync(file + '.bak') || fs.readFileSync(file + '.bak', 'utf8').indexOf(PASTE) < 0, 'nor does its .bak last-known-good copy');
+      A.eq(await store.scrubText(t => KT.nameSavedKeys(t, keys)), false, 'a second scrub changes nothing and says so');
+    } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} }
+  }
+
+  // ---- H. COMMS reads the swapped values back out of (raw, scrubbed) and names them everywhere (chat.js) ----
+  {
+    const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'frontend', 'app', 'chat.js'), 'utf8');
+    const sk = A.fnBody(src, 'function swappedKeys('), nk = A.fnBody(src, 'function nameKeys(');
+    A.ok(sk.length > 100 && sk.length < 2500 && nk.length > 100 && nk.length < 2500, 'both page helpers exist and are bounded');
+    const page = new Function(sk + '\n' + nk + '\nreturn { swappedKeys, nameKeys };')();
+    const raw = 'hey here is my saleshandy api key ' + PASTE + ' — send it';
+    const scrubbed = KT.nameSavedKeys(raw, [{ key: PASTE, envVar: 'SALESHANDY_API_KEY' }]);
+    const found = page.swappedKeys(raw, scrubbed);
+    A.eq(found, [{ value: PASTE, placeholder: '[SALESHANDY_API_KEY saved in KEYS]' }], 'the page recovers exactly the swapped value');
+    A.eq(page.swappedKeys('a ' + PASTE, KT.nameSavedKeys('a ' + PASTE, [{ key: PASTE, envVar: 'X_API_KEY' }])), [{ value: PASTE, placeholder: '[X_API_KEY saved in KEYS]' }], 'a key at the very end of the text');
+    A.eq(page.swappedKeys('unrelated', 'something [X_API_KEY saved in KEYS] else'), [], 'a pair that does not line up yields nothing');
+    A.eq(page.nameKeys('hey here is my saleshandy api key ' + PASTE.slice(0, 20) + '…', found), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]…', 'a key cut short by a clipped label is named too');
+    A.eq(page.nameKeys('run title: ' + PASTE + ' · run 6ab9', found), 'run title: [SALESHANDY_API_KEY saved in KEYS] · run 6ab9', 'a whole key anywhere');
+    A.eq(page.nameKeys(PASTE.slice(0, 12) + 'zzzz', found), PASTE.slice(0, 12) + 'zzzz', 'a mere shared prefix is left alone');
+  }
+
   A.report('keys-save');
 })().catch(e => { console.error(e); process.exit(1); });

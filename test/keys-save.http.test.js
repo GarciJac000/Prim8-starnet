@@ -94,6 +94,14 @@ async function run(text) {
     A.eq(row && row.autonomous, false, 'never granted for unattended runs by a paste');
     A.ok(list.text.indexOf(PASTE) < 0, 'the list never echoes the value');
 
+    // 3b. ON DISK: only the KEYS store holds the value — the run record, the task brief and the transcript name it
+    const holders = [];
+    const walk = dir => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) walk(p); else { try { if (fs.readFileSync(p).indexOf(PASTE) >= 0) holders.push(path.relative(workspace, p).replace(/\\/g, '/')); } catch (_) {} } } };
+    walk(workspace);
+    A.eq(holders.filter(p => !/^connectors\/servicekeys\.json(\.bak)?$/.test(p)), [], 'no file but the KEYS store holds the pasted key: ' + JSON.stringify(holders));
+    const transcriptRows = fs.readdirSync(path.join(workspace, 'transcript-history-v2')).filter(f => /\.jsonl$/.test(f)).map(f => fs.readFileSync(path.join(workspace, 'transcript-history-v2', f), 'utf8')).join('');
+    A.ok(transcriptRows.indexOf('[SALESHANDY_API_KEY saved in KEYS]') >= 0, 'the transcript\'s directive row names the key');
+
     // 4. the page's scrub call
     const scrub = await api('/api/servicekeys/scrub', { texts: ['hey here is my saleshandy api key ' + PASTE + ' — send my email campaign', 'nothing here', 42] });
     A.eq(scrub.status, 200, 'scrub -> 200');

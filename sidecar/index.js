@@ -15125,6 +15125,8 @@ function saveServiceKeyFromChat(input) {
   serviceKeyRefs.drop(record.id);   // a pasted key replaces a 1Password reference: forget the value read for it
   applyServiceKeysEnv();
   const saved = saveServiceKeys();  // verified read-back; false = live for this session, said so in the tool result
+  // the task brief captured the message, key and all, before the save: name it there too (async, failure noted)
+  taskBriefStore.scrubText(t => KeyTools.nameSavedKeys(t, liveServiceKeys())).catch(e => failNote('servicekeys.chat.brief-scrub', e));
   return { ok: true, record: brief(record), existed: !!prev, sameValue: false, saved };
 }
 /* POST /api/servicekeys/scrub { texts:[...] } -> { texts } — each text with every saved service key's value replaced by
@@ -20912,10 +20914,12 @@ async function runOnceCore(o) {
   const keyOwnerRun = !internal && !untrustedEntryRun && !hostPowerWithheld && !o.delegatedBy && !o.syntheticTrigger
     && (surface === 'interactive' || ownerTrusted);
   const keyOwnerTexts = () => keyOwnerRun ? recentUserTexts(messages, KeyTools.OWNER_TURNS) : null;
+  let keySavedThisRun = false;   // releases the run transcript's hold (runTranscript below)
   KeyTools.makeKeyTools({
     ownerTexts: keyOwnerTexts,
     save: saveServiceKeyFromChat,
-    tainted: () => !!execution.taintedBy()
+    tainted: () => !!execution.taintedBy(),
+    onSaved: () => { keySavedThisRun = true; }
   }).register(registry);
   // HARNESS SELF-KNOWLEDGE: always-present COMPUTER grant, local/read-only and secret-free. The reader
   // closes over this run's identity while every mutable section is collected fresh at call time from the
@@ -21717,10 +21721,12 @@ async function runOnceCore(o) {
   /* keys.save rides ONLY a task run whose Commander's own recent turns hold a key-shaped string. There it is ADVERTISED
      (a model that must first think to search for it would never save the paste); on every other run it is not granted
      at all, so the request, the deferred index and tool.search stay byte-identical to before. */
+  let keySaveOffered = false;
   if (resolved.tools.indexOf('keys.save') >= 0) {
     resolved.deferred = (resolved.deferred || []).filter(n => n !== 'keys.save');
     const ownerTexts = keyOwnerTexts();
-    if (!(isTask && ownerTexts && KeyTools.hasKeyCandidate(ownerTexts))) resolved.tools = resolved.tools.filter(n => n !== 'keys.save');
+    keySaveOffered = !!(isTask && ownerTexts && KeyTools.hasKeyCandidate(ownerTexts));
+    if (!keySaveOffered) resolved.tools = resolved.tools.filter(n => n !== 'keys.save');
   }
   /* DIRECT-DOMAIN WITHHOLDING — what a bounded one-host check may not even see: delegation and open web search, the
      two typo-cascade routes. web_request (issue #58) and the browser stay ADVERTISED; the dispatch guards below
@@ -22225,8 +22231,14 @@ async function runOnceCore(o) {
      first model call), each loop durable boundary (onCheckpoint below: the assistant tool-call turn before tools
      dispatch, the results after), the compaction tiers' strict drain, and run end — which then appends only what
      is left. Directive text is captured pre-loop (runTranscript.setDirective below). */
+  // A run that offers keys.save holds its rows until keys.save succeeds or the run ends (transcript-run.js o.hold), and
+  // its directive row names a saved key ([NAME saved in KEYS]) where the store's redaction would only say [redacted-secret].
+  const runTranscriptStore = keySaveOffered ? Object.assign({}, transcriptStore, {
+    appendStrict: (e) => transcriptStore.appendStrict(e && e.role === 'user' && typeof e.content === 'string'
+      ? Object.assign({}, e, { content: KeyTools.nameSavedKeys(e.content, liveServiceKeys()) }) : e)
+  }) : transcriptStore;
   const runTranscript = makeRunTranscript({
-    store: transcriptStore, streamId: o.streamId, agentId, runId, from: o.delegatedBy || '', dispatchState: o.dispatchDelivery && o.dispatchDelivery.state,
+    store: runTranscriptStore, hold: keySaveOffered ? () => !keySavedThisRun : null, streamId: o.streamId, agentId, runId, from: o.delegatedBy || '', dispatchState: o.dispatchDelivery && o.dispatchDelivery.state,
     // rows written after untrusted content entered this run carry its taint source (sec-taint 09-25)
     taint: () => execution.taintedBy() || (typeof o.connectorAuthority?.taintedBy === 'function' ? o.connectorAuthority.taintedBy() : null),
     // mid-run write failures never kill the run or reorder dialogue: the rows stay pending (and in the run journal)
@@ -23878,7 +23890,8 @@ async function runOnceCore(o) {
     if (billed) { try { credits.finishRun({ runId, agentId, usd: finalUsd, tokens: finalTokens, turns: finalTurns, reason: (result && result.reason) || 'done' }); } catch (_) {} }
     // record the run OUTCOME (durable history) — reason + a short title from the triggering user message. Fail-open.
     try {
-      const title = o.syntheticTrigger ? String(o.sessionPrompt || '') : latestUserText(msgs);   // synthetic reviews are not Commander messages
+      // synthetic reviews are not Commander messages; a key saved from the message (keys.save) is named, never kept
+      const title = KeyTools.nameSavedKeys(o.syntheticTrigger ? String(o.sessionPrompt || '') : latestUserText(msgs), liveServiceKeys());
       let deliveryText = '';
       if (o.sessionTitle && result && Array.isArray(result.messages)) {
         for (let i = result.messages.length - 1; i >= 0; i--) {

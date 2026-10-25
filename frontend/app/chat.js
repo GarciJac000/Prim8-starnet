@@ -9116,17 +9116,62 @@ const Chat = (() => {
     const r = await Harness.api.post('/api/servicekeys/scrub', { texts: raw });
     const out = r && r.ok && r.j && Array.isArray(r.j.texts) && r.j.texts.length === raw.length ? r.j.texts : null;
     if (!out) return 0;
-    const swapped = new Map();
-    out.forEach((t, i) => { if (typeof t === 'string' && t !== raw[i]) { turns[i].content = t; swapped.set(raw[i], t); } });
-    if (!swapped.size) return 0;
+    const keys = [];
+    out.forEach((t, i) => {
+      if (typeof t !== 'string' || t === raw[i]) return;
+      turns[i].content = t;
+      for (const k of swappedKeys(raw[i], t)) if (!keys.some(x => x.value === k.value)) keys.push(k);
+    });
+    if (!keys.length) return 0;
+    // the run's directive also rides RUN_META (the rate card's reference line) and may have titled the thread
+    for (const meta of RUN_META.values()) { if (meta && typeof meta.directive === 'string') meta.directive = nameKeys(meta.directive, keys); }
+    if (typeof ws.title === 'string') ws.title = nameKeys(ws.title, keys);
     try { App.persist(); } catch (_) {}
     if (log && isActiveWs(ws)) {
-      for (const body of log.querySelectorAll('.cmsg.user > .body')) {
-        const t = swapped.get(body.textContent);
-        if (t != null) body.textContent = t;
+      const walker = document.createTreeWalker(log, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.nodeType === 3) { const v = nameKeys(n.nodeValue, keys); if (v !== n.nodeValue) n.nodeValue = v; continue; }
+        for (const a of ['title', 'data-tip', 'aria-label']) {
+          const v = n.getAttribute(a);
+          if (v) { const s = nameKeys(v, keys); if (s !== v) n.setAttribute(a, s); }
+        }
       }
     }
-    return swapped.size;
+    return keys.length;
+  }
+  // The values the sidecar swapped, read back out of one (raw, scrubbed) pair: the scrubbed text is the raw text with
+  // each saved key replaced by its placeholder, so the raw text between the literal pieces IS the key. The page
+  // already held these values (the Commander typed them); nothing secret comes back from the sidecar. [] on any doubt.
+  function swappedKeys(raw, scrubbed) {
+    const re = /\[[A-Z][A-Z0-9_]* saved in KEYS\]/g;
+    const names = scrubbed.match(re) || [], parts = scrubbed.split(re), out = [];
+    let at = 0;
+    for (let i = 0; i < names.length; i++) {
+      const s = raw.indexOf(parts[i], at); if (s < 0) return [];
+      const start = s + parts[i].length;
+      const last = i === names.length - 1;
+      if (!last && !parts[i + 1]) return [];   // two placeholders side by side: no seam to cut at
+      const end = last && !parts[i + 1] ? raw.length : raw.indexOf(parts[i + 1], start);
+      if (end <= start) return [];
+      out.push({ value: raw.slice(start, end), placeholder: names[i] });
+      at = end;
+    }
+    return out;
+  }
+  // every whole saved key -> its placeholder; a key cut short by a clipped label ("4e7b2c9d1a0f…") too
+  function nameKeys(text, keys) {
+    let s = String(text == null ? '' : text);
+    for (const k of keys) {
+      if (k.value.length < 16) continue;
+      if (s.indexOf(k.value) >= 0) s = s.split(k.value).join(k.placeholder);
+      const head = k.value.slice(0, 12);
+      for (let at = s.indexOf(head); at >= 0; at = s.indexOf(head, at + 1)) {
+        let end = at + head.length;
+        while (end < s.length && k.value.charAt(end - at) === s.charAt(end)) end++;
+        if (s.charAt(end) === '…') { s = s.slice(0, at) + k.placeholder + s.slice(end); }
+      }
+    }
+    return s;
   }
   // returns true iff a chip was rendered (the bool aids testing)
   function offerConnectorDoor(runId, originWs) {

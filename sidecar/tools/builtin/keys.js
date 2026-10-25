@@ -27,7 +27,8 @@
                                                sameValue, saved } | { ok:false, error }
                                                — the host's KEYS upsert (verified persist, env apply, catalog policy)
      tainted    : () -> bool — the run has read content the Commander did not author; it may add a key but never
-                               REPLACE a saved one (an injected page must not swap a working key for another string) */
+                               REPLACE a saved one (an injected page must not swap a working key for another string)
+     onSaved    : (envVar) -> void — after a successful save (the host releases the run's transcript hold) */
 'use strict';
 (function (root, factory) {
   const api = factory();
@@ -149,6 +150,7 @@
         if (!r || !r.record) return { isError: true, content: 'could not save the key: ' + String((r && r.error) || 'unknown error'), summary: 'not saved' };
         const rec = r.record;
         const envVar = String(rec.envVar);
+        if (typeof d.onSaved === 'function') { try { d.onSaved(envVar); } catch (_) {} }   // the run's transcript hold lets go
         const lines = [
           (r.sameValue ? 'This key was already saved in KEYS as ' : (r.existed ? 'Replaced the saved key for ' + rec.name + ' — it is now in KEYS as ' : 'Saved ' + rec.name + '\'s key in KEYS as ')) + envVar + '.'
             + (r.saved === false ? ' WARNING: it works for this session but could not be verified on disk — tell the Commander it may not survive a restart.' : ''),
