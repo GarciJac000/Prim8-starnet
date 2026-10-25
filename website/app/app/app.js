@@ -6026,9 +6026,10 @@ const App = (() => {
         : 'The station file was newer than this window’s unsent changes, so it was kept' + (n ? ', with ' + n + ' session' + s(n) + ' from this window added' : '') + '. This window’s whole save is kept beside it' + (merge.kept ? ' as ' + merge.kept : '') + '.';
       setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify(line, 'warn'); } catch (_) {} }, 1500);
     }
-    // THE BOOT OFFER (StationUI.offerPreservedSaves) IS HELD for 0.14.0: its final review left two cases where a closed
-    // window's copy could stop being offered (a transient read error settles it; "Not now" hides older copies never shown).
-    // A live conflict still offers "Restore this window's sessions" on the save banner. Re-enable with those two fixed.
+    // a window's refused save left on the station may hold sessions this station lacks: offer them back once it is up
+    // (held in 0.14.0; back in 0.14.1 — a copy the station could not read this instant is never settled as empty, and
+    // "Not now" stays the review's watermark: no copy saved at or before the declined one is offered again)
+    if (saved && saved.agent) setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.offerPreservedSaves) StationUI.offerPreservedSaves(); } catch (_) {} }, 2500);
     // restore the provider BEFORE the credential check so a codex agent (tokens server-side) jumps straight
     // in after a wipe/origin-reset instead of being misrouted to an OpenRouter key prompt.
     if (saved && saved.agent) migrateLegacyReasoning(saved);   // before any saved effort reaches the wire (0.12.5 reasoning migration)
