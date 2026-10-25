@@ -1157,6 +1157,7 @@ test/save-restore.test.js
 test/save-restore-safety.test.js
 test/save-conflicts-route.test.js
 test/save-restore-hardening.test.js
+test/save-adopt-merge.test.js
 test/sprite-direction-details.test.js
 test/chat-history-reconcile.test.js
 test/prop-industrial-remaster.test.js
