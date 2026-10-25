@@ -22234,8 +22234,10 @@ async function runOnceCore(o) {
   // A run that offers keys.save holds its rows until keys.save succeeds or the run ends (transcript-run.js o.hold), and
   // its directive row names a saved key ([NAME saved in KEYS]) where the store's redaction would only say [redacted-secret].
   const runTranscriptStore = keySaveOffered ? Object.assign({}, transcriptStore, {
-    appendStrict: (e) => transcriptStore.appendStrict(e && e.role === 'user' && typeof e.content === 'string'
-      ? Object.assign({}, e, { content: KeyTools.nameSavedKeys(e.content, liveServiceKeys()) }) : e)
+    appendStrict: (e) => transcriptStore.appendStrict(Object.assign({}, e, {
+      content: e && e.role === 'user' && typeof e.content === 'string' ? KeyTools.nameSavedKeys(e.content, liveServiceKeys()) : (e && e.content),
+      taint: e ? e.taint : null   // runTranscript's own stamp (taintNow()), forwarded unchanged
+    }))
   }) : transcriptStore;
   const runTranscript = makeRunTranscript({
     store: runTranscriptStore, hold: keySaveOffered ? () => !keySavedThisRun : null, streamId: o.streamId, agentId, runId, from: o.delegatedBy || '', dispatchState: o.dispatchDelivery && o.dispatchDelivery.state,
