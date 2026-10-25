@@ -27689,7 +27689,11 @@ function serveSaveConflicts(req, res) {
     for (const f of files) {
       if (read && Date.now() - started > 30) { more = !!state.doc; break; }   // no station = nothing settles: never "more"
       read++;
-      const doc = saveStore.readConflict('agent', f.name);
+      const got = saveStore.readConflictState('agent', f.name);
+      // a copy that could not be READ this instant (locked, EBUSY/EACCES) may still hold lost work: never settled, and the page
+      // asks again (`more`) — settling it here hid it from every later boot while it stayed unchanged
+      if (got.status === 'unreadable') { more = !!state.doc; continue; }
+      const doc = got.doc;
       if (!doc) { if (state.doc) settle.push(f); continue; }   // gone, or does not parse: nothing it could offer
       // a copy from before a station RESET, while the station is from after it, is erased work: listed, never offered back
       const predatesReset = saveStore.predatesReset(doc, state.doc);

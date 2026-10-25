@@ -316,6 +316,32 @@ function stationUi(cloudSave, uiStore) {
       A.ok(pr.doc.workstreams[5] === st.workstreams[5] && pr.doc !== st && pr.doc.workstreams !== st.workstreams, '3d: plan copies the station shallowly');
     }
     {
+      // 3e. (why the 0.14.0 boot offer was held) a copy the station could not READ this instant — locked by an antivirus scan
+      // or a backup tool: EBUSY/EACCES — still holds the lost work. It used to be settled as "nothing to bring back" and was
+      // never offered again while it stayed unchanged.
+      const root = workspace();
+      let locked = true;
+      const lfs = new Proxy(fs, { get(t, k) {
+        if (k === 'readFileSync') return function (f) {
+          if (locked && /^agent\.save-conflict-/.test(path.basename(String(f)))) { const e = new Error('EBUSY: resource busy or locked'); e.code = 'EBUSY'; throw e; }
+          return t.readFileSync.apply(t, arguments);
+        };
+        const v = t[k]; return typeof v === 'function' ? v.bind(t) : v;
+      } });
+      const host = sidecar(root, { fs: lfs });
+      const st = stationDoc();
+      host.saveStore.save('agent', st, { compareRevision: true });
+      const copy = Object.assign(JSON.parse(JSON.stringify(st)), { _saveRevision: 0, _saveClient: 'closed-window', updatedAt: 3000 });
+      copy.workstreams.push({ id: 'lost-work', title: 'L', history: [turn('user', 'l')] });
+      const r = host.saveStore.save('agent', copy, { compareRevision: true });
+      A.ok(r.conflict === true, 'fixture: a closed window\'s save is preserved beside the station');
+      const busy = await host.conflicts();
+      A.ok(busy.conflicts.length === 0 && busy.more === true, '3e: an unreadable copy offers nothing yet and asks the page to ask again (' + JSON.stringify(busy) + ')');
+      locked = false;
+      const later = await host.conflicts();
+      A.ok(later.conflicts.some(c => c.file === r.recovery && c.restorable === 1), '3e: once it can be read, it is offered — it was never settled (' + JSON.stringify(later) + ')');
+    }
+    {
       // the review's scenario: a 3.2 MiB station and 20 whole-station snapshots (it held the sidecar thread for 787 ms)
       const root = workspace();
       const host = sidecar(root);

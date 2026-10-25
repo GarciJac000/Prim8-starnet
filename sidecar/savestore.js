@@ -611,14 +611,24 @@
       },
       // one preserved snapshot by its bare file name (this agent's conflict grammar only), or undefined when it is gone or
       // does not parse (never removed).
-      readConflict(agentId, name) {
+      readConflict(agentId, name) { return this.readConflictState(agentId, name).doc; },
+      // the same read, TAGGED (the 0.14.0 boot offer was held for this): { status: 'ok', doc } | 'absent' (gone, or not this
+      // agent's grammar) | 'corrupt' (read, but not a save object) | 'unreadable' (it is there, but a locked/EBUSY/EACCES read
+      // failed this instant — it may still hold lost work, so a caller must never treat it as having nothing to offer)
+      readConflictState(agentId, name) {
         saveFile(agentId);
         const prefix = String(agentId) + '.save-conflict-';
-        if (typeof name !== 'string' || name.indexOf(prefix) !== 0 || !/^[A-Za-z0-9_.-]+\.json$/.test(name) || name.indexOf('..') >= 0) return undefined;
+        if (typeof name !== 'string' || name.indexOf(prefix) !== 0 || !/^[A-Za-z0-9_.-]+\.json$/.test(name) || name.indexOf('..') >= 0) return { status: 'absent' };
+        let raw;
+        try { raw = fs.readFileSync(pathMod.join(rootDir, name), 'utf8'); }
+        catch (e) {
+          if (e && e.code === 'ENOENT') return { status: 'absent' };
+          failNote('savestore.conflicts.read', e);
+          return { status: 'unreadable' };
+        }
         let doc;
-        try { doc = JSON.parse(fs.readFileSync(pathMod.join(rootDir, name), 'utf8')); }
-        catch (e) { if (!e || e.code !== 'ENOENT') failNote('savestore.conflicts.read', e); return undefined; }
-        return (doc && typeof doc === 'object' && !Array.isArray(doc)) ? doc : undefined;
+        try { doc = JSON.parse(raw); } catch (e) { failNote('savestore.conflicts.read', e); return { status: 'corrupt' }; }
+        return (doc && typeof doc === 'object' && !Array.isArray(doc)) ? { status: 'ok', doc } : { status: 'corrupt' };
       },
       // true when a preserved station copy is ERASED WORK: from before this computer's station was reset (the same proof
       // that refuses it as a re-seed) while the current `station` is from after the reset. Erased work is never offered back
