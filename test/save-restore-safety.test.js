@@ -31,7 +31,8 @@ const repo = path.join(__dirname, '..');
 const read = rel => fs.readFileSync(path.join(repo, rel), 'utf8');
 const indexSrc = read('sidecar/index.js');
 const handlers = ['function crewLooksOf(save)', 'function seedSaveMemos(agentId, doc)', 'function serveSaveLoad(req, res)', 'async function handleSaveWrite(req, res)',
-  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)']
+  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)',
+  'function keepStationGrowth(doc, station)', 'function keepTerminalApprovals(doc, station)', 'async function handleSaveAdopt(req, res)']
   .map(h => { const b = fnBody(indexSrc, h); A.ok(b.startsWith(h) && b.length < 6000, 'sliced exactly ' + h); return b; });
 const cloudsaveSrc = read('frontend/app/cloudsave.js');
 const ui = read('frontend/app/stationui.js');
@@ -61,7 +62,7 @@ function sidecar(root, o) {
     publicWorkspaceLineage: () => ({ version: 1 }), URL };
   if (o.tombstones) sandbox.sessionTombstones = o.tombstones;
   const api = vm.runInNewContext("let _remoteLooksMemo = { stamp: '', looks: null };\nlet _stationEpochMemo = { stamp: '', epoch: 1 };\n" + handlers.join('\n') +
-    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore })', sandbox);
+    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore, handleSaveAdopt })', sandbox);
   async function call(fn, req) {
     let code = 0, text = '';
     await fn(req, { writeHead: c => { code = c; }, end: b => { text = b; } });
@@ -75,6 +76,7 @@ function sidecar(root, o) {
       const u = String(url);
       if (u.indexOf('/api/save/conflicts/restore') === 0) return call(api.handleSaveConflictRestore, { body: opts.body });
       if (u.indexOf('/api/save/conflicts') === 0) return call(api.serveSaveConflicts, { url: u });
+      if (u.indexOf('/api/save/adopt') === 0) return call(api.handleSaveAdopt, { body: opts.body });   // a reopening window's unprovable save, merged
       return (opts && opts.method === 'POST') ? call(api.handleSaveWrite, { body: opts.body }) : call(api.serveSaveLoad, { url: u });
     }
   };
@@ -383,6 +385,15 @@ function stationUi(cloudSave, uiStore) {
       let store = makeSaveStore({ fs, pathMod: path, root, clock: { now: () => Date.now() } });
       const seed = store.save('agent', stationDoc({ _saveRevision: 23, updatedAt: 9000, _saveClient: 'window-a' }), { compareRevision: true });
       A.ok(seed.ok === true && seed.seeded === true, '6: window A\'s copy re-seeds the empty file (its ACK is lost)');
+      store = makeSaveStore({ fs, pathMod: path, root, clock: { now: () => Date.now() } });   // sidecar restart
+      // the station file's own wrapper names the window and revision of that seed (0.14.1): after the restart the store still
+      // proves the head is window A's own write, so its newer save LANDS — never a conflict that freezes the station
+      const own = store.save('agent', stationDoc({ _saveRevision: 23, updatedAt: 9050, _saveClient: 'window-a',
+        workstreams: [{ id: 'general', title: null, history: [turn('user', 'hi'), turn('assistant', 'own')] }] }), { compareRevision: true });
+      A.ok(own.ok === true && own.revision === seed.revision + 1, '6: after the restart window A\'s newer save lands on its own seed (' + JSON.stringify(own) + ')');
+      // a station file written before 0.14.1 names no writer in its wrapper: there, after a restart, the store cannot vouch
+      const main = path.join(root, 'agent.save.json'), legacy = JSON.parse(fs.readFileSync(main, 'utf8'));
+      delete legacy.revision; delete legacy.client; fs.writeFileSync(main, JSON.stringify(legacy));
       store = makeSaveStore({ fs, pathMod: path, root, clock: { now: () => Date.now() } });   // sidecar restart
       const next = store.save('agent', stationDoc({ _saveRevision: 23, updatedAt: 9100, _saveClient: 'window-a',
         workstreams: [{ id: 'general', title: null, history: [turn('user', 'hi'), turn('assistant', 'more')] }] }), { compareRevision: true });

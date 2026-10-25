@@ -81,10 +81,11 @@
       return removed;
     }
     // the restore backups beside the station file, newest restore first by the time in the name; the copy just written is
-    // always kept. Best-effort: a failed prune never fails the restore.
-    function pruneRestoreBackups(agentId, keepName) {
+    // always kept. Best-effort: a failed prune never fails the restore. kind: 'restore' (a preserved window save brought
+    // back) or 'adopt' (a reopening window's unsent save merged in, POST /api/save/adopt) — each kind keeps its own newest few.
+    function pruneRestoreBackups(agentId, keepName, kind) {
       if (typeof fs.readdirSync !== 'function' || typeof fs.unlinkSync !== 'function') return 0;
-      const re = new RegExp('^' + agentId + '\\.save-before-restore-(\\d+)\\.json$');
+      const re = new RegExp('^' + agentId + '\\.save-before-' + (kind === 'adopt' ? 'adopt' : 'restore') + '-(\\d+)\\.json$');
       let rows;
       try { rows = fs.readdirSync(rootDir).map(n => { const m = typeof n === 'string' ? re.exec(n) : null; return m ? { n, t: Number(m[1]) } : null; }).filter(Boolean); }
       catch (e) { failNote('savestore.restore-backup-prune.list', e); return 0; }
@@ -315,6 +316,25 @@
       catch (e) { if (!e || e.code !== 'ENOENT') failNote('savestore.offer-settled.unlink', e); }
     }
     function sameFounding(a, b) { return a === b || (Number.isNaN(a) && Number.isNaN(b)); }
+    // a window's whole save kept beside the station file as <agent>.save-conflict-<its _saveClient>.json (the newest few
+    // kept: pruneConflicts). Returns the file name. A refused save keeps its snapshot this way, and so does a merge that
+    // did not take a window's own changes (POST /api/save/adopt).
+    function preserveCopy(agentId, doc) {
+      const client = /^[A-Za-z0-9_-]{1,80}$/.test(String(doc && doc._saveClient || '')) ? doc._saveClient : clock.now() + '-' + (++tmpSeq);
+      const name = String(agentId) + '.save-conflict-' + client + '.json';
+      writeAtomic(pathMod.join(rootDir, name), doc);
+      pruneConflicts(String(agentId), name);
+      return name;
+    }
+    /* THE HEAD THIS STORE WROTE, PROVED FROM DISK (no in-process memo): a clean read whose wrapper names the revision and the
+       window (_saveClient) this store wrote, while the doc still carries both. { client, at: that write's request
+       updatedAt, revision }, or null — a wrapper from before 0.14.1, a .bak recovery, or an outside edit proves nothing. */
+    function vouchedHead(read, wrapper, revision) {
+      if (!read || read.status !== 'ok' || !wrapper || typeof wrapper !== 'object' || !wrapper.doc || typeof wrapper.doc !== 'object') return null;
+      if (!Number.isInteger(wrapper.revision) || wrapper.revision !== revision || num(wrapper.doc._saveRevision) !== revision) return null;
+      if (typeof wrapper.client !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(wrapper.client) || wrapper.client !== wrapper.doc._saveClient) return null;
+      return { client: wrapper.client, at: num(wrapper.requestUpdatedAt), revision };
+    }
     // prior (optional): what the caller already knows about THIS file's current main — { status, raw? } from its own
     // read moments ago (save() reads it for the anti-clobber gate), so the main is not read and parsed a second time.
     function writeAtomic(file, value, prior) {
@@ -342,10 +362,14 @@
     return {
       // HTTP callers must distinguish a missing station from temporarily inaccessible bytes.
       // Keep load()'s legacy optional-document shape for internal best-effort readers.
+      // head (when provable): which window wrote the current doc and its request's updatedAt (see vouchedHead), so a
+      // reopening page can tell whether its own cached save is newer or older than that write.
       loadState(agentId) {
         const r = readTagged(saveFile(agentId));
         const w = r.wrapper;
-        return { status: r.status, doc: w && typeof w === 'object' && w.doc && typeof w.doc === 'object' ? w.doc : undefined };
+        const doc = w && typeof w === 'object' && w.doc && typeof w.doc === 'object' ? w.doc : undefined;
+        const head = doc ? vouchedHead(r, w, num(doc._saveRevision)) : null;
+        return head ? { status: r.status, doc, head } : { status: r.status, doc };
       },
       // the stored save envelope (the exact doc the frontend persisted), or undefined when there is none or
       // the file is unreadable/corrupt. Never throws on a bad file — a wiped agent reads as "nothing yet".
@@ -452,15 +476,21 @@
              every revision since `expected` is this window's own. Accept the save when it is also NEWER than that
              write's request (a delayed older request never replaces a newer one). A head this process cannot vouch
              for — an outside edit, a restart — stays a conflict: preserved, and restorable from the station. */
-          const ownHead = !!known && expected < revision && /^[A-Za-z0-9_-]{1,80}$/.test(String(doc._saveClient || ''))
-            && doc._saveClient === known.client && num(requestUpdatedAt) > num(known.replayAt);
+          /* …AND ACROSS A RESTART (support reports 10-15…10-25: one window, the station "went back"). The memo dies with
+             the process, so a window that wrote the head, lost the ACK and then died (crash, power loss, a killed app)
+             came back as a new window carrying its newer cached save on the old revision — refused, and every save after
+             it refused too. The store's own wrapper now names the revision and window it wrote (`revision`, `client`);
+             while the doc still carries both, the head is provably that window's write. An outside edit that moved the
+             doc's revision or writer is not, and stays a conflict. */
+          // Never across stations: the head and the request must be the same station's founding (agent.createdAt).
+          const head = known ? { client: known.client, at: known.replayAt } : vouchedHead(prevRead, prev, revision);
+          const ownHead = !!head && expected < revision && /^[A-Za-z0-9_-]{1,80}$/.test(String(doc._saveClient || ''))
+            && doc._saveClient === head.client && num(requestUpdatedAt) > num(head.at)
+            && sameFounding(foundedAt(doc), known ? known.founded : foundedAt(prev && prev.doc));
           if (reset || (expected !== revision && !ownHead && !seed)) {
             // Keep the rejected snapshot durably as well as the current station. Never silently
             // merge whole envelopes: removals and roster/config edits have conflicting semantics.
-            const client = /^[A-Za-z0-9_-]{1,80}$/.test(String(doc._saveClient || '')) ? doc._saveClient : clock.now() + '-' + (++tmpSeq);
-            const recovery = String(agentId) + '.save-conflict-' + client + '.json';
-            writeAtomic(pathMod.join(rootDir, recovery), doc);
-            pruneConflicts(String(agentId), recovery);
+            const recovery = preserveCopy(String(agentId), doc);
             const refused = { ok: false, stale: true, conflict: true, revision, recovery, updatedAt: prevUpdated };
             if (reset) refused.reset = true;   // the station file is empty because it was RESET: no other window wrote it
             else {
@@ -497,7 +527,8 @@
         const priorFounded = known ? known.founded : foundedAt(prev && prev.doc);
         if (prevRead.status !== 'ok' || explicitRestore || !sameFounding(priorFounded, foundedAt(doc))) unsettle(String(agentId));
         lastWritten.delete(file);
-        writeAtomic(file, { version: 1, agentId: String(agentId), updatedAt: incomingUpdated, savedAt: clock.now(), ...(options.compareRevision ? { requestUpdatedAt } : {}), ...(options.compareRevision && seededRevision > 0 ? { seededRevision } : {}),
+        const writer = options.compareRevision && /^[A-Za-z0-9_-]{1,80}$/.test(String(doc._saveClient || '')) ? { revision: num(doc._saveRevision), client: doc._saveClient } : {};
+        writeAtomic(file, { version: 1, agentId: String(agentId), updatedAt: incomingUpdated, savedAt: clock.now(), ...(options.compareRevision ? { requestUpdatedAt } : {}), ...writer, ...(options.compareRevision && seededRevision > 0 ? { seededRevision } : {}),
           ...(options.compareRevision && seededRevision > 0 && seededClient ? { seededClient } : {}), doc: doc },
           { status: prevRead.status, raw: prevRead.raw });
         writes++;
@@ -595,6 +626,14 @@
       // makes its copies ordinary preserved work (review 10-23 #5). No `station` = there is no station file.
       predatesReset(doc, station) { return erasedWork(foundedAt(doc), station && typeof station === 'object' ? foundedAt(station) : undefined); },
 
+      // keep a window's whole save beside the station file as a preserved copy (see preserveCopy): restorable and
+      // downloadable like a refused save's snapshot. Returns its bare file name.
+      preserve(agentId, doc) {
+        saveFile(agentId);   // validates the id before it names a file
+        if (!doc || typeof doc !== 'object') throw new Error('preserve: a doc object is required');
+        return preserveCopy(String(agentId), doc);
+      },
+
       // a durable copy of the current station file under <agentId>.save-before-<label>.json, taken before a restore
       // rewrites it. Returns the copy's name, or null when there is no station file to copy. Restore backups
       // (label restore-<ms>) keep only the newest RESTORE_BACKUP_KEEP, and never drop the one just written (review 10-23 #7).
@@ -606,7 +645,8 @@
         const name = String(agentId) + '.save-before-' + label + '.json';
         ensureRoot();
         writeDurable(pathMod.join(rootDir, name), raw);
-        if (/^restore-\d+$/.test(String(label))) pruneRestoreBackups(String(agentId), name);
+        const kind = /^(restore|adopt)-\d+$/.exec(String(label));
+        if (kind) pruneRestoreBackups(String(agentId), name, kind[1]);
         return name;
       },
 

@@ -98,7 +98,7 @@ function oldAck(cachedRaw, sentDoc, revision, body) {
     A.eq(s.cache.get('starnet.save'), expected, 'the cache bytes after the ACK are EXACTLY what the old compare path wrote');
     const landed = JSON.parse(s.cache.get('starnet.save'));
     A.ok(landed._saveDirty === false && landed._saveRevision === 7 && landed.updatedAt === 1760000000123, 'the cached save is clean, at the acknowledged revision and time');
-    A.eq(JSON.stringify({ ...JSON.parse(s.posted()), _saveClient: undefined, _saveRevision: undefined }), JSON.stringify({ ...JSON.parse(raw), _saveRevision: undefined }), 'the POSTed save is the same save');
+    A.eq(JSON.stringify({ ...JSON.parse(s.posted()), _saveClient: undefined, _saveRevision: undefined }), JSON.stringify({ ...JSON.parse(raw), _saveClient: undefined, _saveRevision: undefined }), 'the POSTed save is the same save');
   }
 
   /* an ACK without updatedAt keeps the cache's own stamp — same bytes as before */

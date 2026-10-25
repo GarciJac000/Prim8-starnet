@@ -36,7 +36,8 @@ const repo = path.join(__dirname, '..');
 const read = rel => fs.readFileSync(path.join(repo, rel), 'utf8');
 const indexSrc = read('sidecar/index.js');
 const handlers = ['function crewLooksOf(save)', 'function seedSaveMemos(agentId, doc)', 'function serveSaveLoad(req, res)', 'async function handleSaveWrite(req, res)',
-  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)']
+  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)',
+  'function keepStationGrowth(doc, station)', 'function keepTerminalApprovals(doc, station)', 'async function handleSaveAdopt(req, res)']
   .map(h => { const b = fnBody(indexSrc, h); A.ok(b.startsWith(h) && b.length < 6000, 'sliced exactly ' + h); return b; });
 const cloudsaveSrc = read('frontend/app/cloudsave.js');
 const ui = read('frontend/app/stationui.js');
@@ -52,7 +53,7 @@ const conflictFiles = root => fs.readdirSync(root).filter(n => n.indexOf('agent.
 function sidecar(root, storeFs) {
   const saveStore = makeSaveStore({ fs: storeFs || fs, pathMod: path, root, clock: { now: () => Date.now() } });
   const api = vm.runInNewContext("let _remoteLooksMemo = { stamp: '', looks: null };\nlet _stationEpochMemo = { stamp: '', epoch: 1 };\n" + handlers.join('\n') +
-    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore })', {
+    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore, handleSaveAdopt })', {
     saveStore, workspaceDegraded: false, growthRatings: { latestTs: () => 0 }, readBody: async req => req.body, failNote: () => {},
     observeDeletedSessions: () => [],   // the deleted-session ledger feed every landed station save calls (qa/bugs/3e926b6a)
     require: m => { if (m === './save-restore.js') return require('../sidecar/save-restore.js'); throw new Error('unexpected require ' + m); },
@@ -67,7 +68,8 @@ function sidecar(root, storeFs) {
     saveStore,
     conflicts: () => call(api.serveSaveConflicts, { url: '/api/save/conflicts' }).then(r => r.json()),
     restore: file => call(api.handleSaveConflictRestore, { body: JSON.stringify({ file }) }).then(r => r.json()),
-    fetch: (url, opts) => (opts && opts.method === 'POST')
+    fetch: (url, opts) => String(url).indexOf('/api/save/adopt') === 0 ? call(api.handleSaveAdopt, { body: opts.body })   // a reopening window's unprovable save, merged
+      : (opts && opts.method === 'POST')
       ? call(api.handleSaveWrite, { body: opts.body })
       : call(api.serveSaveLoad, { url: String(url) })
   };

@@ -12583,6 +12583,7 @@ const ROUTES = [
   { m: 'POST', exact: '/api/save/recovery-ack', h: handleSaveRecoveryAck },
   { m: 'GET', qsplit: '/api/save/conflicts', h: serveSaveConflicts },   // qsplit, not exact: the boot offer sends ?after=<ms> (an exact miss fell through to serveSaveLoad)
   { m: 'POST', exact: '/api/save/conflicts/restore', h: handleSaveConflictRestore },
+  { m: 'POST', exact: '/api/save/adopt', h: handleSaveAdopt },   // a reopening window's unprovable unsent save: merged, never refused
   { m: 'GET', prefix: '/api/save', h: serveSaveLoad },
   { m: 'POST', qsplit: '/api/save', h: handleSaveWrite },   // qsplit, not exact: the unload beacon carries ?ticket= (apiauth.ticketOk)
   { m: 'GET', prefix: '/api/insights', h: serveInsights },
@@ -27642,7 +27643,10 @@ function serveSaveLoad(req, res) {
     // path can disclose a damaged/restored save instead of silently presenting the pristine first-run ceremony.
     // EL-11 FIX 1 (GB-9): also surface workspaceDegraded at boot-read time, not only on the first refused write.
     const recovery = (typeof saveStore.recoveryNotice === 'function') ? (saveStore.recoveryNotice(agent) || null) : null;
-    json(200, { save: doc || null, recovery: recovery, lineage: publicWorkspaceLineage(), degraded: workspaceDegraded ? true : undefined });
+    // head: the window that wrote this save and its request time, when the store can prove it (savestore vouchedHead) — a
+    // reopening page compares its own cached save against it (cloudsave reconcile)
+    json(200, { save: doc || null, head: state.head ? { client: state.head.client, requestUpdatedAt: state.head.at, revision: state.head.revision } : undefined,
+      recovery: recovery, lineage: publicWorkspaceLineage(), degraded: workspaceDegraded ? true : undefined });
   } catch (e) { json(503, { error: 'Could not read the saved station. Retry to recover it.', unreadable: true }); }
 }
 // POST /api/save/recovery-ack { agent? } — the frontend has SHOWN the honest quarantine/recovery notice; clear
@@ -27731,6 +27735,73 @@ async function handleSaveConflictRestore(req, res) {
     settle();
     json(200, { ok: true, added: r.added.length, extended: r.extended.length, copied: r.copied.length, revision: result.revision, backup });
   } catch (e) { json(200, { ok: false, error: (e && e.message) || 'restore failed' }); }
+}
+/* POST /api/save/adopt { ...envelope } — a reopening window's unsent save that neither side can prove newer (support reports
+   10-15…10-25: one window, the station "went back", every save refused as another window's). The window's browser cache held
+   newer work on an older revision than the station file, from a build that did not record which window wrote it (0.14.0
+   and earlier), or the station file's head was written by someone else (another window, a terminal change, a restore).
+   Refusing it froze the station file for the whole session. Instead, at boot only, before the window resumes:
+     • the side saved LAST is the base (at boot there is no stale tab: the cache is this browser's latest save, the file the
+       station's latest write), and every session of the other side comes back into it (save-restore.js: additive — a
+       session deleted on purpose stays deleted, a diverged conversation is kept beside as a restored copy);
+     • the station file is copied aside first (<agent>.save-before-adopt-<ms>.json) and, when it is the base, the window's
+       whole save is kept beside it as a preserved copy (`kept`), so nothing either side held is lost;
+     • the station's growth projection never goes back (its rating watermark is kept when it is ahead), and a terminal's
+       approval change (the head written by `approval-…`) keeps its approval modes;
+     • a copy from before this computer's station was reset is erased work and is refused (#101 erase authority).
+   Writes the merge as the station's next revision and answers { ok, revision, updatedAt, doc, base, added, extended, copied,
+   backup }: the window resumes `doc`. Any refusal ({ ok:false, … }) leaves the station untouched; the window then takes the
+   ordinary path (its save is preserved as a conflict copy). */
+function keepStationGrowth(doc, station) {
+  const mark = d => Math.max(0, Number(d && d.stationStats && d.stationStats.ratingSyncAt) || 0);
+  if (!(mark(station) > mark(doc))) return;
+  doc.stationStats = station.stationStats;
+  const rows = d => [d && d.agent].concat(Array.isArray(d && d.agents) ? d.agents : []).filter(x => x && typeof x === 'object');
+  const theirs = new Map(rows(station).map(x => [String(x.id || ''), x]));
+  for (const row of rows(doc)) { const s = theirs.get(String(row.id || '')); if (s && Object.prototype.hasOwnProperty.call(s, 'stats')) row.stats = s.stats; }
+}
+function keepTerminalApprovals(doc, station) {
+  if (!/^approval-/.test(String(station && station._saveClient || ''))) return;
+  const rows = d => [d && d.agent].concat(Array.isArray(d && d.agents) ? d.agents : []).filter(x => x && typeof x === 'object');
+  const theirs = new Map(rows(station).map(x => [String(x.id || ''), x]));
+  for (const row of rows(doc)) { const s = theirs.get(String(row.id || '')); if (s && (s.approvalMode === 'full' || s.approvalMode === 'ask')) row.approvalMode = s.approvalMode; }
+}
+async function handleSaveAdopt(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 16 << 20)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || body.schema !== 'starnet.save' || !body.agent || typeof body.agent !== 'object') return json(400, { error: 'a save envelope object is required' });
+  if (workspaceDegraded) return json(200, { ok: false, error: 'workspace written by newer StarNet', degraded: true });
+  try {
+    const state = saveStore.loadState('agent');
+    if (state.status === 'unreadable') return json(200, { ok: false, error: 'the station file is unreadable right now', unreadable: true });
+    const station = state.doc;
+    if (!station) return json(200, { ok: false, error: 'there is no station file to merge into', absent: true });   // the ordinary save seeds it
+    if (Number(station.version) > Number(body.version)) return json(200, { ok: false, error: 'the station file is a newer save format' });
+    if (saveStore.predatesReset(body, station)) return json(200, { ok: false, error: 'that copy is from before this computer’s station was reset', predatesReset: true });
+    // a copy of ANOTHER station (a different founding) is never merged into this one
+    const founded = d => Number(d && d.agent && d.agent.createdAt);
+    if (!(founded(body) === founded(station) || (Number.isNaN(founded(body)) && Number.isNaN(founded(station))))) return json(200, { ok: false, error: 'that copy is of another station', otherStation: true });
+    const client = /^[A-Za-z0-9_-]{1,80}$/.test(String(body._saveClient || '')) ? body._saveClient : null;
+    const windowLast = Number(body.updatedAt) > Number(station.updatedAt);
+    const base = windowLast ? Object.assign({}, body) : station, other = windowLast ? station : body;
+    const tombs = (typeof sessionTombstones !== 'undefined' && sessionTombstones && typeof sessionTombstones.forgotten === 'function') ? sessionTombstones : null;
+    const r = require('./save-restore.js').plan(base, other, { forgotten: tombs ? ((id, ts) => tombs.forgotten(id, ts)) : null });
+    const doc = r.doc;
+    if (windowLast) { keepStationGrowth(doc, station); keepTerminalApprovals(doc, station); }
+    const at = Date.now();
+    const backup = saveStore.backup('agent', 'adopt-' + at);
+    // the station file was saved last: the window's crew, floor and settings changes are not in the merge, so its whole
+    // save is kept beside the station (restorable and downloadable, like a refused save's copy)
+    const kept = windowLast ? null : saveStore.preserve('agent', Object.assign({}, body, { _saveClient: client || ('adopt-' + at) }));
+    Object.assign(doc, { updatedAt: Math.max(at, (Number(station.updatedAt) || 0) + 1, (Number(body.updatedAt) || 0) + 1),
+      _saveRevision: Number(station._saveRevision) || 0, _saveClient: client || ('adopt-' + at), _saveDirty: false });
+    const result = saveStore.save('agent', doc, { compareRevision: true });
+    if (!result || result.ok !== true) return json(200, { ok: false, error: result && result.conflict ? 'the station changed during the merge; try again' : 'the station refused the merge', backup });
+    try { seedSaveMemos('agent', doc); } catch (e) { failNote('save.adopt.seed-memos', e); }
+    observeDeletedSessions(doc);
+    json(200, { ok: true, revision: result.revision, updatedAt: result.updatedAt, doc: Object.assign({}, doc, { updatedAt: result.updatedAt, _saveRevision: result.revision }),
+      base: windowLast ? 'window' : 'station', added: r.added.length, extended: r.extended.length, copied: r.copied.length, backup, ...(kept ? { kept } : {}) });
+  } catch (e) { json(200, { ok: false, error: (e && e.message) || 'merge failed' }); }
 }
 // POST /api/save { agent?, ...envelope } — write through the localStorage save to durable disk. The body IS the
 // save envelope (with its schema/version/updatedAt); `agent` selects the record (defaults to 'agent'). The
