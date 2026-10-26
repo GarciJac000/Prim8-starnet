@@ -170,3 +170,13 @@
 .sk-lib .skm-agree input[type="checkbox"]:checked::after { left: 17px; background: var(--ph-bright); }
 .sk-lib .skm-result:empty { display: none; }
 .sk-lib .skm-agree input[type="checkbox"]:focus-visible { outline: 2px solid var(--ph); outline-offset: 3px; }
+/* the five tabs on ONE row (the sweep 10-25 caught CONFIG wrapped alone onto a second row in a laptop-sized window):
+   the strip never wraps; when the window is too narrow for icon + word, the icons step out, then the padding tightens */
+.agent-dossier.sn-menu .con-toptabs { flex-wrap: nowrap; container: dossier-tabs / inline-size; }
+.agent-dossier.sn-menu .con-toptab { flex: 1 1 auto; min-width: 0; }
+@container dossier-tabs (max-width: 470px) {
+  .agent-dossier.sn-menu .con-toptab .con-rail-glyph { display: none; }
+}
+@container dossier-tabs (max-width: 340px) {
+  .agent-dossier.sn-menu .con-toptab { padding-inline: 4px; }
+}

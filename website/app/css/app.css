@@ -196,6 +196,10 @@ textarea {
   background-color: #000; border: 1px solid var(--ph-dim); border-radius: 4px; padding: 8px 11px; outline: none;
 }
 textarea::placeholder { color: var(--ph-dim); opacity: 1; }
+/* the corner grip of a resizable field is OS paint too (grey hatching on the APPS / WORKFLOWS fields): two phosphor ticks */
+textarea::-webkit-resizer {
+  background: linear-gradient(135deg, transparent 0 50%, var(--ph-dim) 50% 58%, transparent 58% 70%, var(--ph-dim) 70% 78%, transparent 78%);
+}
 /* buttons: neutralize the OS paint and NOTHING else. No box metrics, no radius, no shadow —
    measured the hard way: a draft of this block that also set border-radius/box-shadow leaked
    onto id-styled, class-less buttons (#ws-new, #estop-btn) that declare no radius of their
@@ -2591,6 +2595,9 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
   animation: coach-in .35s ease-out;
 }
 .nav-coach[hidden] { display: none; }
+/* a window on screen means a dock was found: the hint steps back instead of lying over the window's corner (the sweep
+   10-25), and comes back with the empty station if it was never retired */
+body:has(#terms > .term:not(.term-min-hidden)) #nav-coach { visibility: hidden; }
 .nav-coach b { color: var(--ph-bright); font-weight: normal; }
 .nav-coach-x {
   flex: 0 0 auto; font-family: inherit; font-size: 12px; letter-spacing: 1px; cursor: pointer;
@@ -3872,7 +3879,9 @@ body:not(.rows-inbox) #workstreams .ws-row.attn:not(.renaming):has(> .ws-agent-g
 @media (max-width: 860px) {
   #screen-game.active {
     grid-template-rows: 60px minmax(300px, 1fr) 200px minmax(44px, auto);
-    grid-template-columns: 168px 1fr;
+    /* visual px like every frame dimension (* --cz): a flat 168px shrank with TEXT SIZE (151px at 90) under the
+       counter-zoomed SESSIONS / PROJECTS + key strip, which needs 190 at every TEXT SIZE (Andrew 10-25: the + key sat on PROJECTS) */
+    grid-template-columns: calc(196px * var(--cz)) 1fr;
     grid-template-areas:
       "top top"
       "left center"

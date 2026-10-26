@@ -105,9 +105,10 @@ const tail = s => s.trim().split('\n').slice(-4).join(' | ');
   const record = path.join(scratch, 'launches.ndjson');
   const joinFile = path.join(scratch, 'joins.txt');
   const lockFile = path.join(scratch, 'app.lock');
+  const stateFile = path.join(scratch, 'app.state');
   const terminals = [];
   const writeCfg = extra => fs.writeFileSync(cfgFile, JSON.stringify(Object.assign({
-    workspaces: ws, record, joinFile, lockFile, logSpawn: true,
+    workspaces: ws, record, joinFile, lockFile, stateFile, logSpawn: true, closeMs: 0,
     // what the app injects from its keychain: the terminal's own env below carries none of it
     keychain: { SKYNET_OPENROUTER_KEY: APP_KEY, STARNET_OPENROUTER_KEY: APP_KEY, SKYNET_OPENROUTER_BASE: mock.base, STARNET_OPENROUTER_BASE: mock.base, SKYNET_DEFAULT_MODEL: 'test/model', STARNET_DEFAULT_MODEL: 'test/model' }
   }, extra || {})));
@@ -190,6 +191,41 @@ const tail = s => s.trim().split('\n').slice(-4).join(' | ');
     A.eq(launches().length, before4, 'but launches no app: the app\'s startup.log does not know that station\'s pid');
     t2.kill();
     A.ok(await waitFor(() => !appRunning(), 20000), 'cleanup: that station stood down too');
+
+    /* ---- 5. CLOSING: a terminal that attaches while the app closes (its last session just ended) starts it again --- */
+    fs.writeFileSync(joinFile, '');
+    writeCfg({ closeMs: 6000 });
+    const t3 = terminal();
+    startApp(t3.pid);
+    A.ok(await stationUp(true), 'the app (started for another terminal) brought its station up');
+    const oldOwner = ownerPid();
+    t3.kill();
+    A.ok(await waitFor(() => { try { return fs.readFileSync(stateFile, 'utf8').trim() === 'closing'; } catch (_) { return false; } }, 10000), 'that terminal left: the app is closing (its station still up for a moment)');
+    const before5 = launches().length;
+    const z = await cli(['-p', 'say hello'], env, 150000);
+    A.eq(z.code, 0, 'a terminal arriving while it closes still runs, exit 0 (stderr: ' + tail(z.err) + ')');
+    A.ok(z.out.indexOf('Hello from the app\'s station.') >= 0, 'its answer streamed');
+    A.ok(/StarNet is closing \(its last starnet session just ended\) — starting it again/.test(z.err), 'it was told StarNet was closing and said it starts it again');
+    const mine = launches().slice(before5).filter(l => l[2] === String(z.pid));
+    A.ok(mine.length >= 2, 'it joined, then launched StarNet again (' + mine.length + ' launches with its pid)');
+    A.ok(ownerPid() !== oldOwner, 'and ran on a NEW station, never the closing one');
+    A.ok(await waitFor(() => !appRunning(), 20000), 'cleanup: with that terminal gone too, the new StarNet stood down');
+
+    /* ---- 6. CLOSING, station already down: the launch hands off to a StarNet on its way out, is told so, starts again - */
+    fs.writeFileSync(joinFile, '');
+    writeCfg({ closeMs: 5000, dropStationOnClose: true });
+    const t4 = terminal();
+    startApp(t4.pid);
+    A.ok(await stationUp(true), 'the app (started for another terminal) brought its station up');
+    t4.kill();
+    A.ok(await waitFor(() => { try { return fs.readFileSync(stateFile, 'utf8').trim() === 'closing' && !alive(ownerPid()); } catch (_) { return false; } }, 10000), 'that terminal left: the app is closing and its station is already down');
+    const before6 = launches().length;
+    const y = await cli(['-p', 'say hello'], env, 150000);
+    A.eq(y.code, 0, 'a terminal arriving then still runs, exit 0 (stderr: ' + tail(y.err) + ')');
+    A.ok(y.out.indexOf('Hello from the app\'s station.') >= 0, 'its answer streamed');
+    A.ok(/StarNet isn't running — starting it in the background/.test(y.err), 'it found no station and started StarNet');
+    A.ok(launches().slice(before6).filter(l => l[2] === String(y.pid)).length >= 2, 'its first launch was handed to the closing StarNet and told so, so it launched again once that one had gone');
+    A.ok(await waitFor(() => !appRunning(), 20000), 'cleanup: the new StarNet stood down after it');
   } catch (e) {
     A.ok(false, 'threw: ' + ((e && e.stack) || e));
   } finally {

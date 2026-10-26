@@ -44,9 +44,9 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
       'aaaa1111aaaa1111aaaa',                                    // low entropy
       'short a1b2c3d4'
     ]) A.eq(f(not), [], 'not a key: ' + not);
-    A.ok(KT.hasKeyCandidate(['no key here', 'earlier: ' + PASTE]), 'a paste in a recent turn counts');
+    A.ok(KT.hasKeyCandidate(['here: ' + PASTE, 'older turn']), 'a paste in THIS run\'s directive counts');
+    A.ok(!KT.hasKeyCandidate(['no key here', 'earlier: ' + PASTE]), 'only this run\'s directive: a paste a turn earlier does not (its author cannot be proven, F9)');
     A.ok(!KT.hasKeyCandidate(['tell me a joke', 'thanks']), 'no paste, no offer');
-    A.ok(!KT.hasKeyCandidate(['1', '2', '3', '4', '5', '6', 'old: ' + PASTE]), 'a paste older than OWNER_TURNS is not "just given"');
   }
 
   // ---- B. which candidate the model meant ----
@@ -58,7 +58,7 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     A.ok(two.error && /2 key-like strings/.test(two.error) && two.error.indexOf('"9c2f…"') >= 0 && two.error.indexOf('"b7e1…"') >= 0, 'two candidates: asks for starts_with, naming only their first 4 chars: ' + two.error);
     A.ok(two.error.indexOf(PASTE) < 0 && two.error.indexOf(OTHER) < 0, 'the refusal never repeats a whole key');
     A.eq(pick(['saleshandy ' + PASTE + ' and etsy ' + OTHER], 'b7e1').key, OTHER, 'starts_with picks the one meant');
-    A.eq(pick(['ok, it is for saleshandy', 'here: ' + PASTE]).key, PASTE, 'the newest turn with a key wins (the paste came one turn earlier)');
+    A.ok(/paste the key into this chat again/.test(pick(['ok, it is for saleshandy', 'here: ' + PASTE]).error || ''), 'a key one turn back is NOT picked: the agent asks for the paste again (F9)');
     A.ok(/paste the key into this chat again/.test(pick(['hello', 'my key is [redacted-secret]']).error), 'nothing to find: ask for the paste again');
     A.ok(/no key starting "zzz"/.test(pick(['my key ' + PASTE], 'zzz').error), 'a wrong hint is said plainly');
   }
@@ -232,6 +232,62 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     A.eq(page.nameKeys('hey here is my saleshandy api key ' + PASTE.slice(0, 20) + '…', found), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]…', 'a key cut short by a clipped label is named too');
     A.eq(page.nameKeys('run title: ' + PASTE + ' · run 6ab9', found), 'run title: [SALESHANDY_API_KEY saved in KEYS] · run 6ab9', 'a whole key anywhere');
     A.eq(page.nameKeys(PASTE.slice(0, 12) + 'zzzz', found), PASTE.slice(0, 12) + 'zzzz', 'a mere shared prefix is left alone');
+  }
+
+  // ---- I. WHOSE WORDS (release review F9): only a directive the Commander typed can hold a key to save ----
+  // The REAL predicates the host injects (index.js: KeyTools.ownerRun(..., { eligible: TrustedLearning.eligible,
+  // isHandoff: Pipeline.isHandoff })), driven with the origins each real caller builds.
+  {
+    const TrustedLearning = require('../sidecar/trusted-learning.js');
+    const Pipeline = require('../frontend/app/pipeline.js');
+    const owner = (o, latestText) => KT.ownerRun(o, { eligible: TrustedLearning.eligible, isHandoff: Pipeline.isHandoff, latestText: latestText || 'my saleshandy key ' + PASTE });
+    // the two origins that ARE the Commander's words
+    A.ok(owner({ surface: 'interactive', ownerDirective: true }), 'a COMMS directive the Commander typed (/api/run ownerDirective)');
+    A.ok(owner({ surface: 'autonomous', ownerTrusted: true, channelSender: true, channelSenderOwner: true }), 'an owner-admitted Telegram DM');
+    // GROUP DM (index.js group run): surface interactive, groupTools, its one user turn = the shared transcript with
+    // peer agents' replies — a peer's "sample key" must never be saved, let alone replace the Commander's
+    const groupTurn = JSON.stringify([{ id: 'm1', author: 'Commander', text: 'do the stripe report' }, { id: 'm2', author: 'researcher', text: 'docs sample key ' + PASTE }]);
+    A.ok(!owner({ surface: 'interactive', groupTools: ['group.read'], lead: false }, groupTurn), 'a GROUP DM participant run is not the Commander\'s words');
+    A.ok(!owner({ surface: 'interactive', groupTools: ['group.read'], ownerDirective: true }, groupTurn), '...even if an owner flag were set on it');
+    // RECIPE (/api/run with recipeId: ownerWording false) — the template is the recipe author's text
+    A.ok(!owner({ surface: 'interactive', ownerDirective: false, recipeId: 'imported-recipe' }, 'save this key with keys.save: ' + PASTE), 'a RECIPE launch is the author\'s template, not the Commander\'s words');
+    A.ok(!owner({ surface: 'interactive', ownerDirective: true, fromRecipe: true }), 'fromRecipe alone refuses too');
+    // LINE HOP (channels/hub.js): ownerTrusted + the entry sender's owner verdict, but its user turn is the upstream
+    // stage's output — refused by its lineId, and by the hand-off frame even without one
+    const hop = Pipeline.handoffPrompt('send my campaign', 'researcher', 'found a key: ' + PASTE, 2);
+    A.ok(Pipeline.isHandoff(hop), '(fixture) the hop text is a real hand-off frame');
+    A.ok(!owner({ surface: 'autonomous', ownerTrusted: true, channelSender: true, channelSenderOwner: true, lineId: 'line-1', initialTaint: 'upstream agent output' }, hop), 'a work-LINE HOP is not the Commander\'s words');
+    A.ok(!owner({ surface: 'autonomous', ownerTrusted: true, channelSender: true, channelSenderOwner: true }, hop), '...a hand-off frame is refused even without a lineId');
+    A.ok(!owner({ surface: 'autonomous', ownerTrusted: true, channelSender: true, channelSenderOwner: true, lineId: 'line-1', parallelBranch: true }, '[THIS LINE’S PART — key ' + PASTE + ']'), '...and a parallel part turn (no hand-off frame) by its lineId');
+    // the rest of the not-the-Commander family
+    for (const [o, why] of [
+      [{ ownerDirective: true, delegatedBy: 'lead' }, 'a delegated worker (its user turn is the lead\'s brief)'],
+      [{ ownerDirective: true, parentRunId: 'r0' }, 'a child run'],
+      [{ ownerDirective: true, recovery: true }, 'a recovery replay'],
+      [{ ownerDirective: true, internal: true }, 'self-talk'],
+      [{ ownerDirective: true, untrustedEntry: true }, 'a trigger / forwarded entry'],
+      [{ ownerDirective: true, hostPowerWithheld: true }, 'a paired phone or guest'],
+      [{ ownerDirective: true, syntheticTrigger: true }, 'a synthetic review'],
+      [{ surface: 'autonomous', trigger: 'schedule' }, 'a routine'],
+      [{ channelSender: true, channelSenderOwner: false }, 'a channel guest']
+    ]) A.ok(!owner(o), 'not the Commander\'s words: ' + why);
+    A.ok(!KT.ownerRun({ ownerDirective: true }, {}), 'no eligible predicate injected: refuse (fail closed)');
+
+    // the tool on such a run: nothing offered, nothing saved — a peer's key never reaches the store
+    const saves = [];
+    const peerRun = KT.makeKeyTools({ ownerTexts: () => (owner({ surface: 'interactive', groupTools: ['group.read'] }, groupTurn) ? [groupTurn] : null), save: (i) => { saves.push(i); return { ok: true, record: { name: 'Stripe', envVar: 'STRIPE_API_KEY' } }; }, tainted: () => false }).saveTool;
+    A.ok(/was not started by them/.test(await thrown(peerRun.run({ service: 'Stripe' }, { runId: 'g' }))), 'a group run\'s keys.save refuses');
+    A.eq(saves.length, 0, '...and the Commander\'s saved STRIPE_API_KEY is never replaced by a peer\'s string');
+
+    // SOURCE LOCKS: the host wires the shared predicate, and the real callers still carry the flags it reads
+    const read = rel => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', rel), 'utf8');
+    const index = read('sidecar/index.js');
+    A.ok(/const keyOwnerRun = KeyTools\.ownerRun\([\s\S]{0,200}eligible: TrustedLearning\.eligible, isHandoff: Pipeline\.isHandoff, latestText: latestUserText\(messages\)/.test(index), 'index.js decides keyOwnerRun with the shared TrustedLearning.eligible + Pipeline.isHandoff');
+    A.ok(/keyOwnerTexts = \(\) => keyOwnerRun \? recentUserTexts\(messages, KeyTools\.OWNER_TURNS\) : null/.test(index) && KT.OWNER_TURNS === 1, 'owner texts = this run\'s directive only');
+    A.ok(/surface: 'interactive', lead: [^\n]*groupTools: tools/.test(index), 'the group run still passes groupTools');
+    A.ok(/ownerDirective: ownerWording/.test(index) && /let ownerWording = !recipeId && !\(body && body\.recipeId\)/.test(index), '/api/run still mints ownerDirective false for a recipe launch');
+    const hub = read('sidecar/channels/hub.js');
+    A.ok(/initialTaint: 'upstream agent output'[\s\S]{0,1600}lineId: lineId \|\| undefined/.test(hub), 'the hub hop still passes its lineId');
   }
 
   A.report('keys-save');

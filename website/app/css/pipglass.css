@@ -276,6 +276,8 @@ body.glass-demo:not(.hud-mode) .term .kb-col {
   border: 1px solid rgba(var(--ph-rgb), .2); border-radius: 8px; box-shadow: inset 0 1px 0 var(--gd-light);
 }
 body.glass-demo:not(.hud-mode) .term .kb-col h4 { border-bottom-color: rgba(var(--ph-rgb), .16); }
+/* the lane is a boxed card here, but tasks.css laid it out borderless (a 2px inset): TO DO and its note sat on the border */
+body.glass-demo:not(.hud-mode) .tasks-win .kb-col { padding: 0 12px 12px; }
 body.glass-demo:not(.hud-mode) .term:not(.pw) .term-foot { display: none; }
 /* the window shell matches the panels' shape and phosphor title */
 body.glass-demo:not(.hud-mode) .term:not(.pw) { border-radius: 10px; }
@@ -800,6 +802,11 @@ body.glass-demo:not(.hud-mode) .term.sn-menu .con-rail-item:not(.con-toptab):is(
   box-shadow: 0 0 12px rgba(var(--ph-rgb), .16); text-shadow: var(--pg-glow-soft);
 }
 body.glass-demo:not(.hud-mode) .term.sn-menu .con-rail-item:not(.con-toptab):is(.active, [aria-selected="true"]) .con-rail-glyph { opacity: 1; }
+/* the sweep 10-25: ABILITIES' rail (the one with INSTALLED / DISCOVER / CREATE) wrapped SAVED API CONNECTIONS, BUILT-IN
+   ABILITIES and CONNECTED SERVICES onto two lines at the 16px floor — 32px more rail holds every label on one; and a
+   scrolled rail sliced its top row on the divider: the list's top 8px (its padding at rest) now fades the row away */
+body.glass-demo:not(.hud-mode) .term.sn-menu .con-rail:has(.con-intents) { flex-basis: 222px; }
+body.glass-demo:not(.hud-mode) .term.sn-menu .con-rail-list { -webkit-mask-image: linear-gradient(transparent, #000 8px); mask-image: linear-gradient(transparent, #000 8px); }
 
 /* --- weak spots found by the live audit (10-02): tiny type, square boxes, black fields, glyph headers --- */
 /* catalog bays (RECRUIT / RECIPES): one glass search field, readable intro, glass filter keys, one-line tile copy */
@@ -1159,6 +1166,11 @@ body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { container: pip-tabs
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head :is(#ws-new, #ws-addproject)[hidden] { display: none !important; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { transition: none; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head #ws-addproject { font-size: 16px; }
+/* the + key over PROJECTS (Andrew 10-25 circled it): the tabs never shrank, so whenever their spacing outran the strip they
+   ran on under the key. Now a tab gives way (clipped at its own edge, never under the key), and leftrail.js marks the strip
+   .tabs-tight when its tabs don't fit at their spacing, which drops them to the narrowest rail's */
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: clip; }
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head.tabs-tight .ws-tab { padding: 0 5px 1px; letter-spacing: .2px; }
 
 /* ---- ONE RAIL GUTTER (Andrew 10-21: "my only complaint is that some of it is misaligned like this"). Every block in the
    CREW rail spans one column, its edges 10px in from the rail's at every TEXT SIZE: the crew cards, the SESSIONS / PROJECTS
@@ -2036,3 +2048,20 @@ body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools > summar
 body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools:not([open]) { flex: 0 0 auto; gap: 0; }   /* closed, the hidden keys' box still took the flex gap */
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab { padding-top: 10px; padding-bottom: 10px; }
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab .con-rail-label { line-height: 24px; }
+
+/* ---- the cosmetic sweep 10-25 (every window shot at Andrew's settings, 1366x768 · TEXT SIZE 90) ----
+   · the trophy case: the kind tag (DOSSIER) stood beside the name and squeezed it to three lines; it is the card's
+     overline now, the name takes the card's width, and the date has its own line instead of orphaning a word
+   · one case per row of keys: the settings jump keys and its group headings, the notification filters and AUTOMATE's
+     section heads and rail read in the capitals every other key and rail uses (the words are unchanged) */
+body.glass-demo:not(.hud-mode) #terms .gx-tro .tro-hd { flex-wrap: wrap; row-gap: 4px; }
+body.glass-demo:not(.hud-mode) #terms .gx-tro .tro-hd .gx-tag { order: -1; flex-basis: 100%; margin-left: 0; }
+body.glass-demo:not(.hud-mode) #terms .gx-tro .sub > span { display: block; }
+body.glass-demo:not(.hud-mode) #terms .settings-pane :is(.settings-jumps button, h4.ms-h) { text-transform: uppercase; }
+body.glass-demo:not(.hud-mode) #terms .settings-pane h4.ms-h .dim { text-transform: none; }
+body.glass-demo:not(.hud-mode) #terms .utility-tabs button { text-transform: uppercase; }
+body.glass-demo:not(.hud-mode) #terms .automation-win :is(.sec-l, .con-rail-label) { text-transform: uppercase; }
+/* · inline code in a window (the messaging setup guides' /newbot, the Signal docker command) fell to the browser's
+     monospace — a bigger, smooth face inside VT323 lines: it is the station face, set apart by colour */
+body.glass-demo:not(.hud-mode) #terms code { font-family: inherit; }
+body.glass-demo:not(.hud-mode) #terms .ch-steps code { color: var(--ph-bright); }

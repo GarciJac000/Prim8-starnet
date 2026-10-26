@@ -3,6 +3,10 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { SidecarFixture } = require('./helpers/sidecar-fixture.js');
 const requests = [];
+// keys.save in a group (release review F9): the group's one "user" turn is the shared transcript — the Commander's words
+// AND the peers' replies — so neither key below may ever be offered to keys.save on a participant's run
+const COMMANDER_KEY = '5b8e2d9f1c4a7e0b3d6f9a2c5e8b1d4f7a0c3e6b';
+const PEER_KEY = '8d1f4a7c0e3b6d9f2a5c8e1b4d7f0a3c6e9b2d5f';
 const server = http.createServer((req, res) => {
   if (req.url.includes('/models')) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ data: [{ id: 'test/model', context_length: 128000, pricing: { prompt: '0', completion: '0' }, supported_parameters: ['tools'] }] })); }
   let raw = ''; req.on('data', d => raw += d); req.on('end', () => {
@@ -28,7 +32,7 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const delta = call ? { tool_calls: [{ index: 0, id: 'call_' + requests.length, type: 'function', function: { name: call[0], arguments: JSON.stringify(call[1]) } }] }
-      : { content: isQA ? 'Reviewed exact version: ' + toolMessages.map(m => m.content).join('\n') : 'Shared the file and asked QA to review.' };
+      : { content: isQA ? 'Reviewed exact version: ' + toolMessages.map(m => m.content).join('\n') : 'Shared the file and asked QA to review. Sample key from the docs: ' + PEER_KEY };
     res.write('data: ' + JSON.stringify({ choices: [{ delta }] }) + '\n\n');
     res.write('data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }) + '\n\n');
     res.end('data: [DONE]\n\n');
@@ -47,8 +51,14 @@ const server = http.createServer((req, res) => {
       const result = await r.json(); assert.equal(r.status, 200, JSON.stringify(result)); return result.result;
     };
     await fixture.json('POST', '/api/roster', { updatedAt: Date.now(), agents: ['agent', 'qa'].map(agentId => ({ agentId, name: agentId, model: 'test/model', provider: 'openrouter', approvalMode: 'full', system: agentId === 'qa' ? 'IDENTITY_QA' : 'IDENTITY_ENGINEER' })) });
+    // the starter floor (a DISH among its gear), saved the way the app saves it: group participants draw their room gear
+    // from it, so web_request — and keys.save, were it allowed — would really be on their runs
+    const WM = require('../frontend/app/worldmodel.js');
+    const rev = ((await fixture.json('GET', '/api/save?agent=agent')).body.save || {})._saveRevision || 0;
+    const floor = await fixture.json('POST', '/api/save', { schema: 'starnet.save', version: 5, _saveRevision: rev, updatedAt: Date.now(), agent: { id: 'agent' }, station: WM.create(WM.starterDoc()).serialize() });
+    assert.ok(floor.body && floor.body.ok, 'the starter floor is saved: ' + floor.text);
     const g = await request('POST', '', { op: 'create', members: ['agent', 'qa'], title: 'Integration group' });
-    await request('POST', '', { op: 'send', id: g.id, key: 'origin', text: 'Build a report and ask QA to review the exact artifact.' });
+    await request('POST', '', { op: 'send', id: g.id, key: 'origin', text: 'Build a report and ask QA to review the exact artifact. Our key for later: ' + COMMANDER_KEY });
     let state;
     for (let n = 0; n < 200; n++) {
       state = await request('GET', '?id=' + g.id);
@@ -61,6 +71,12 @@ const server = http.createServer((req, res) => {
     assert.match(state.messages.at(-1).content, /EXACT_SHARED_VERSION_1/);
     assert.ok(requests.some(r => (r.tools || []).some(t => t.function.name === 'group_handoff')));
     assert.ok(requests.every(r => !(r.tools || []).some(t => t.function.name === 'team_dispatch')));
+    // F9: a group participant holds the dish (web_request is on its runs) yet is never offered keys.save — the shared
+    // transcript carries the peer's "sample key", and even the Commander's own line there has no provable author
+    const toolsOf = r => (r.tools || []).map(t => t.function.name);
+    assert.ok(requests.some(r => toolsOf(r).includes('web_request')), 'control: group participants really hold the dish (web_request offered)');
+    assert.ok(requests.some(r => JSON.stringify(r.messages || []).includes(PEER_KEY)), 'control: a participant run really read the peer\'s key');
+    assert.ok(requests.every(r => !toolsOf(r).includes('keys_save')), 'no group participant run is ever offered keys_save');
     // THE GROUP'S LEAD IS THE ORCHESTRATOR: the lead holds the station kit (station.layout on the wire, the builder in its
     // deferred index, told to use them instead of the screen); the other participant stays a worker without it
     const sysOf = r => (r.messages || []).filter(m => m.role === 'system').map(m => m.content).join('\n');

@@ -518,29 +518,65 @@ function launchApp(exe) {
   child.unref();
   return child;
 }
-// the station the app brings up: its owner file names the new sidecar, the OS its port (discoverDesktop)
-async function startAppStation(exe, desktopWs, host) {
-  const logFile = path.join(path.dirname(desktopWs), 'startup.log');
-  log('· StarNet isn\'t running — starting it in the background (your keys stay in the app; no window opens)');
-  let gone = null, child;
-  try { child = launchApp(exe); } catch (e) { throw stationError('StarNet could not be started (' + exe + '): ' + ((e && e.message) || e)); }
-  child.on('error', e => { gone = { error: e }; });
-  child.on('exit', (code, signal) => { gone = gone || { code, signal }; });
+// startup.log: its size now, and what the app wrote after a size (it only appends, so that is about this start/join)
+function startupLogFile(desktopWs) { return path.join(path.dirname(desktopWs), 'startup.log'); }
+function startupLogSize(desktopWs) { try { return fs.statSync(startupLogFile(desktopWs)).size; } catch (_) { return 0; } }
+function startupLogFrom(desktopWs, offset) {
+  const file = startupLogFile(desktopWs);
+  try {
+    const size = fs.statSync(file).size, from = Math.max(offset, size - 256 * 1024);
+    if (size <= from) return '';
+    const fd = fs.openSync(file, 'r');
+    try { const buf = Buffer.alloc(size - from); fs.readSync(fd, buf, 0, buf.length, from); return buf.toString('utf8'); } finally { fs.closeSync(fd); }
+  } catch (_) { return ''; }
+}
+// what the app said about this terminal since `offset` (cli-core joinOutcome), waiting up to `ms` for it to say it
+const JOIN_CONFIRM_MS = 5000;
+async function awaitJoinOutcome(desktopWs, offset, ms) {
   const t0 = Date.now();
-  let slow = false;
-  while (Date.now() - t0 < APP_START_MS) {
-    const d = discoverDesktop(desktopWs);
-    if (d.ownerAlive && d.port) {
-      const client = makeClient(host, d.port);
-      if (await client.health(1500)) return client;
-    }
-    if (gone && gone.error) throw stationError('StarNet could not be started (' + exe + '): ' + ((gone.error && gone.error.message) || gone.error));
-    // a start that fails exits non-zero; 0 is a hand-off to a StarNet already starting — keep waiting for its station
-    if (gone && (gone.code || gone.signal)) throw stationError('StarNet stopped while starting (' + (gone.signal || 'exit ' + gone.code) + ') — ' + logFile + ' says why');
-    if (!slow && Date.now() - t0 > 20000) { slow = true; log('· still starting StarNet…'); }
-    await sleep(400);
+  for (;;) {
+    const got = core.joinOutcome(startupLogFrom(desktopWs, offset), process.pid);
+    if (got || Date.now() - t0 >= ms) return got || 'unconfirmed';
+    await sleep(150);
   }
-  throw stationError('StarNet was started in the background, but its station did not answer within ' + (APP_START_MS / 1000) + 's — ' + logFile + ' says why');
+}
+/* The station the app brings up: its owner file names the new sidecar, the OS its port (discoverDesktop). `avoidOwner`
+   is the sidecar of a StarNet that is closing: never attached to, unless that StarNet turns out to stay (in the tray).
+   A launch that hands off to a StarNet on its way out is told so (`closing`) and starts again once it has gone. */
+async function startAppStation(exe, desktopWs, host, said, avoidOwner) {
+  const logFile = startupLogFile(desktopWs);
+  log(said || '· StarNet isn\'t running — starting it in the background (your keys stay in the app; no window opens)');
+  const t0 = Date.now();
+  let slow = false, avoid = avoidOwner || 0;
+  for (let tries = 0; tries < 30 && Date.now() - t0 < APP_START_MS; tries++) {
+    const at = startupLogSize(desktopWs);
+    let gone = null, child, again = false;
+    try { child = launchApp(exe); } catch (e) { throw stationError('StarNet could not be started (' + exe + '): ' + ((e && e.message) || e)); }
+    child.on('error', e => { gone = { error: e }; });
+    child.on('exit', (code, signal) => { gone = gone || { code, signal }; });
+    while (Date.now() - t0 < APP_START_MS) {
+      const d = discoverDesktop(desktopWs);
+      if (d.ownerAlive && d.port && d.ownerPid !== avoid) {
+        const client = makeClient(host, d.port);
+        if (await client.health(1500)) return client;
+      }
+      if (gone && gone.error) throw stationError('StarNet could not be started (' + exe + '): ' + ((gone.error && gone.error.message) || gone.error));
+      if (gone && gone.code === core.APP_EXIT_START_CANCELLED) throw stationError('StarNet\'s engine didn\'t start, and its startup dialog was cancelled — ' + logFile + ' says why');
+      if (gone && (gone.code || gone.signal)) throw stationError('StarNet stopped while starting (' + (gone.signal || 'exit ' + gone.code) + ') — ' + logFile + ' says why');
+      // exit 0 is a hand-off to a StarNet already running or starting: one on its way out says `closing` (start again
+      // once it has gone); one that stayed in the tray after all says this terminal is not tracked (its station is fine)
+      if (gone) {
+        const told = core.joinOutcome(startupLogFrom(desktopWs, at), process.pid);
+        if (told === 'closing') { again = true; break; }
+        if (told === 'not-tracked') avoid = 0;
+      }
+      if (!slow && Date.now() - t0 > 20000) { slow = true; log('· still starting StarNet…'); }
+      await sleep(400);
+    }
+    if (!again) break;
+    await sleep(1000);
+  }
+  throw stationError('StarNet was started in the background, but its station did not answer within ' + (APP_START_MS / 1000) + 's — if a StarNet dialog is open, answer it; ' + logFile + ' says why');
 }
 // the app's own record of the sidecar it spawned last (startup.log), so a station some OTHER terminal booted on the
 // desktop's workspace is never mistaken for the app's
@@ -577,14 +613,25 @@ async function resolveStation(opts, env) {
   }
   if (choice.mode === 'attach') {
     const c = candidates.find(x => x.port === choice.port);
-    const client = await attachClient(c.client, opts);
     /* joining the app's station: tell the app this terminal uses it too (the same --background launch; it reaches the
        running app and ends), so when it was started for another starnet session, that one ending never closes the
-       station under this one. A StarNet a person opened only notes it. */
-    if (desktop.appOwned && desktop.appExe && desktop.port === choice.port && APP_SESSIONS.indexOf(opts.cmd) >= 0) {
-      try { launchApp(desktop.appExe).on('error', () => {}); } catch (_) {}
+       station under this one. Sent BEFORE the token fetch (the sooner the app hears, the less room for a close to
+       overtake it), then confirmed from what the app logs: tracked, a person's StarNet (nothing to track), or closing
+       — its last session just ended — so start it again once it has quit (review 0.14.1, F7). */
+    const joining = !!(desktop.appOwned && desktop.appExe && desktop.port === choice.port && APP_SESSIONS.indexOf(opts.cmd) >= 0);
+    const joinAt = joining ? startupLogSize(desktopWs) : -1;
+    if (joining) { try { launchApp(desktop.appExe).on('error', () => {}); } catch (_) {} }
+    // the attach and the app's answer run together: a closing station can fail the token fetch before its "closing" is
+    // read, and a StarNet on its way out is started again either way
+    const attaching = attachClient(c.client, opts).then(cl => ({ cl }), err => ({ err }));
+    const told = joining ? await awaitJoinOutcome(desktopWs, joinAt, JOIN_CONFIRM_MS) : null;
+    const attached = await attaching;
+    if (told === 'closing') {
+      const fresh = await startAppStation(desktop.appExe, desktopWs, host, '· StarNet is closing (its last starnet session just ended) — starting it again', desktop.ownerPid);
+      return { mode: 'attached', client: await attachClient(fresh, opts), workspace: desktopWs, child: null };
     }
-    return { mode: 'attached', client, workspace: (choice.source === 'desktop' && desktop.ownerAlive) ? desktopWs : '', child: null };
+    if (attached.err) throw attached.err;
+    return { mode: 'attached', client: attached.cl, workspace: (choice.source === 'desktop' && desktop.ownerAlive) ? desktopWs : '', child: null };
   }
   // spawn
   const ws = defaultWorkspace(opts);
