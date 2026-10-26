@@ -17,6 +17,7 @@ mod erase_all;
 mod fresh_start;
 mod hud_mode;
 mod lifecycle_preferences;
+mod sidecar_output;
 mod sidecar_startup;
 mod terminal_session;
 mod webview_recovery;
@@ -27,7 +28,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -66,6 +67,11 @@ struct AppState {
     workspaces: PathBuf,
     startup_log: Option<PathBuf>,
     sidecar: Mutex<Option<Child>>,
+    // What the sidecar prints (sidecar_output.rs): the rotating sidecar.log beside startup.log, the
+    // live child's drained output, and the redacted last lines of the latest spawn that never came up.
+    sidecar_log: Arc<sidecar_output::SidecarLog>,
+    sidecar_output: Mutex<Option<sidecar_output::Capture>>,
+    boot_failure_tail: Mutex<Vec<String>>,
     keep_awake: Mutex<KeepAwakeState>,
     lifecycle_preferences_path: PathBuf,
     lifecycle_preferences: Mutex<LifecyclePreferences>,
@@ -1939,6 +1945,10 @@ fn sidecar_command(state: &AppState, entry: &Path, node: &Path) -> Command {
             env!("STARNET_BUILD_PROVENANCE_KIND"),
         )
         .env("STARNET_BUILD_DIRTY", env!("STARNET_BUILD_DIRTY"))
+        // The windows-subsystem build has no console to inherit, so a boot crash's text was lost.
+        // spawn_sidecar drains both pipes on their own threads into sidecar.log (sidecar_output.rs).
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .current_dir(&state.root);
     set_sidecar_branded_env(&mut cmd, "SKYNET_PORT", state.port.to_string());
     set_sidecar_branded_env(&mut cmd, "SKYNET_IPC_TOKEN", &state.ipc_token);
@@ -2008,8 +2018,21 @@ fn spawn_sidecar(state: &AppState) -> bool {
 
     let mut last_error = None;
     for attempt in 0..=20 {
-        match sidecar_startup::spawn(&mut sidecar_command(state, &entry, &node), &state.sidecar) {
-            Ok(pid) => {
+        let mut cmd = sidecar_command(state, &entry, &node);
+        let redactor = sidecar_output::Redactor::for_command(&cmd);
+        match sidecar_startup::spawn(&mut cmd, &state.sidecar) {
+            Ok(spawned) => {
+                let pid = spawned.pid;
+                let output = sidecar_output::attach(
+                    &state.sidecar_log,
+                    redactor,
+                    pid,
+                    spawned.stdout,
+                    spawned.stderr,
+                );
+                if let Ok(mut slot) = state.sidecar_output.lock() {
+                    *slot = Some(output.clone());
+                }
                 let (listening, exited) =
                     wait_for_port_or_exit(state.port, SIDECAR_READY_TIMEOUT, Some(&state.sidecar));
                 log_startup(
@@ -2031,6 +2054,7 @@ fn spawn_sidecar(state: &AppState) -> bool {
                         Err(error) => log_startup(&state.startup_log, format!("spawn_sidecar pid={pid} timeout cleanup failed: {error}; retaining child ownership")),
                     }
                 }
+                record_boot_output(state, &output, listening, exited);
                 return listening;
             }
             Err(e) if cfg!(windows) && e.raw_os_error() == Some(32) && attempt < 20 => {
@@ -2054,6 +2078,111 @@ fn spawn_sidecar(state: &AppState) -> bool {
     false
 }
 
+/// A spawn that never came up: copy the engine's own last lines (redacted) into startup.log and keep
+/// them for the startup-failure dialog, so support sees the real fault instead of a bare exit code.
+/// A spawn that came up clears the previous failure.
+fn record_boot_output(
+    state: &AppState,
+    output: &sidecar_output::Capture,
+    listening: bool,
+    exited: Option<Option<i32>>,
+) {
+    if listening {
+        if let Ok(mut tail) = state.boot_failure_tail.lock() {
+            tail.clear();
+        }
+        return;
+    }
+    // The pipes close once the child is gone; give the drain threads a moment to reach EOF so the
+    // fatal error (the last thing a crashing Node prints) is in the tail.
+    output.wait_drained(Duration::from_millis(1500));
+    state.sidecar_log.note(&match exited {
+        Some(code) => format!("=== engine pid={} exited before listening code={code:?} ===", output.pid()),
+        None => format!("=== engine pid={} timed out before listening ===", output.pid()),
+    });
+    let tail = output.tail(sidecar_output::STARTUP_LOG_TAIL);
+    output.take_report();
+    log_startup(
+        &state.startup_log,
+        sidecar_output::startup_log_block(output.pid(), &tail, state.sidecar_log.path()),
+    );
+    if let Ok(mut slot) = state.boot_failure_tail.lock() {
+        *slot = tail;
+    }
+}
+
+/// The guardian saw a sidecar that HAD come up exit unexpectedly: put its last lines in startup.log
+/// beside the watchdog line (once per child; a spawn that never listened was already reported).
+fn record_crash_output(state: &AppState, pid: u32) {
+    let output = state
+        .sidecar_output
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().filter(|o| o.pid() == pid).cloned());
+    let Some(output) = output else {
+        return;
+    };
+    if !output.take_report() {
+        return;
+    }
+    output.wait_drained(Duration::from_millis(500));
+    log_startup(
+        &state.startup_log,
+        sidecar_output::startup_log_block(
+            pid,
+            &output.tail(sidecar_output::STARTUP_LOG_TAIL),
+            state.sidecar_log.path(),
+        ),
+    );
+}
+
+/// The middle of the startup-failure text both platforms show: the engine's own last lines when it
+/// printed any, otherwise the possible causes, then where the full logs are.
+fn startup_failure_details(
+    startup_log: &Option<PathBuf>,
+    sidecar_log: Option<&Path>,
+    engine_tail: &[String],
+) -> String {
+    let cause = match sidecar_output::dialog_excerpt(engine_tail) {
+        Some(excerpt) => format!(
+            "The engine stopped before it became ready. Its last output (secrets removed):\n\n{excerpt}"
+        ),
+        None => "The engine exited or did not become ready. Possible causes include unavailable \
+                 workspace files, a blocked Node runtime, or a port that could not be opened."
+            .to_string(),
+    };
+    let mut logs = match startup_log {
+        Some(p) => format!("Details were written to:\n{}", p.display()),
+        None => "No startup log path was available.".to_string(),
+    };
+    if let Some(p) = sidecar_log {
+        logs.push_str(&format!("\nFull engine output:\n{}", p.display()));
+    }
+    format!("{cause}\n\n{logs}")
+}
+
+#[cfg(test)]
+mod startup_failure_text_tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_s_own_error_replaces_the_list_of_guesses() {
+        let startup = Some(PathBuf::from("C:/data/startup.log"));
+        let tail = vec![
+            "Error: Cannot find module 'missing'".to_string(),
+            "Node.js v22.23.2".to_string(),
+        ];
+        let text = startup_failure_details(&startup, Some(Path::new("C:/data/sidecar.log")), &tail);
+        assert!(text.contains("Error: Cannot find module 'missing'\nNode.js v22.23.2"));
+        assert!(text.contains("C:/data/startup.log") && text.contains("C:/data/sidecar.log"));
+        assert!(!text.contains("Possible causes"));
+
+        let silent = startup_failure_details(&startup, None, &[]);
+        assert!(silent.contains("Possible causes"));
+        assert!(silent.contains("C:/data/startup.log") && !silent.contains("Full engine output"));
+    }
+}
+
 /// Startup-failure dialog (audit 0.2). When the FIRST `spawn_sidecar` fails — e.g. a first-run
 /// user whose bundled node was blocked by antivirus/Application-Control — the window would
 /// otherwise open dead with every /api fetch failing, no explanation, no way back. This surfaces
@@ -2063,19 +2192,18 @@ fn spawn_sidecar(state: &AppState) -> bool {
 /// Cancel/close. Off Windows there is no Retry/Cancel box: a non-blocking notice tells the user
 /// and startup continues with the guardian retrying (see the not(windows) variant below).
 #[cfg(windows)]
-fn show_startup_failure_dialog(_app: &AppHandle, startup_log: &Option<PathBuf>) -> bool {
+fn show_startup_failure_dialog(_app: &AppHandle, state: &AppState) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, IDRETRY, MB_ICONERROR, MB_RETRYCANCEL, MB_SETFOREGROUND, MB_SYSTEMMODAL,
     };
-    let log_line = match startup_log {
-        Some(p) => format!("Details were written to:\n{}", p.display()),
-        None => "No startup log path was available.".to_string(),
-    };
+    let details = startup_failure_details(
+        &state.startup_log,
+        state.sidecar_log.path(),
+        &boot_failure_tail(state),
+    );
     let body = format!(
         "StarNet could not start its local engine.\n\n\
-         The engine exited or did not become ready. Possible causes include unavailable workspace \
-         files, a blocked Node runtime, or a port that could not be opened.\n\n\
-         {log_line}\n\n\
+         {details}\n\n\
          Click Retry to try starting the engine again, or Cancel to close StarNet."
     );
     let to_wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
@@ -2097,9 +2225,9 @@ fn show_startup_failure_dialog(_app: &AppHandle, startup_log: &Option<PathBuf>) 
 /// retrying, but the user is TOLD (non-blocking, so setup never waits on the dialog). Always
 /// returns `false` — nobody pressed Retry.
 #[cfg(not(windows))]
-fn show_startup_failure_dialog(app: &AppHandle, startup_log: &Option<PathBuf>) -> bool {
+fn show_startup_failure_dialog(app: &AppHandle, state: &AppState) -> bool {
     log_startup(
-        startup_log,
+        &state.startup_log,
         "startup failed: sidecar did not come up; showing a non-blocking notice",
     );
     eprintln!("[starnet] startup failed: sidecar did not come up (see startup.log)");
@@ -2109,19 +2237,23 @@ fn show_startup_failure_dialog(app: &AppHandle, startup_log: &Option<PathBuf>) -
         format!(
             "StarNet could not start its local engine yet. It will keep retrying in the background, \
              but the station may stay unreachable until it does.\n\n{}",
-            startup_log_line(startup_log)
+            startup_failure_details(
+                &state.startup_log,
+                state.sidecar_log.path(),
+                &boot_failure_tail(state)
+            )
         ),
         || {},
     );
     false
 }
 
-#[cfg(not(windows))]
-fn startup_log_line(startup_log: &Option<PathBuf>) -> String {
-    match startup_log {
-        Some(p) => format!("Details were written to:\n{}", p.display()),
-        None => "No startup log path was available.".to_string(),
-    }
+fn boot_failure_tail(state: &AppState) -> Vec<String> {
+    state
+        .boot_failure_tail
+        .lock()
+        .map(|tail| tail.clone())
+        .unwrap_or_default()
 }
 
 /// macOS/Linux user-visible startup notice. Never `blocking_show`: this runs during setup or on a
@@ -2205,14 +2337,14 @@ fn spawn_sidecar_with_retry(app: &AppHandle, state: &AppState) -> bool {
         // `false` as one aborted setup and panicked the app on any slow or failed first spawn. Keep the
         // pre-dialog behaviour there — open the window and let the guardian keep retrying.
         if !cfg!(windows) {
-            show_startup_failure_dialog(app, &state.startup_log);
+            show_startup_failure_dialog(app, state);
             log_startup(
                 &state.startup_log,
                 "startup: no native dialog on this platform — continuing; the guardian keeps retrying",
             );
             return true;
         }
-        if !show_startup_failure_dialog(app, &state.startup_log) {
+        if !show_startup_failure_dialog(app, state) {
             log_startup(
                 &state.startup_log,
                 "startup: cancelled; stopping local engine",
@@ -2354,6 +2486,7 @@ fn spawn_guardian(app: AppHandle) {
                                 format!("watchdog: sidecar stopped on purpose (code {code:?}) — respawning"),
                             );
                         } else {
+                            record_crash_output(st, pid);
                             let now = Instant::now();
                             let window_expired = first_crash_at
                                 .map(|t| now.duration_since(t) > GUARDIAN_CRASH_WINDOW)
@@ -5200,6 +5333,7 @@ fn main() {
             // Same one-time sweep for the cloud device token — this is what upgrades an already
             // linked station from a plaintext token to a keychain one, with no user action.
             migrate_credits_token_from_plaintext(&workspaces);
+            let sidecar_log = Arc::new(sidecar_output::SidecarLog::beside(&startup_log));
             let state = AppState {
                 port,
                 app_version: app.package_info().version.to_string(),
@@ -5209,6 +5343,9 @@ fn main() {
                 workspaces,
                 startup_log,
                 sidecar: Mutex::new(None),
+                sidecar_log,
+                sidecar_output: Mutex::new(None),
+                boot_failure_tail: Mutex::new(Vec::new()),
                 keep_awake: Mutex::new(KeepAwakeState::new()),
                 lifecycle_preferences_path,
                 lifecycle_preferences: Mutex::new(lifecycle_preferences),
