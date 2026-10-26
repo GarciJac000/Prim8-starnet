@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "16219852a4fd260783088f7559082b88407a53b8",
+    "sourceCommit": "e2deabe03913f5c52b5edfb82c48fde1589422ce",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -1668,8 +1668,8 @@
       },
       {
         "path": "frontend/css/pipglass.css",
-        "bytes": 185273,
-        "sha256": "46a835ecd5e309be19f22bdac866a6060271b631a3d40ea63a750341641f36ff"
+        "bytes": 192623,
+        "sha256": "a747f14e99b78bd0674cb9690a0557e45e1068b828e7c1b8bf9f6999669acf62"
       },
       {
         "path": "frontend/css/plugins.css",
