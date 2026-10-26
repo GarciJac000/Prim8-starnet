@@ -155,7 +155,7 @@
     // rail with the loops lane — 'active' alone would collide. wire() runs after mountConsole has appended
     // every pane to `body`, so all the querySelector wiring below resolves exactly as it always did.
     const sections = [
-      { id: 'routines', label: 'ACTIVE ROUTINES', glyph: '◷', desc: 'Standing jobs that fire on a schedule — their next run, last result, and whether the scheduler is armed.', build: frag(secActive) },
+      { id: 'routines', label: 'ACTIVE ROUTINES', glyph: '◷', desc: 'Jobs that run on a schedule — when each runs next, how it last went, and whether scheduling is on.', build: frag(secActive) },
       { id: 'routines-create', label: 'CREATE ROUTINE', glyph: '✦', desc: 'Put your agent to work on a schedule — a morning brief, a nightly summary, a recurring check.', build: frag(secCreate) }
     ];
     function wire() {
