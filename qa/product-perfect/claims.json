@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "16219852a4fd260783088f7559082b88407a53b8",
+    "sourceCommit": "94180a01131142ccc00c552b81af376c8c5bcf9c",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -248,8 +248,8 @@
       },
       {
         "path": "frontend/app/autojobs.js",
-        "bytes": 18705,
-        "sha256": "5c438ec180ef5d13156059cc4c9a5c332d2b081ae92dd32587a177b7b70fc6af"
+        "bytes": 18830,
+        "sha256": "117f867c58c3993a5ee53a0fbaeb2a9c0eb2009ed0f5c529345492a2264de81b"
       },
       {
         "path": "frontend/app/autojobstore.js",
@@ -548,8 +548,8 @@
       },
       {
         "path": "frontend/app/glass-demo.js",
-        "bytes": 13466,
-        "sha256": "b220465b27e81e49111de35b8f8560b2f114af95c224bb696afd49e2669dcfd9"
+        "bytes": 13905,
+        "sha256": "5106ea4487f04dd4514cad543089ee91db8f81a1a7e2fe4565ed438fb5d6667a"
       },
       {
         "path": "frontend/app/glossary.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 956313,
-        "sha256": "5dcbdc97e54f58c7b40a50f4a7f710263c4999c3408e52959643ba583dfa7837"
+        "bytes": 959511,
+        "sha256": "d15238ea239a2097e51cc80dda6cdb5afe9af7efc5bea135fb9a500a31dca2f3"
       },
       {
         "path": "frontend/app/stepin.js",
@@ -1373,8 +1373,8 @@
       },
       {
         "path": "frontend/app/windows/connectors.js",
-        "bytes": 156530,
-        "sha256": "75dcf342445ab754ac03a1ade7ba88c2e8e81459fd41fa031562acc7e8fb9b07"
+        "bytes": 157883,
+        "sha256": "45c3abb5d271374c1c587808d35d29c25899efbf78615a6b150f0c79e89fc9ab"
       },
       {
         "path": "frontend/app/windows/logbook.js",
@@ -1403,8 +1403,8 @@
       },
       {
         "path": "frontend/app/windows/routines.js",
-        "bytes": 75454,
-        "sha256": "13efc19a348eec4320c3501c405c9fce9a699a8a1ca303d79da69f64ad1376e6"
+        "bytes": 75577,
+        "sha256": "45720ba82de5fd5e1683f75391c2d5af9c7918764eeeb59704521792ab1c4ae5"
       },
       {
         "path": "frontend/app/windows/trophies.js",
@@ -1548,8 +1548,8 @@
       },
       {
         "path": "frontend/css/app.css",
-        "bytes": 431434,
-        "sha256": "e41c8a40a560e6f3ee4aac2a5a768311f291c4281b9ef82c74f2372b8996ac3c"
+        "bytes": 432589,
+        "sha256": "a62fd250a8259cb9d77d985571ca8b040da8d6187e75dbb9dbcbcaecd830ab79"
       },
       {
         "path": "frontend/css/asciifx.css",
@@ -1718,8 +1718,8 @@
       },
       {
         "path": "frontend/css/settings.css",
-        "bytes": 22165,
-        "sha256": "dffe5a981660ac7057d28cd982c911523d1bfd1b86cb3bc09db255c4c51776ab"
+        "bytes": 22366,
+        "sha256": "c08b2a374441e76e7c98df11420ed626da450c8a64c04ca7a0f363a768ba2d88"
       },
       {
         "path": "frontend/css/stepin.css",
@@ -1833,8 +1833,8 @@
       },
       {
         "path": "frontend/index.html",
-        "bytes": 99695,
-        "sha256": "dd978c1bee5364801a3d6884a29d0e072ff684188b79c30171a96a3995fa5bd1"
+        "bytes": 99596,
+        "sha256": "b42541b23d5766d55f805cdf7731790716d3b820f72ce5bed137d26bbc3d2bf1"
       },
       {
         "path": "frontend/js/arcade.js",
