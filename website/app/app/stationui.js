@@ -8009,8 +8009,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // sets what the loop tries NEXT if that model fails mid-run. Persisted server-side + applied live to every run
       // path (browser, cron, channels); env SKYNET_FALLBACK_MODELS is the default until you save one here.
       '<h4 class="ms-h">FALLBACK MODELS <span class="dim">— tried in order if your primary model fails</span></h4>' +
-      // plain first (UX night 10-26): what it is for, then the one rule; which connection runs a backup stays said
-      '<p class="set-about">If your model stops partway (it is down, out of credit, or busy), StarNet tries these models, top to bottom. You pick your main model in COMMS. <b>An empty list means no backup.</b> Backups run on your OpenRouter key, or on StarNet credits when StarNet is your provider; COMMS and the logbook say when one takes over.</p>' +
+      // plain first (UX night 10-26): what it is for, then the one rule; which connection runs a fallback model stays said;
+      // the four real trigger classes stay named (errorClass: availability, authentication, billing, rate limits), and the word
+      // is FALLBACK, never "backup" (org P04: STATION BACKUP is a different thing)
+      '<p class="set-about">If your model fails mid-run because it is unavailable, its key or sign-in is refused, it is out of credit, or it hits rate limits, StarNet tries these models, top to bottom. You pick your main model in COMMS. <b>An empty list means no fallback.</b> Fallback models run on your OpenRouter key, or on StarNet credits when StarNet is your provider; COMMS and the logbook say when one takes over.</p>' +
       '<div class="mc-form" id="fbc-form">' +
         '<div id="fbc-list" class="mc-list-fb"><div class="dim">reading chain…</div></div>' +
         '<div class="set-row"><select id="fbc-add" class="fbc-sel"><option value="">＋ add a model from the catalog…</option></select></div>' +
@@ -12256,9 +12258,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (key === 'work') key = 'tasks'; // compatibility for old saved links; the station remains home
     const al = TERM_ALIAS[key];
     if (al) { section = (section && al.map[section]) || al.section; key = al.term; }
+    const def = BUILDERS[key]; if (!def) return;
     const sal = section && SECTION_ALIAS[key] && SECTION_ALIAS[key][section];
     if (sal) { section = sal[0]; revealInTerm(key, sal[1]); }   // the scroll runs after this open/rerender below
-    const def = BUILDERS[key]; if (!def) return;
     // the old NIGHT SHIFT settings section is part of AUTONOMY now (ONE WORD: AUTONOMY) — an old link still lands.
     if (key === 'settings' && section === 'nightshift') section = 'autonomy';
     // ONE PLAIN LIST (10-02): MODEL DEFAULTS lives on AI & MODELS, LIVE VOICE on LOOK & SOUND
