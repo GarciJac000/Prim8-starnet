@@ -22,7 +22,7 @@ The stability update. It fixes the bugs you reported most since 0.14.0, starting
 
 ## See your crew work
 
-- **Every working agent shows what it's doing.** A small tag right above each agent reads its name and the task it was given. The agent you're talking to, or the one under your pointer, gets the full card: the task, the tool it's using right now, how long it has been running and what it has cost. Tags take your theme's colour and zoom with the station.
+- **Every working agent shows what it's doing.** A small tag right above each agent reads its name and the task it was given. The agent you're talking to, or the one under your pointer, gets the full card: the task, the tool it's using right now, how long it has been running and, on a priced model, what it has cost. Tags take your theme's colour and zoom with the station.
 - **Hand-offs are visible.** When an agent splits work across its crew, a line runs across the floor from the lead to each worker for as long as that worker runs, and the result rides back when it finishes.
 - **Workers' steps reach the station.** A worker's own tool steps now show on its CREW card instead of it reading "thinking" for the whole job.
 
