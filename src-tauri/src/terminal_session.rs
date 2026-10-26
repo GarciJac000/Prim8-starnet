@@ -5,6 +5,11 @@
 //! last of them has exited, main.rs decides as a window close does. Parsing and the "is that terminal still running"
 //! probe live here, pure enough to test.
 
+/// The exit code of a terminal-started StarNet whose engine failed and whose startup dialog was cancelled. `starnet`
+/// waits on that process, and a 0 reads as a hand-off to a StarNet already starting (bin/starnet.js
+/// APP_EXIT_START_CANCELLED says the same number).
+pub const EXIT_START_CANCELLED: i32 = 3;
+
 /// What a launch's arguments say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalLaunch {

@@ -56,7 +56,8 @@ const USAGE = [
   '',
   'StarNet app closed? starnet starts its station in the background: the app\'s keys, no window (the tray shows it runs).',
   '  When the last starnet session ends it closes again, unless routines are armed or StarNet is set to stay in the tray',
-  '  (the same as closing its window). Opening StarNet while it runs shows that same station.',
+  '  (the same as closing its window). Opening StarNet while it runs shows that same station (on macOS: its',
+  '  menu-bar icon\'s Open StarNet — a Dock click does not bring that window back yet).',
   '',
   'Folder: starnet works in the trusted project you start it in. Started in one not trusted yet, the dashboard asks',
   '  TRUST THIS FOLDER? (y trusts it, the same as adding it under PROJECTS in the app); your home folder is never asked',
@@ -282,6 +283,27 @@ function parseStartupExe(text) {
     return ch === 'n' ? '\n' : ch === 't' ? '\t' : ch === 'r' ? '\r' : ch === '0' ? '\0' : ch;
   });
 }
+/* What StarNet's startup.log says about ONE terminal session (src-tauri main.rs logs its --background start and every
+   join outcome with the session's pid): 'started-for' (it was started for this pid), 'joined', 'starting' (it asked
+   before setup was done; tracked once it is), 'closing' (its sessions ended and it is closing: start it again once it
+   has quit), 'not-tracked' (a person's StarNet, or one staying in the tray: a terminal ending never closes it), or
+   null (nothing about this pid). The LAST line about the pid wins. */
+function joinOutcome(text, pid) {
+  const want = String(pid);
+  let out = null;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    let m = /started by starnet \(--background, terminal pid (\d+)\)/.exec(line);
+    if (m && m[1] === want) { out = 'started-for'; continue; }
+    m = /starnet session pid (\d+)[: ]\s*(.*)$/.exec(line);
+    if (!m || m[1] !== want) continue;
+    out = /^joins the station/.test(m[2]) ? 'joined' : /^joins once StarNet has started/.test(m[2]) ? 'starting'
+      : /^arrived while StarNet is closing/.test(m[2]) ? 'closing' : 'not-tracked';
+  }
+  return out;
+}
+// the exit code of a terminal-started StarNet whose engine failed and whose startup dialog was cancelled
+// (src-tauri terminal_session.rs EXIT_START_CANCELLED): a 0 would read as a hand-off to a StarNet already starting
+const APP_EXIT_START_CANCELLED = 3;
 
 // ---- agent selection ---------------------------------------------------------------------------
 /* GET /api/runtime/agent lists the roster ({agentId, name, model, provider}). Pick the run target:
@@ -577,6 +599,6 @@ function cliStreamId(agentId) { return ('cli-' + String(agentId || 'agent').repl
 
 module.exports = {
   EXIT, USAGE, DEFAULT_PORT, DEFAULT_AGENT_ID, DESKTOP_CLOSED, DESKTOP_CLOSED_SPAWN, DESKTOP_NO_APP, HEADLESS_PLACED, RUN_STOP_REASONS,
-  parseArgs, chooseStation, parseListeningPort, parseStartupLog, parseStartupExe, pickAgent, buildRunBody,
+  APP_EXIT_START_CANCELLED, parseArgs, chooseStation, parseListeningPort, parseStartupLog, parseStartupExe, joinOutcome, pickAgent, buildRunBody,
   makeRunTracker, exitCodeForReason, bootstrapDocs, inferProvider, jsonResult, splitNdjson, splitSse, cliStreamId, isTaskText
 };
