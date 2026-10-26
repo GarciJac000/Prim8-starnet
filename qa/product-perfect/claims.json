@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "46f215d080158d406bd07ff4bf08d8fd6d7fa625",
+    "sourceCommit": "75b68971d8f12bb421ec2a2281a4bee2eda36cdb",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -548,8 +548,8 @@
       },
       {
         "path": "frontend/app/glass-demo.js",
-        "bytes": 13466,
-        "sha256": "b220465b27e81e49111de35b8f8560b2f114af95c224bb696afd49e2669dcfd9"
+        "bytes": 13762,
+        "sha256": "7c6ef33b00915badf1ef89c8a9e4693ec3acb64bfc0444cd89bd522ad396ab1c"
       },
       {
         "path": "frontend/app/glossary.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 956403,
-        "sha256": "d74fe873fd125f44bc1ee0902df9448d988304d09dfccef0c4b68eb00935c0b6"
+        "bytes": 957996,
+        "sha256": "7d6af53b7435729d2f10724449dee5e6dcbfa9abb3719e1382277067964d89de"
       },
       {
         "path": "frontend/app/stepin.js",
@@ -1298,8 +1298,8 @@
       },
       {
         "path": "frontend/app/typefloor.js",
-        "bytes": 11360,
-        "sha256": "21287633e34cc941677e32b3ef4852481b85b25c8bfcd749ffbc63c094b9dc3e"
+        "bytes": 14577,
+        "sha256": "0439249a14559347c97201ada961ba5c94c94efc2d2dbab3b4a5117b7da8c186"
       },
       {
         "path": "frontend/app/understanding.js",
@@ -1473,8 +1473,8 @@
       },
       {
         "path": "frontend/app/world.js",
-        "bytes": 931842,
-        "sha256": "9c0d4f672b65902d1fe19db2047b1539d20fcf76bff518f95a331bf25949902d"
+        "bytes": 933414,
+        "sha256": "0a48d4927cb6d89a997febb6a9f7b83395bf494da83e463afe3f1390a4243432"
       },
       {
         "path": "frontend/app/worldlab.js",
