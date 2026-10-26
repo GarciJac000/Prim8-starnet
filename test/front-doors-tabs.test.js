@@ -64,4 +64,34 @@ A.ok(/^\.thumb-down \.thumb-px \{ transform: rotate\(180deg\); \}/m.test(appCss)
 // org D9 (10-14): a door that moves an OPEN menu window to another section (AWAY WORK while SCHEDULES shows) lights that tab too
 A.ok(/if \(open\[key\]\) \{ if \(minimized\[key\]\) restoreTerm\(key\); if \(section\) \{ rerender\(key\); syncFamilyTabs\(open\[key\], key\); \} return; \}/.test(ui),
   'openTerm on an open window re-syncs the menu tab strip after it re-renders the section');
+
+/* 0.14.1 review (window-open lag lane): a sheet is seated the moment its frame mounts (SEAT BEFORE BUILD), reading its OWN
+   dock state. A deep link to a sibling tab (TASKS' ▸ DELIVERABLES → openTerm('deliverables')) swapped in place without
+   naming the window, so the source's docked height was carried only AFTER the seat and the switch snapped to the sibling's
+   own height. Run the REAL swapInPlace: the height the opening sheet is seated at must be the source's. */
+{
+  const vm = require('vm');
+  const src = ui.slice(ui.indexOf('  function swapInPlace('), ui.indexOf('  // the dock button of a menu'));
+  const run = (toKeyArg) => {
+    const seatedAt = [];
+    const ctx = {
+      termPos: { tasks: { left: 40, top: 300 } }, termSize: {}, store: { termDock: { tasks: { height: 610, expanded: false }, deliverables: { height: 260, expanded: false } } },
+      open: { tasks: {} }, save() {}, closeTerm(k) { delete ctx.open[k]; }, placeTerm() {}, familyOf: () => 'mywork',
+      document: { body: { setAttribute() {}, removeAttribute() {} } }, setTimeout: () => 0, clearTimeout() {}
+    };
+    // the opener = toggleTerm: the sheet seats from the store the moment it mounts; a later re-seat reads it again
+    const openDeliverables = () => {
+      const w = { _reseatDock: () => seatedAt.push(ctx.store.termDock.deliverables.height) };
+      ctx.open.deliverables = w; seatedAt.push(ctx.store.termDock.deliverables.height);
+    };
+    vm.createContext(ctx); vm.runInContext(src + '\nthis.swapInPlace = swapInPlace;', ctx);
+    ctx.swapInPlace('tasks', openDeliverables, toKeyArg);
+    return seatedAt;
+  };
+  A.eq(run('deliverables').join(','), '610', 'a named swap carries the source\'s docked height before the sheet seats (it opens at 610, never at its own 260)');
+  A.eq(run(undefined).slice(-1)[0], 610, 'an unnamed swap re-seats the opened sheet from the carried height (its last seat is the source\'s 610)');
+  A.ok(/swapInPlace\(sib, \(\) => toggleTerm\(key, def\[0\], def\[1\], def\[2\]\), key\)/.test(ui), 'openTerm\'s sibling switch names the window it opens');
+  const glass = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'glass-demo.js'), 'utf8');
+  A.ok(/w\._reseatDock = \(\) => \{[\s\S]{0,260}_readDockState\(\)[\s\S]{0,200}seat\(w,s\);/.test(glass), 'a sheet can re-seat from its (carried) dock state');
+}
 A.report('front-doors-tabs');

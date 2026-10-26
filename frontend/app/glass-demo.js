@@ -144,6 +144,12 @@
     const remember = () => { if (w._saveDockState) w._saveDockState(s); };
     w.classList.add('gd-sheet');
     w._fitDockedSheet = () => { if (!s.docked) return false; seat(w,s); return true; };
+    // a tab swap that carried another window's docked height in AFTER this sheet mounted: take it and re-seat
+    w._reseatDock = () => {
+      const d = w._readDockState ? w._readDockState() : {};
+      s.docked = true; s.expanded = d.expanded === true; s.height = Number.isFinite(d.height) && d.height > 0 ? d.height : null;
+      seat(w,s);
+    };
     w._animateSheet = (phase, done) => moveSheet(w,s,phase === 'restore',done);
     const controls = document.createElement('span'); controls.className = 'gd-controls';
     const button = (label, action) => {
