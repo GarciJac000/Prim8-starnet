@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "7ae477f88ddca408401bb1074b354974eb5957d4",
+    "sourceCommit": "46f215d080158d406bd07ff4bf08d8fd6d7fa625",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -38,8 +38,8 @@
       },
       {
         "path": "RELEASE_NOTES.md",
-        "bytes": 15940,
-        "sha256": "53be4c3d331461cac1d816d5275fde7e3e244386a79cea4e3eb1e2ad3bd4f5d0"
+        "bytes": 3535,
+        "sha256": "e9dc27d0f4476179d3c11a28cea5af424739dfae574256dece4b30aeb57a4175"
       },
       {
         "path": "TERMS.md",
@@ -578,8 +578,8 @@
       },
       {
         "path": "frontend/app/harness.js",
-        "bytes": 144673,
-        "sha256": "783c151a193918cedf5f591db2b1767a6223df586a466cf7169a0f93c7e8b13b"
+        "bytes": 143662,
+        "sha256": "02013039044503ba2653505ebb8a5a59aa6083fc210646ece3c8656336d61b87"
       },
       {
         "path": "frontend/app/hint.js",
@@ -1193,8 +1193,8 @@
       },
       {
         "path": "frontend/app/stationqueststore.js",
-        "bytes": 11563,
-        "sha256": "686d8d54aeaa5cc1c39713e81b9bf9d7407965ae686ca7a4c40b62cfde24de13"
+        "bytes": 11314,
+        "sha256": "0946958a85a4e4214d9143309474d45f31adfc48d7bcbd6f876dd2ec64232a36"
       },
       {
         "path": "frontend/app/stationtemplates.js",
@@ -1473,8 +1473,8 @@
       },
       {
         "path": "frontend/app/world.js",
-        "bytes": 950534,
-        "sha256": "c1a2087fb42948c44b87f26e48e47e27ed1b4864c11387b5c1831f6b54f0f738"
+        "bytes": 931842,
+        "sha256": "9c0d4f672b65902d1fe19db2047b1539d20fcf76bff518f95a331bf25949902d"
       },
       {
         "path": "frontend/app/worldlab.js",
