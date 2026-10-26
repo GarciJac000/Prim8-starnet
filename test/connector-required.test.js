@@ -176,6 +176,16 @@ function ctxFor(runId) {
       const win = fs.readFileSync(path.join(__dirname, '../frontend/app/windows/connectors.js'), 'utf8');
       const labels = new Set((win.match(/label: '([^']+)'/g) || []).map(m => m.slice(8, -1)));
       (win.match(/data-ab-to="[a-z]+">([^<]+)</g) || []).forEach(m => labels.add(m.replace(/^.*">/, '').replace(/<$/, '')));
+      // ONE FLAT LIST (UX night 2026-10-26): a block heading inside a section is a real place too (CONNECTED › API KEYS,
+      // TOOLS › COMPUTER CONTROL), and the skills lane's sections and blocks (SKILL MARKET › ADD FROM A LINK, SKILLS ›
+      // LEARNED SKILLS) are drawn from stationui.js
+      (win.match(/<span class="sec-l">([^<]+)<\/span>/g) || []).forEach(m => labels.add(m.replace(/^<span class="sec-l">/, '').replace(/<\/span>$/, '')));
+      const sui = fs.readFileSync(path.join(__dirname, '../frontend/app/stationui.js'), 'utf8');
+      const lane = sui.slice(sui.indexOf('function abilitySkillsLane('), sui.indexOf('window.AbilityLanes.push(abilitySkillsLane)'));
+      A.ok(lane.length > 0, 'the skills lane source is found');
+      (lane.match(/label: '([^']+)'/g) || []).forEach(m => labels.add(m.slice(8, -1)));
+      (lane.match(/block\('[a-z-]+', '([^']+)'\)/g) || []).forEach(m => labels.add(m.replace(/^block\('[a-z-]+', '/, '').replace(/'\)$/, '')));
+      A.ok(['API KEYS', 'COMPUTER CONTROL', 'SKILL MARKET', 'ADD FROM A LINK', 'LEARNED SKILLS'].every(l => labels.has(l)), 'the merged blocks are in the place list');
       const files = ['sidecar/manual.js', 'sidecar/harness-import.js', 'sidecar/index.js', 'sidecar/tools/builtin/connectors.js', 'frontend/app/marketplace.js'];
       const bad = [];
       for (const f of files) {

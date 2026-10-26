@@ -2577,7 +2577,7 @@ const Marketplace = (() => {
      A one-click path for a Commander arriving from OpenClaw or hermes-agent: detect installs (or pick a folder),
      preview exactly what the scan found, then RECRUIT mints a StarNet agent with the persona/orders/memory
      pre-filled. Every field shown comes straight from /api/harness/scan — nothing is invented (truthful telemetry).
-     Keys are NEVER read or transferred; the preview says so and ABILITIES › SAVED API CONNECTIONS is where the Commander re-enters them.
+     Keys are NEVER read or transferred; the preview says so and ABILITIES › CONNECTED › API KEYS is where the Commander re-enters them.
      Backend routes (built in parallel this session): POST /api/harness/detect, POST /api/harness/scan. The folder
      fallback reuses the existing POST /api/projects/pickfolder. If a route is missing the flow degrades to an honest
      empty/error state — it never fakes a detection or a scan. */

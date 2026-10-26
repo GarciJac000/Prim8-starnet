@@ -10,7 +10,7 @@
 
    This tool closes (3) ONLY. It is a READER: pure local state, no network, no consent, and it can neither
    install nor authenticate anything. Adding a connector spends the Commander's credentials and is their
-   click, in ABILITIES › DISCOVER › CATALOG (a card per service) — the agent's job is to know the offer exists and say so.
+   click, in CONNECT › ABILITIES › APPS (a card per service) — the agent's job is to know the offer exists and say so.
 
    NEVER ECHOES A SECRET. Connector summaries carry `hasToken`, never the token (mcp/manager.js summary());
    service keys are reported as NAME + ENV VAR only, exactly like the prompt block. There is no code path
@@ -175,7 +175,7 @@
       // The count is the REAL total, not the shown slice — a truncated list that reports its own length as the
       // total would understate the offer, which is the failure this tool exists to fix.
       const head = 'AVAILABLE (' + out.length + ')' + (shown.length < out.length ? ', showing ' + shown.length : '')
-        + ' — NOT installed. The Commander adds either kind in ABILITIES › DISCOVER › CATALOG: search the service and follow its card (sign-in, or SET UP API KEY). You cannot add these yourself; offer, never assume.';
+        + ' — NOT installed. The Commander adds either kind in CONNECT › ABILITIES › APPS: search the service and follow its card (sign-in, or SET UP API KEY). You cannot add these yourself; offer, never assume.';
       return { label: 'available', count: out.length, head: head, body: shown };
     }
 
@@ -214,7 +214,7 @@
         + 'connected, and — the part you cannot otherwise know — the vetted connectors and platform keys the '
         + 'Commander could add but has not (GitHub, Notion, Stripe, Google Workspace, Printify, Etsy and more). '
         + 'Check this BEFORE telling the Commander that StarNet cannot reach a service: it usually can, and the '
-        + 'honest answer is "that service has a setup path in ABILITIES › DISCOVER › CATALOG — I can walk you through '
+        + 'honest answer is "that service has a setup path in CONNECT › ABILITIES › APPS — I can walk you through '
         + 'it?". Read-only: you cannot install or authenticate anything, and you never see a key\'s value. '
         + 'Optional `query` filters by service or category; `scope` narrows to connected or available. '
         + 'Pass `goal` (the Commander\'s task in their words, e.g. "email my notes to myself") to get SUGGESTED: '
@@ -251,7 +251,7 @@
         }
         if (goal) {
           parts.push(suggested.length
-            ? { label: 'suggested', count: suggested.length, head: 'SUGGESTED for "' + goal + '" — NOT connected yet. The Commander now has a ⇄ CONNECT chip for it on your reply (or on your question card, if you ask one): tell them to tap it — it opens that service in ABILITIES › DISCOVER › CATALOG. Setup varies by provider and may require an API key or developer app setup before sign-in. You cannot connect it yourself.', body: suggested.map(x => '- ' + x.id + ' — ' + x.reason) }
+            ? { label: 'suggested', count: suggested.length, head: 'SUGGESTED for "' + goal + '" — NOT connected yet. The Commander now has a ⇄ CONNECT chip for it on your reply (or on your question card, if you ask one): tell them to tap it — it opens that service in CONNECT › ABILITIES › APPS. Setup varies by provider and may require an API key or developer app setup before sign-in. You cannot connect it yourself.', body: suggested.map(x => '- ' + x.id + ' — ' + x.reason) }
             : { label: 'suggested', count: 0, head: 'SUGGESTED (0) for "' + goal + '" — nothing connectable in the catalog matches this goal (or what it needs is already connected).', body: [] });
           if (blocked.length) parts.push({ label: 'suggested-unavailable', count: blocked.length, head: 'CANNOT BE CONNECTED IN THIS BUILD — sign-in is switched off for these, so there is NO connect chip. Tell the Commander plainly that it is not available yet; never tell them to sign in or tap a chip for it.', body: blocked.map(x => '- ' + x.id + ' — ' + x.unavailable.slice(0, 200)) });
           if (lost.length) parts.push({ label: 'suggested-emit-lost', count: lost.length, head: 'NOTE: the connect chip could not be raised for: ' + lost.join('; '), body: [] });
