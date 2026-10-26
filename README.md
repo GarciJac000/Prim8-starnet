@@ -129,7 +129,8 @@ station cannot prove.
 StarNet doesn't have to be open. With it closed, `starnet` starts it in the background: the same station
 with your keys (they stay in the app's keychain), and no window opens; the tray icon shows it's running.
 When the last `starnet` session ends it closes again, unless routines are armed or StarNet is set to stay
-in the tray (the same as closing its window). Opening StarNet while it runs shows that same station.
+in the tray (the same as closing its window). Opening StarNet while it runs shows that same station; on
+macOS, open it from its menu-bar icon (Open StarNet), since a Dock click doesn't bring that window back yet.
 
 | Platform | The command |
 | --- | --- |
