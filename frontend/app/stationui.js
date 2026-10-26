@@ -4045,7 +4045,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (skmFocus) {
       const f = host.querySelector('[data-skm="' + CSS.escape(skmFocus) + '"] .cc-acts button:not([disabled])') || host.querySelector('[data-skm="' + CSS.escape(skmFocus) + '"] .cc-acts');
       skmFocus = '';
-      if (f && f.focus) { if (!f.matches('button')) f.setAttribute('tabindex', '-1'); f.focus({ preventScroll: false }); }
+      // the card's category may have folded in this repaint (a search opened it): open it again before focusing, as the
+      // search's own fold when searching, else as the Commander's (they just acted inside it)
+      const fold = f && f.closest('details.cc-group');
+      if (fold && !fold.open) { fold.open = true; if (host.closest('.con-searching')) fold.dataset.searchOpened = '1'; else skmFoldOpen.add(fold.dataset.fold); }
+      // focus a tick later: while searching, a repainted card's group stays display:none until the caller re-applies the
+      // search (loadSkillMarket, right after this render), and focusing a hidden button silently drops to <body>
+      if (f && f.focus) setTimeout(() => { if (!f.isConnected) return; if (!f.matches('button')) f.setAttribute('tabindex', '-1'); f.focus({ preventScroll: false }); }, 0);
     }
   }
   function loadSkillMarket(agentId, refresh) {
