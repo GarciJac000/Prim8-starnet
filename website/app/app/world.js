@@ -8462,6 +8462,7 @@ const World = (() => {
      in the font; box-drawing and ▸ are fallback faces and would break the monospace frame). Every line is padded to
      one width so the frame closes. The clock is the RUN clock's own (CrewClock first), so the two can never disagree. */
   const ACT_PLATE_FONT = "6px 'VT323','Courier New',monospace";
+  const ACT_TAG_W = 24;     // characters in a one-line tag (name + the task, faded at the edge)
   const ACT_PLATE_W = 30;   // characters per line (the task line needs the room)
   function plateTarget(raw) {
     const s = String(raw || '');
@@ -8529,87 +8530,99 @@ const World = (() => {
   }
   function drawActivityPlates(now) {
     if (!plateByAgent.size) return;
-    const placed = [];
-    // a crowded floor (4+ live plates) keeps every plate to one task line, so the cards stay beside their desks
-    let liveN = 0;
-    for (const [aid] of plateByAgent) { const b = bodyForAgent(aid); if (b && runStartByAgent.has(aid) && (b === agent ? agent.working : (b.working || (b.workUntil && now < b.workUntil)))) liveN++; }
-    const crowded = liveN > 3;
+    // TWO SIZES (Andrew 10-26, "it all clusters together"): every working agent wears a ONE-LINE tag — its name and, in
+    // words, what it was asked to do — and ONE agent at a time gets the full card (task on two lines, the live tool, the
+    // clock and the reported cost): the agent you are talking to in COMMS, or the one under your pointer. The full card
+    // is placed first so it gets the best spot, and drawn last so it sits on top.
+    const live = [];
     for (const [aid, k] of plateByAgent) {
       const t0 = runStartByAgent.get(aid);
       const b = bodyForAgent(aid);
       if (t0 == null || !b || b.unplaced || crewIsAwaiting(b)) continue;
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
-      // TASK-FIRST (Andrew 10-26: "more focused on the task"): NAME + clock/cost · the task in words · the live tool.
-      // The model is left off — the CREW card and COMMS already say it; here it crowded out what the agent is DOING.
       if (!k.task && aid !== 'agent' && now - (k.taskTry || 0) > 1000) { k.taskTry = now; k.task = workerTaskFor(aid, k.wallStart || 0); }
-      const clock = plateClock(aid, t0, now);
-      const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
-      const right = clock + (usd ? ' · ' + usd : '');
+      live.push({ aid, k, b, t0, full: b === hoverAgent || (chatFocusId != null && aid === chatFocusId) });
+    }
+    if (!live.length) return;
+    live.sort((p, q) => Number(q.full) - Number(p.full));
+    const placed = [], drawn = [];
+    ctx.save();
+    ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    const cw = ctx.measureText('M').width, PAD = 2, LH = 6, ink = plateTheme(now);
+    for (const p of live) {
+      const { aid, k, b, t0, full } = p;
       const nm = String(b.name || aid).toUpperCase();
-      const task = String(k.task || '').replace(/\s+/g, ' ').trim().replace(/\s*(\u2026|\.\.\.)$/, '');
-      const caret = k.live && Math.floor(now / 420) % 2 ? '_' : '';
-      const what = k.name ? (k.live ? '> ' : '. ') + tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : '. thinking';
-      // the task gets up to TWO lines — "a small description of what it's doing", not one clipped line
-      const taskLines = task ? wrapChars(task, ACT_PLATE_W, crowded ? 1 : 2) : [];
-      const rows = 1 + taskLines.length + 1;
-      ctx.save();
-      ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-      const cw = ctx.measureText('M').width, PAD = 2, w = cw * ACT_PLATE_W + PAD * 2, LH = 6;
+      const task = String(k.task || '').replace(/\s+/g, ' ').trim().replace(/\s*(…|\.\.\.)$/, '');
+      const what = k.name ? tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : 'thinking';
+      // the full card: NAME · clock · cost / the task (two lines) / the live tool. The tag: NAME + the task (or, before
+      // a task is known, what it is doing), one line, sized to its words.
+      const taskLines = full ? (task ? wrapChars(task, ACT_PLATE_W, 2) : []) : [];
+      const rows = full ? 1 + taskLines.length + 1 : 1;
+      const tagText = task || what;
+      const chars = full ? ACT_PLATE_W : Math.min(ACT_TAG_W, nm.length + 2 + tagText.length + 1);
+      const w = cw * chars + PAD * 2 + (full ? 0 : 4), H = LH * rows + 2, hx = bodyPosX(b);
       const top = (b.visTopPy != null ? b.visTopPy : bodyPosY(b) - 18) - 3;
-      const H = LH * rows + 2, hx = bodyPosX(b);
-      // stay on screen and on the station: the visible world span is (−pan .. canvas − pan) / scale
       const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2, vy1 = (cv.height - panY) / scale - H - 2;   // inside the view AND the station hull
       const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
-      const hits = (x, y) => placed.some(p => x < p.x + p.w + 2 && p.x < x + w + 2 && y < p.y + p.h && p.y < y + H);
-      // AT A DESK: the plate hangs BESIDE the desk, level with the seat — never over the screen or the seated body
-      // (a plate above the head sat on the monitor and hid a seated worker behind its own readout). Right side first,
-      // then left; a side that leaves the view/hull is skipped. Off-desk (walking, deskless) it rides above the head.
+      const hits = (x, y) => placed.some(q => x < q.x + q.w + 2 && q.x < x + w + 2 && y < q.y + q.h + 1 && q.y < y + H + 1);
+      // AT A DESK it hangs beside the desk, top-aligned with the monitor (the desk's own readout) — never over the screen
+      // or the seated body; right side first, then left. Off-desk (walking, deskless) it rides above the head.
       const dp = deskPropFor(aid);
       const atDesk = !!(dp && Math.abs(hx - (dp.x + (dp.w || 1) / 2) * T) < T * 2.5 && Math.abs(bodyPosY(b) - (dp.y + (dp.h || 1)) * T) < T * 2.5);
-      let x = clampX(hx - w / 2), y = Math.max(vy0, top - LH * rows), side = 0, found = false;
+      let x = clampX(hx - w / 2), y = Math.max(vy0, top - H), side = 0, found = false;
       if (atDesk) {
-        const midY = Math.round(dp.y * T - 4);   // top-aligned with the desk's monitor, so the plate reads as the desk's own readout
+        const ty0 = Math.round(dp.y * T - 4);
         for (const [sd, sx0] of [[1, (dp.x + (dp.w || 1)) * T + 3], [-1, dp.x * T - w - 3]]) {
           if (sx0 < vx0 - 0.5 || sx0 > vx1 + 0.5) continue;
-          for (const dy of [0, -H - 1, H + 1]) if (!hits(sx0, midY + dy)) { x = Math.round(sx0); y = midY + dy; side = sd; found = true; break; }
+          for (const dy of [0, H + 1, -H - 1, 2 * (H + 1)]) if (!hits(sx0, ty0 + dy)) { x = Math.round(sx0); y = ty0 + dy; side = sd; found = true; break; }
           if (found) break;
         }
       }
-      const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H], [-w / 2 - 3, -H], [w / 2 + 3, -H]];
-      if (!found) for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - LH * rows + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
-      for (let step = 2; !found && step < 3; step++) { const cy = top - LH * rows - H * step; if (!hits(x, cy)) { y = cy; found = true; } }   // one more row up at most: a plate never strays far from its owner
-      y = Math.round(Math.max(vy0, Math.min(vy1, y)));   // and never off the top or bottom of the view
+      const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H - 1], [-w / 2 - 3, -H - 1], [w / 2 + 3, -H - 1]];
+      if (!found) for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - H + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
+      y = Math.round(Math.max(vy0, Math.min(vy1, y)));   // never off the top or bottom of the view
       placed.push({ x, y, w, h: H });
-      if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
-      const a0 = ctx.globalAlpha;
-      const ink = plateTheme(now), suit = b.color || ink.ph, HH = LH * rows + 2;
+      drawn.push({ p, nm, task, taskLines, what, rows, w, H, x, y, side, hx, top });
+    }
+    if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
+    const a0 = ctx.globalAlpha;
+    // tags first, the full card last (on top)
+    for (const d of drawn.slice().reverse()) {
+      const { p, nm, task, taskLines, what, rows, w, H, x, y, side, hx, top } = d;
+      const { aid, k, b, t0, full } = p;
+      const suit = b.color || ink.ph;
       ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = ink.ph;
-      if (side) {   // beside a desk: a short tick from the plate's inner edge to the desk
-        const ty = Math.round(y + LH / 2 + 1), ex = side > 0 ? x - 3 : x + w + 1;
-        ctx.fillRect(ex, ty, 2, 0.6);
-      } else {      // above a body: a stem down to the head
-        const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
-        ctx.fillRect(sx, y + LH * rows + 1, 0.6, Math.max(0, top + 2 - (y + LH * rows + 1)));
-      }
-      // IDENTITY (picked 10-26): a dark, slightly see-through plate (the deck shows through, so it sits IN the room),
-      // the agent's suit colour as its edge and its name, a hairline under the name, the task in bright phosphor
-      ctx.globalAlpha = a0 * 0.72; ctx.fillStyle = '#04070b'; ctx.fillRect(x - 1, y - 1, w + 2, HH);
-      ctx.globalAlpha = a0 * 0.9; ctx.fillStyle = suit; ctx.fillRect(x - 1, y - 1, 0.75, HH);
-      ctx.globalAlpha = a0 * 0.3; ctx.fillStyle = ink.ph; ctx.fillRect(x + PAD, y + LH + 0.25, w - PAD * 2, 0.4);
+      if (side) { const ty = Math.round(y + LH / 2 + 1), ex = side > 0 ? x - 3 : x + w + 1; ctx.fillRect(ex, ty, 2, 0.6); }   // a short tick to the desk
+      else { const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx))); ctx.fillRect(sx, y + H - 1, 0.6, Math.max(0, top + 2 - (y + H - 1))); }   // a stem to the head
+      // IDENTITY: a dark, slightly see-through plate (the deck shows through), the suit colour as its edge and its name
+      ctx.globalAlpha = a0 * (full ? 0.78 : 0.66); ctx.fillStyle = '#04070b'; ctx.fillRect(x - 1, y - 1, w + 2, H);
+      ctx.globalAlpha = a0 * 0.9; ctx.fillStyle = suit; ctx.fillRect(x - 1, y - 1, 0.75, H);
       ctx.globalAlpha = a0;
-      const base = y + LH - 1, tx = x + PAD + 4, inner = w - PAD * 2 - 4;
+      const base = y + LH - 1, tx = x + PAD + 4;
       ctx.fillStyle = k.live ? ink.bright : suit; ctx.fillRect(x + PAD, base - 3.5, 2, 2);   // the run lamp: lit on a live tool
-      ctx.shadowBlur = 2; ctx.shadowColor = ink.glow;
-      ctx.fillStyle = ink.dim; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
+      ctx.shadowBlur = 2;
+      if (!full) {
+        ctx.shadowColor = suit; ctx.fillStyle = suit; ctx.fillText(nm, tx, base);
+        const nx = tx + ctx.measureText(nm).width + cw;
+        ctx.shadowColor = ink.glow; ctx.fillStyle = task ? ink.bright : (k.live ? ink.ph : ink.faint);
+        fadeText(task || what, nx, base, x + w - PAD - nx, cw);
+        continue;
+      }
+      const clock = plateClock(aid, t0, now);
+      const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
+      const right = clock + (usd ? ' · ' + usd : '');
+      ctx.globalAlpha = a0 * 0.3; ctx.fillStyle = ink.ph; ctx.fillRect(x + PAD, y + LH + 0.25, w - PAD * 2, 0.4); ctx.globalAlpha = a0;
+      ctx.shadowColor = ink.glow; ctx.fillStyle = ink.dim; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
       ctx.textAlign = 'left'; ctx.shadowColor = suit; ctx.fillStyle = suit;
-      fadeText(nm, tx, base, inner - ctx.measureText(right).width - cw, cw);
+      fadeText(nm, tx, base, w - PAD * 2 - 4 - ctx.measureText(right).width - cw, cw);
       let ly = base + LH;
       ctx.shadowColor = ink.glow;
       for (const tl of taskLines) { ctx.fillStyle = ink.bright; fadeText(tl, x + PAD, ly, w - PAD * 2, cw); ly += LH; }
-      ctx.fillStyle = k.live ? ink.ph : ink.faint; fadeText(what + caret, x + PAD, ly, w - PAD * 2, cw);
-      ctx.restore();
+      const caret = k.live && Math.floor(now / 420) % 2 ? '_' : '';
+      ctx.fillStyle = k.live ? ink.ph : ink.faint; fadeText((k.live ? '> ' : '. ') + what + caret, x + PAD, ly, w - PAD * 2, cw);
     }
+    ctx.restore();
   }
 
   /* ---------- the DESK WORK-GLYPH (stage ticker STRETCH): a tiny "▸ TOOL" tag at a desk while that agent has
