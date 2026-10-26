@@ -315,7 +315,9 @@ module.exports = (async () => {
     try { await collect(p, { model: 'qwen3:8b', messages: [{ role: 'user', content: 'x' }], preStreamRetries: 0 }); } catch (e) { err = e; }
     A.ok(err && /timed out/.test(err.message), 'a silent local model still times out');
     A.ok(err && /entirely on the CPU/.test(err.message), 'and the error says the model runs on the CPU (from /api/ps)');
-    A.eq(errorClass.classifyApiError(err, { model: 'qwen3:8b' }).reason, 'timeout', 'the explanation does not change how it classifies');
+    // #99 follow-up: a model /api/ps listed as loaded is not re-sent (test/ollama-loaded-timeout.test.js has the ladder)
+    const loadedVerdict = errorClass.classifyApiError(err, { model: 'qwen3:8b' });
+    A.eq([loadedVerdict.reason, loadedVerdict.retryable], ['local_timeout', false], 'a timeout on a loaded model classifies as local_timeout, not retried');
     statusBody = { models: [] };
     let absentErr = null;
     try { await collect(p, { model: 'qwen3:8b', messages: [{ role: 'user', content: 'x' }], preStreamRetries: 0 }); } catch (e) { absentErr = e; }

@@ -13,6 +13,10 @@
          |     hands them back to the same adapter on the next request. This exists because signed thinking
          |     blocks must be replayed VERBATIM beside that turn's tool_calls or the provider rejects the turn.
          |     Reasoning is NEVER a 'text' event — the loop concatenates those into the delivered answer.
+         | { type:'reasoning' }                 // OPTIONAL, no block: reasoning (billed output the Commander does not
+         |                                       //   see) is streaming. Counts as stream output for a Stop's spend truth.
+         | { type:'billing',    perCall:false } // OPTIONAL, before a call's first event: this call bills nothing per
+         |                                       //   call (claude-cli subscription sign-in), so a Stop that cuts it cost $0
          | { type:'usage',      usage }          // prompt_tokens, completion_tokens, total_tokens,
          |                                       //   prompt_tokens_details.cached_tokens, reasoning_tokens, cost
          | { type:'done',       finishReason, truncated? }   // finishReason normalized via normalizeFinish()
@@ -25,6 +29,8 @@
          |     must report false (never guess true) — a false positive costs a full re-generation.
      listModels()     -> [{ id, context_length, max_completion_tokens, pricing, supportsTools }]
      contextLimit(id) -> number
+     outputLimit(id)  -> number                 // OPTIONAL: the most output tokens one call to this model can bill —
+                                                 //   the catalog's max output, or the max_tokens the adapter sends; 0 = unknown
      priceOf(id)      -> { in, out } | null      // per-million USD
 
    This module is the shared contract + a finish-reason normalizer used by adapters. */
@@ -587,6 +593,102 @@
     return changed ? out : messages;
   }
 
+  /* IMAGES ONLY TO A MODEL THAT CAN SEE THEM (2026-10-23, StarNet Cloud proxy logs: 14 managed completions refused by
+     OpenRouter with 404 "No endpoints found that support image input"). A COMMS photo, a channel photo or a browser
+     screenshot rode to a text-only model, and since the image stays in the conversation every later turn failed the
+     same way. imageInputOf(row) reads a catalog row: an explicit boolean supportsImages, else OpenRouter's
+     architecture.input_modalities (the StarNet Cloud /v1/models relays it verbatim), else its older `modality` string
+     ("text+image->text"). true/false only when the catalog SAYS; null when it says nothing — and an adapter strips
+     images only on false, so a model of unknown capability is sent exactly what it was before. */
+  function imageInputOf(row) {
+    if (!row || typeof row !== 'object') return null;
+    if (typeof row.supportsImages === 'boolean') return row.supportsImages;
+    const arch = (row.architecture && typeof row.architecture === 'object') ? row.architecture : null;
+    const mods = Array.isArray(row.input_modalities) ? row.input_modalities : (arch && Array.isArray(arch.input_modalities) ? arch.input_modalities : null);
+    if (mods && mods.length) return mods.some(x => String(x).toLowerCase() === 'image');
+    const modality = arch && typeof arch.modality === 'string' ? arch.modality : '';
+    const arrow = modality.indexOf('->');
+    if (arrow > 0) return modality.slice(0, arrow).split('+').some(x => x.trim().toLowerCase() === 'image');
+    return null;
+  }
+  /* Every image part (image_url — the shape attachments, channel photos and tool screenshots all use — or a Responses
+     input_image / Anthropic image block) becomes a short text note the model can act on: say so, read the saved file
+     with an image-analysis tool, or send the Commander to a vision model. Never mutates the caller's transcript; a
+     transcript with no image part returns by IDENTITY (request bytes unchanged).
+
+     WHERE THE IMAGE IS. A COMMS or channel attachment rides as a bare data: URL, so the note alone could not say which
+     file it was or where it lives, and "use an image-analysis tool" sent the model guessing paths. attachments.js
+     tags each image part it builds with tagImageSource(part, { name, path }) — the upload's name and the ABSOLUTE path
+     of its saved copy in the agent's own workspace (pathtrust lets any run of that agent read it, project-scoped or
+     not). The tag is a Symbol-keyed property: JSON.stringify and Object.keys never see it, so it never reaches a wire
+     or changes a vision model's request bytes, and a spread copy keeps it. A tagged image gets its own note naming the
+     file and the path; untagged images (a screenshot, an image tool result) share one note per run that offers the
+     image-analysis route only for a saved file the conversation itself names. */
+  const IMAGE_PART_TYPES = { image_url: 1, input_image: 1, image: 1 };
+  const IMAGE_SOURCE = Symbol.for('starnet.imageSource');
+  function tagImageSource(part, source) {
+    if (!part || typeof part !== 'object' || !source || typeof source !== 'object') return part;
+    const path = String(source.path || '').trim();
+    if (path) part[IMAGE_SOURCE] = { name: String(source.name || '').trim(), path };
+    return part;
+  }
+  function imageSourceOf(part) {
+    const s = part && typeof part === 'object' ? part[IMAGE_SOURCE] : null;
+    return (s && typeof s === 'object' && typeof s.path === 'string' && s.path) ? s : null;
+  }
+  // the upload's NAME (sender-chosen) goes into a bracketed note: one line, no bracket that could end it early, bounded.
+  // The PATH is host-made and must stay exact to be usable, so it loses only control characters.
+  function noteSafe(text, max) { return String(text || '').replace(/[\u0000-\u001f\u007f\[\]]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
+  function pathSafe(text) { return String(text || '').replace(/[\u0000-\u001f\u007f]+/g, '').trim(); }
+  function imageOmittedNote(count, model, source) {
+    const who = (model ? String(model) : 'this model') + ' cannot take image input, so ';
+    if (source && source.path) {
+      const name = noteSafe(source.name, 120);
+      return '[image omitted' + (name ? ': ' + name : '') + ' — ' + who + 'it was not sent. It is saved at ' + pathSafe(source.path)
+        + ' — to see what it shows, run an image-analysis tool (image_analyze) on that path if you have one, or tell the Commander to pick a vision model in the COMMS model dock.]';
+    }
+    const what = count > 1 ? count + ' images omitted' : 'image omitted';
+    return '[' + what + ' — ' + who + (count > 1 ? 'they were' : 'it was') + ' not sent. If you need what ' + (count > 1 ? 'they show' : 'it shows')
+      + ', tell the Commander to pick a vision model in the COMMS model dock; an image-analysis tool can read ' + (count > 1 ? 'them' : 'it')
+      + ' only from a saved file this conversation names.]';
+  }
+  function withoutImageParts(messages, model) {
+    if (!Array.isArray(messages)) return messages;
+    let changed = false;
+    const out = messages.map(m => {
+      if (!m || typeof m !== 'object' || !Array.isArray(m.content)) return m;
+      if (!m.content.some(p => p && typeof p === 'object' && IMAGE_PART_TYPES[p.type] === 1)) return m;
+      const parts = [];
+      let run = 0;
+      const flush = () => { if (run) { parts.push({ type: 'text', text: imageOmittedNote(run, model) }); run = 0; } };
+      for (const p of m.content) {
+        if (p && typeof p === 'object' && IMAGE_PART_TYPES[p.type] === 1) {
+          const src = imageSourceOf(p);
+          if (!src) { run++; continue; }
+          flush();
+          parts.push({ type: 'text', text: imageOmittedNote(1, model, src) });
+          continue;
+        }
+        flush();
+        parts.push(p);
+      }
+      flush();
+      changed = true;
+      return Object.assign({}, m, { content: parts });
+    });
+    return changed ? out : messages;
+  }
+  /* A model the provider REFUSED for image input (its own words, errorClass isImageInputRefusal) is text-only for this
+     process, whatever the catalog said or did not say: the next request to it goes without the image instead of
+     failing the same way. Keyed by endpoint + model; bounded so a long-lived sidecar cannot grow it without end. */
+  const imageRefusals = new Set();
+  function noteImageRefusal(endpoint, model) {
+    if (!model) return;
+    if (imageRefusals.size >= 500) imageRefusals.clear();
+    imageRefusals.add(String(endpoint || '') + '\u0000' + String(model));
+  }
+  function refusedImages(endpoint, model) { return !!model && imageRefusals.has(String(endpoint || '') + '\u0000' + String(model)); }
+
   /* RUN CONTEXT NOTE (lean-prompt, 2026-10-12). The per-run block (task brief, runtime identity, quests, crew call, the
      run's own skill index) used to ride the END of the system prompt, so the system differed on every message and no
      provider could reuse the conversation behind it from cache. runOnceCore now sends it as ONE fenced system note
@@ -809,8 +911,27 @@
     });
   }
 
+  /* BATCH-ONLY VARIANTS (fix 2026-10-23). OpenRouter's /models, and the StarNet managed catalog that passes it through,
+     lists '<id>:batch' rows (75 of 468 on 2026-10-23, every one beside its '<id>' row, at half its price) that only a
+     batch adapter serves: chat/completions answers 404 "<id>:batch cannot be used with the chat/completions endpoint".
+     Every StarNet turn runs on chat/completions, so such a row is never offered, and an id an older build let a user
+     save runs on its base model (the variant suffix is a routing option on that model, as gemini.js routedToNative
+     reads ':free'). The catalog marks batch rows by the suffix alone. Scoped to the providers whose catalog is
+     OpenRouter's: elsewhere 'name:tag' is a local model tag (Ollama). Callers pass a normalized provider id. */
+  const OPENROUTER_CATALOG_PROVIDERS = ['openrouter', 'starnet'];
+  const BATCH_VARIANT = /:batch$/i;
+  function isBatchOnlyModel(providerId, model) {
+    return OPENROUTER_CATALOG_PROVIDERS.indexOf(String(providerId || '').trim().toLowerCase()) >= 0
+      && BATCH_VARIANT.test(String(model || '').trim());
+  }
+  // The id a chat run sends for `model`: the base model of a batch-only variant, anything else unchanged.
+  function chatModelId(providerId, model) {
+    return isBatchOnlyModel(providerId, model) ? String(model).trim().replace(BATCH_VARIANT, '') : model;
+  }
+
   return { EVENT_TYPES, FINISH, normalizeFinish, timeouts, runtime, repairToolPairs, preserveClaudeContinuations,
     RUN_CONTEXT_OPEN, RUN_CONTEXT_CLOSE, runContextNote, isRunContextNote, CREW_CALL_OPEN, CREW_CALL_CLOSE, crewCallFence, isCrewCallNote,
     HOST_NOTE_TAGS, isHostNote, isClaudeModel, userSideHostNotes, chatRoleProjection, inertHostTags, inertHostFences,
-    prepareWireMessages, remapToolCallIds, ANTHROPIC_TOOL_ID, chatWireMessages, CHAT_WIRE_KEYS };
+    prepareWireMessages, remapToolCallIds, ANTHROPIC_TOOL_ID, chatWireMessages, CHAT_WIRE_KEYS, isBatchOnlyModel, chatModelId,
+    imageInputOf, withoutImageParts, imageOmittedNote, noteImageRefusal, refusedImages, IMAGE_SOURCE, tagImageSource, imageSourceOf };
 });

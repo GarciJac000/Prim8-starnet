@@ -45,7 +45,8 @@ A.ok(seedFn.startsWith('function seedSaveMemos(agentId, doc)') && seedFn.length 
     const big = Array.from({ length: 200 }, (_, i) => ({ id: 'ws' + i, title: 'session ' + i, history: [{ role: 'user', content: 'x'.repeat(2000) }] }));
     saveStore.save('agent', { updatedAt: 1, agent: { id: 'agent', skin: 'nova', color: '#f00' }, agents: [{ id: 'forge', skin: 'smith', color: '#0f0' }], workstreams: big });
     const api = vm.runInNewContext("let _remoteLooksMemo = { stamp: '', looks: null };\nlet _stationEpochMemo = { stamp: '', epoch: 1 };\n" + [looksOfFn, looksFn, seedFn, saveFn].join('\n') + '\n({ remoteCrewLooks, handleSaveWrite })',
-      { saveStore, workspaceDegraded: false, growthRatings: { latestTs: () => 0 }, readBody: async (req) => req.body, failNote: () => {} });
+      { saveStore, workspaceDegraded: false, growthRatings: { latestTs: () => 0 }, readBody: async (req) => req.body, failNote: () => {},
+        observeDeletedSessions: () => [] });   // the deleted-session ledger feed (qa/bugs/3e926b6a)
     const host = makeRemoteHost({ now: () => 5000, newId: () => 'id', broadcast: () => {},
       roster: () => [{ agentId: 'agent', name: 'Nova' }, { agentId: 'forge', name: 'Forge' }], liveRuns: () => [],
       transcript: { streams: () => [], history: () => [] },

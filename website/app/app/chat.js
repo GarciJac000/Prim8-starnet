@@ -9284,7 +9284,7 @@ const Chat = (() => {
   // words — the old "reached this run's limit" read as a runtime setting and sent users hunting in the wrong
   // panel. Scope/cap ride the additive agent.run.end fields; an old sidecar omits them and gets the generic line.
   // Issue #135: the unpriced ceiling's own lever is its Runtime limits row; a save applies from the next run.
-  function budgetStopLine(scope, capUsd, atBalance, unpriced, subscription) {
+  function budgetStopLine(scope, capUsd, atBalance, unpriced, subscription, projected) {
     /* THE UNPRICED-MODEL TOKEN CEILING IS NOT A $ CAP (2026-10-11). A model with no known price is bounded per run in
        TOKENS (loop.js maxUnpricedTokens, 2,000,000 by default); the $ settings never read it, so "hit the per-run spend
        cap — raise it" sent the user to a lever that changes nothing. unpriced = { model, capTokens } from the additive
@@ -9300,6 +9300,12 @@ const Chat = (() => {
     }
     // only show the $ figure when it renders honestly at cent precision (a sub-cent test cap would read "$0.00")
     const cap = (typeof capUsd === 'number' && isFinite(capUsd) && capUsd >= 0.01) ? '$' + capUsd.toFixed(2).replace(/\.00$/, '') + ' ' : '';
+    // projected (agent.run.end budgetProjected): a run and its workers share one PER RUN cap; this run stopped BEFORE it
+    // (calls in flight took what was left) — never "hit" a cap it did not reach (d3a76db3)
+    if (scope === 'run' && projected === true) {
+      if (atBalance === true) return (cap ? 'stopped before it would spend more than the ' + cap + 'left on your StarNet balance' : 'stopped before it would spend more than what is left on your StarNet balance') + ' — add credits under SETTINGS → AI & MODELS to keep going';
+      return 'stopped before it would pass the ' + cap + 'per-run spend cap — raise it in SETTINGS › SPENDING LIMITS';
+    }
     // atBalance (agent.run.end budgetCapIsBalance, additive): admission clamped this StarNet run's ceiling to the
     // reported balance, so the run spent the wallet, not a cap the user chose — raising PER RUN would do nothing.
     if (scope === 'run' && atBalance === true) return (cap ? 'used the ' + cap + 'left on your StarNet balance' : 'used what was left on your StarNet balance') + ' — add credits under SETTINGS → AI & MODELS to keep going';
@@ -9966,8 +9972,15 @@ const Chat = (() => {
     // persistent server-side context to fold on demand between runs. Auto-compaction runs INSIDE a run when the
     // live prompt crosses the threshold. This is the honest status; see the slash-parity report for the rationale.
     if (cs && cs.limit) {
-      const pct = Math.round(((cs.used || 0) / cs.limit) * 100);
-      localLine('Chat memory: ' + (cs.used || 0) + ' / ' + cs.limit + ' tokens used (' + pct + '% — a token is roughly ¾ of a word). When it nears full, older turns are folded into a summary automatically during the next run; there is nothing you need to do.');
+      // a run on a model that bills a dearer rate past a prompt size works in a window stopped at it (the sidecar's
+      // runWindow, context-cost-1023): measure against THAT window, the one a run folds in, never the 1M it could hold
+      const run = (typeof Harness !== 'undefined' && Harness.runWindowOf) ? (Number(Harness.runWindowOf(cs.model)) || 0) : 0;
+      const tier = run > 0 && run < cs.limit;
+      const win = tier ? run : cs.limit;
+      const pct = Math.round(((cs.used || 0) / win) * 100);
+      localLine('Chat memory: ' + (cs.used || 0) + ' / ' + win + ' tokens used (' + pct + '% — a token is roughly ¾ of a word). '
+        + (tier ? 'The model can hold ' + cs.limit + ', but it bills a higher rate for a prompt over ' + run + ' tokens, so a run works in ' + run + '. ' : '')
+        + 'When it nears full, older turns are folded into a summary automatically during the next run; there is nothing you need to do.');
     } else {
       localLine('Chat memory is managed automatically: when a conversation grows past what the model can hold, older turns are folded into a summary during the next run. There is nothing you need to do.');
     }
@@ -10028,7 +10041,9 @@ const Chat = (() => {
         const models = Array.isArray(j.byModel) ? j.byModel.slice(0, 3).map(m => (m.model || '?') + ' (' + (m.spendLabel && !(m.usd > 0) ? m.spendLabel : U.usd(m.usd || 0) + (m.spendLabel ? ', ' + m.spendLabel : '')) + ')') : [];
         const succ = (j.successPct == null) ? '' : ', ' + j.successPct + '% completed';
         return localLine('Insights (lifetime run history for ' + agentId + '): ' + (j.totalRuns || 0) + ' run' + (j.totalRuns === 1 ? '' : 's')
-          + ', ' + U.usd(j.totalUsd || 0) + (j.unpricedRuns ? ' (+ ' + j.unpricedRuns + ' run' + (j.unpricedRuns === 1 ? '' : 's') + ' with no published price)' : '') + ', ' + (j.totalTokens || 0) + ' tokens'
+          + ', ' + (j.usageMissingRuns ? 'at least ' : '') + U.usd(j.totalUsd || 0) + (j.unpricedRuns ? ' (+ ' + j.unpricedRuns + ' run' + (j.unpricedRuns === 1 ? '' : 's') + ' with no published price)' : '')
+          + (j.usageMissingRuns ? ' (' + j.usageMissingRuns + ' run' + (j.usageMissingRuns === 1 ? '' : 's') + ' stopped mid-answer before usage arrived)' : '')
+          + (j.spendUnknownRuns ? ' (+ ' + j.spendUnknownRuns + ' run' + (j.spendUnknownRuns === 1 ? '' : 's') + ' with spend unknown)' : '') + ', ' + (j.totalTokens || 0) + ' tokens'
           + (j.avgUsdPerRun ? ', ' + U.usd(j.avgUsdPerRun) + '/run' : '') + succ
           + (models.length ? '. Top models: ' + models.join(', ') : '') + '.');
       }
@@ -11213,7 +11228,7 @@ const Chat = (() => {
         renderHistory(); syncStatus();
         activeLiveRow = streamingAgent(undefined, undefined, runRoot); historyRead.repaint = false;
       }
-      const { text: reply, error, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens } = await Harness.chat({
+      const { text: reply, error, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected } = await Harness.chat({
         system: sys, messages: retry ? endOnUserTurn(historyWindow(ws)) : historyWindow(ws), agentId: ws.agentId || 'agent', isTask, recurring, signal: ac.signal, streamId: ws.id,
         // a SPOKEN reply may run on SETTINGS › Models › VOICE CHAT MODEL — never a live call's delegated work, which the
         // live voice layer already answers fast and hands to the agent's own model on purpose
@@ -11378,7 +11393,7 @@ const Chat = (() => {
           const unpriced = (endReason === 'budget' && unpricedModel) ? { model: unpricedModel, capTokens: unpricedCapTokens } : null;
           const subscription = (endReason === 'budget' && subscriptionModel) ? { model: subscriptionModel, capTokens: subscriptionCapTokens } : null;
           const stoppedBy = (endReason === 'cancelled' && interrupted.has(ws.id)) ? (stopSource.get(ws.id) || 'you') : null;
-          const stopLine = endReason === 'budget' ? budgetStopLine(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription)
+          const stopLine = endReason === 'budget' ? budgetStopLine(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription, budgetProjected)
             : stoppedBy ? stoppedByLine(stoppedBy)
             // toolsRan: this run's tool calls (callNames), so an empty end after real steps never reads "nothing was done"
             : (typeof Friendly !== 'undefined' && Friendly.stopLine) ? Friendly.stopLine(endReason, { cancelSource: runPressedEstop ? 'estop_by_run' : '', toolsRan: Object.keys(callNames).length })
@@ -11395,7 +11410,7 @@ const Chat = (() => {
           // The UNPRICED-model token ceiling is not a $ cap at all: its door is a different model (raising $ does nothing).
           if (isActiveWs(ws) && !(endReason === 'cancelled' && runPressedEstop)) { if (endReason === 'budget' && unpriced) offerUnpricedDoor(); else if (endReason === 'budget' && !subscription) offerBudgetDoor(budgetCapIsBalance); else offerTryAgain(); }
           if (typeof StationUI !== 'undefined') StationUI.notify(isActiveWs(ws) ? (stoppedBy ? 'stopped by you' : 'run stopped: ' + brief(stopLine || endReason))
-            : whoOf(ws) + ' stopped' + sessionNote(ws) + ' — ' + (endReason === 'budget' ? (unpriced ? 'hit the token ceiling for a model with no price' : subscription ? 'used its per-run Claude subscription ceiling; say "continue" to keep going' : budgetCapIsBalance === true ? 'used the rest of your StarNet balance' : 'hit a spending limit') : endReason === 'max_iters' ? 'reached the step limit; say "continue" to keep going' : brief(stopLine || endReason)),
+            : whoOf(ws) + ' stopped' + sessionNote(ws) + ' — ' + (endReason === 'budget' ? (unpriced ? 'hit the token ceiling for a model with no price' : subscription ? 'used its per-run Claude subscription ceiling; say "continue" to keep going' : budgetProjected === true ? (budgetCapIsBalance === true ? 'stopped before it would spend the rest of your StarNet balance' : 'stopped before it would pass a spending limit') : budgetCapIsBalance === true ? 'used the rest of your StarNet balance' : 'hit a spending limit') : endReason === 'max_iters' ? 'reached the step limit; say "continue" to keep going' : brief(stopLine || endReason)),
             'warn', undefined, isActiveWs(ws) || endReason === 'cancelled' ? undefined : { kind: 'alert', go: { ws: ws.id } });
         } else if (cutShort) {
           // distinct honest "cut short" recap: the reply is truncated/filtered, not a clean delivery.
@@ -11890,7 +11905,7 @@ const Chat = (() => {
   // only" gate maybeStandaloneRate uses — so a pure-chat run is never bottle-offered. Used by App.runBottleInfo (R5).
   function runDidWork(id) { const w = id ? runWork.get(id) : null; return !!(w && ((w.toolsOk || 0) >= 1 || (w.delivered || 0) >= 1)); }
 
-  return { init, load, paintTitle, deliverTurns, send, consentInspect, appendConsentDetails, revealHistory, revealAsk, copyText, continuityDiagnostics, refreshStarters, sendOrQueue, continueConnectorTask, stopActive, status, localLine, broadcast, renderProse, toolRailOf, openFile, answerConsent, consentPhrase: actionPhrase, reconcileBackgroundAsks, setSystem, getHistory, contextRef, abort, isBusy, beatBusy: skillBeatBusy, beginInterview, endInterview, echoUser, prefill, autoGrowInput, choices, clearChoices, retireDeskPrompt, typeLine, nudge, clearNudge, offerCuriosity, offerFork, planGoalPath, briefingReceipt, isComposerEngaged, canFocusSession, runMeta, runDidWork, awayDigest, awayReview, awayRate, sampleCard, workshopReturn, refreshIdBar: renderIdBar, refreshGroupControls: updateControls, refreshAgentIdentity, setRosterStatus, askBudgetSpent, spendAsk, clockLabel: fmtClock, breakLabel: fmtBreak, workspaceFileRefs, imageBlobUrl, readableUrl,
+  return { init, load, paintTitle, deliverTurns, send, consentInspect, appendConsentDetails, revealHistory, revealAsk, copyText, continuityDiagnostics, refreshStarters, sendOrQueue, continueConnectorTask, stopActive, status, localLine, broadcast, renderProse, toolRailOf, openFile, answerConsent, consentPhrase: actionPhrase, reconcileBackgroundAsks, setSystem, getHistory, contextRef, abort, isBusy, beatBusy: skillBeatBusy, beginInterview, endInterview, echoUser, prefill, rememberSent: recordSent, autoGrowInput, choices, clearChoices, retireDeskPrompt, typeLine, nudge, clearNudge, offerCuriosity, offerFork, planGoalPath, briefingReceipt, isComposerEngaged, canFocusSession, runMeta, runDidWork, awayDigest, awayReview, awayRate, sampleCard, workshopReturn, refreshIdBar: renderIdBar, refreshGroupControls: updateControls, refreshAgentIdentity, setRosterStatus, askBudgetSpent, spendAsk, clockLabel: fmtClock, breakLabel: fmtBreak, workspaceFileRefs, imageBlobUrl, readableUrl,
     // the COMMS '▤ saved' row's folder / copy-path keys and their path resolver, shared with MY WORK › DELIVERABLES' FILES rows (org pass 10-14, P24)
     folderButton, copyPathButton, fullSavedPath: absoluteArtifactPath };
 })();

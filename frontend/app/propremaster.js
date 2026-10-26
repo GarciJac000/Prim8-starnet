@@ -371,7 +371,16 @@ const PropRemaster = (() => {
     return typeof IndustrialTextures!=='undefined' && typeof IndustrialTextures.isRemaster==='function' && IndustrialTextures.isRemaster();
   }
   function enabled(id,view='s'){return remasterOn()&&entries.has(id+':'+view);}
+  /* STILL READOUT (world.js STILL VERDICT, 2026-10-21): when the LAST draw that returned true next changes on its own clock,
+     read back by PropSprites with lastChange(), allocation-free. The clock is state.now. `now` while it MOVES (an authored
+     content/machine/service layer — unknown motion is motion), the next phase edge of a STEPPED layer (the occupied screen
+     beam every 350 ms, a motion strip's next frame), whatever ApprovedSheetEffects / ProjectionPropEffects report for their
+     overlays, and Infinity for static art, alpha-only indicator glow and a frozen (still) draw. A native layer painted
+     through drawNative is the caller's to judge (it owns that clock). */
+  let changeAt=Infinity;
+  const stepAt=(t,step)=>{if(t>0){const at=(Math.floor(t/step)+1)*step;if(at<changeAt)changeAt=at;}};
   function draw(ctx,id,view,x,y,w,h,state,drawNative) {
+    changeAt=Infinity;
     if(!enabled(id,view))return false;
     const e=entries.get(id+':'+view),v=e.spec;
     // A saved custom box is already a native geometry contract, not permission to squash.
@@ -391,6 +400,8 @@ const PropRemaster = (() => {
         if(v.mode==='content')AuthoredPropContent.draw(g,id,{...e.box,crop:e.crop},state||{});
         if(v.mode==='machine'&&!e.lost)AuthoredPropMotion.draw(g,id,{...e.box,crop:e.crop},state||{});
         if(v.mode==='service')AuthoredServiceContent.draw(g,id,{...e.box,crop:e.crop},state||{});
+        const ct=Math.max(0,Number(state&&state.now)||0);
+        if(ct>0&&(v.mode==='content'||v.mode==='machine'&&!e.lost||v.mode==='service'&&!(state&&state.still)))changeAt=ct;
       }finally{g.restore();}
       ctx.save();try{ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';ctx.drawImage(composed,x+f.x,y+f.y,composed.width/DENSITY,composed.height/DENSITY);}finally{ctx.restore();}
       return true;
@@ -414,7 +425,7 @@ const PropRemaster = (() => {
       if(paint)ctx.drawImage(paint,x+f.x,y+f.y,e.body.width/DENSITY,e.body.height/DENSITY);
       if(e.live&&!e.lost)ctx.drawImage(e.live,x+f.x,y+f.y,e.live.width/DENSITY,e.live.height/DENSITY);
       if(e.screen&&!e.lost&&occupied&&!(state&&state.still)){
-        const phase=Math.floor((Math.max(0,Number(state&&state.now)||0)%2800)/350);
+        const phase=Math.floor((Math.max(0,Number(state&&state.now)||0)%2800)/350);stepAt(Math.max(0,Number(state&&state.now)||0),350);
         ctx.globalCompositeOperation='source-atop';
         ctx.globalAlpha *= .65 + .2 * Math.max(0,Math.min(1,Number(state&&state.heat)||0));
         const beam=screenBeam(e.screen,phase);
@@ -427,6 +438,7 @@ const PropRemaster = (() => {
       const moving=!(state&&state.still)&&active;
       if(e.motion&&!e.lost&&(moving||v.mode==='pool'||fired&&active)){
         const period=v.mode==='scanner'?900:4800,phase=moving?Math.floor((Math.max(0,Number(state&&state.now)||0)%period)/period*e.motion.length):fired?6:0;
+        if(moving)stepAt(Math.max(0,Number(state&&state.now)||0),period/e.motion.length);
         ctx.globalCompositeOperation=v.mode==='steam'?'source-over':'source-atop';
         if(fired&&state.bad&&v.motion.failureColour){
           ctx.fillStyle='rgba('+v.motion.failureColour.join(',')+',.48)';ctx.beginPath();
@@ -435,11 +447,13 @@ const PropRemaster = (() => {
       }
       if(v.mode==='approved'){
         ctx.globalCompositeOperation='source-over';ctx.globalAlpha=baseAlpha;
-        if(e.approved&&typeof ApprovedSheetEffects!=='undefined')ApprovedSheetEffects.draw(ctx,id,{x:x+e.box.x,y:y+e.box.y,width:e.box.width,height:e.box.height,crop:e.crop,sourceWidth:v.sourceWidth,sourceHeight:v.sourceHeight},{...state,prepared:e.lost?null:e.approved});
+        if(e.approved&&typeof ApprovedSheetEffects!=='undefined'){ApprovedSheetEffects.draw(ctx,id,{x:x+e.box.x,y:y+e.box.y,width:e.box.width,height:e.box.height,crop:e.crop,sourceWidth:v.sourceWidth,sourceHeight:v.sourceHeight},{...state,prepared:e.lost?null:e.approved});
+          if(ApprovedSheetEffects.lastChange)changeAt=Math.min(changeAt,ApprovedSheetEffects.lastChange());}
         approvedState(ctx,id,e,x,y,state||{});
       }
       if(e.projectionHandled){ctx.globalAlpha=baseAlpha;ctx.globalCompositeOperation='source-over';
-        ProjectionPropEffects.draw(ctx,id,view,{x:x+e.box.x,y:y+e.box.y,width:e.box.width,height:e.box.height,crop:e.crop,sourceWidth:v.sourceWidth,sourceHeight:v.sourceHeight},state||{},e.lost?null:e.projection);}
+        ProjectionPropEffects.draw(ctx,id,view,{x:x+e.box.x,y:y+e.box.y,width:e.box.width,height:e.box.height,crop:e.crop,sourceWidth:v.sourceWidth,sourceHeight:v.sourceHeight},state||{},e.lost?null:e.projection);
+        if(ProjectionPropEffects.lastChange)changeAt=Math.min(changeAt,ProjectionPropEffects.lastChange());}
     }finally{ctx.restore();}
     return true;
   }
@@ -531,7 +545,7 @@ const PropRemaster = (() => {
     await prepare(key,v,im);
     return entries.has(key);
   }
-  return Object.freeze({ready,enabled,draw,registerRuntime,restore,whenRecovered,drawForeground,emitter,screenEmission,viewGeometry,hitTest,isProjection:()=>projectionReview,revision:()=>revision,
+  return Object.freeze({ready,enabled,draw,lastChange:()=>changeAt,registerRuntime,restore,whenRecovered,drawForeground,emitter,screenEmission,viewGeometry,hitTest,isProjection:()=>projectionReview,revision:()=>revision,
     status:()=>({views:Array.from(entries.keys()),failures:failures.slice(),pixels:pixelBudget,lost:[...entries.values()].filter(e=>e.lost).length,recovering:repairing.size+repairQueue.size,
       recoveryBytes:[...entries.values()].reduce((n,e)=>n+e.recoveryPixels.data.byteLength+(e.foregroundPixels?.data.byteLength||0)+(e.offPixels?.data.byteLength||0),0)}),
     // Pure contracts exposed for deterministic headless geometry validation.

@@ -147,7 +147,7 @@ const brief = { id: 'current-brief', source: 'interactive', status: 'ready', age
     const notes = [];
     const api = vm.runInNewContext("let _stationEpochMemo = { stamp: '', epoch: 1 };\nlet _remoteLooksMemo = { stamp: '', looks: null };\n" + sliced.join('\n') +
       '\n({ stationEpoch, handleSaveWrite })', { saveStore, workspaceDegraded: false, growthRatings: { latestTs: () => 0 },
-      readBody: async (req) => req.body, failNote: (tag) => notes.push(tag) });
+      readBody: async (req) => req.body, failNote: (tag) => notes.push(tag), observeDeletedSessions: () => [] });   // the deleted-session ledger feed (qa/bugs/3e926b6a)
     const big = Array.from({ length: 300 }, (_, i) => ({ id: 'ws' + i, history: [{ role: 'user', content: 'x'.repeat(2000) }] }));
     let rev = 0, upd = 0;
     // the desk's debounced persist, through the real POST /api/save handler

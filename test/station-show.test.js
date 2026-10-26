@@ -68,13 +68,21 @@ function boot(opts) {
   const calls = [], acks = [];
   const open = new Set(opts.open || []);
   const crew = [{ id: 'agent', name: 'NOVA' }, { id: 'w1', name: 'REX' }, { id: 'w2', name: 'Rex2' }];
+  // opts.unconfirmed: the watched run's send is in flight but its agent.run.start has not reached the page yet (it rides
+  // the run's own stream, the command the event stream); opts.confirm then lands that run.start 30ms later, in
+  // harness.js order: the bus hears it first, then the run's onRunId stamps the channel
+  let pageRunId = opts.unconfirmed ? null : 'run1';
+  const handlers = {};
+  const bus = { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, off: (ev, fn) => { const a = handlers[ev] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+    emit: (ev, p) => (handlers[ev] || []).slice().forEach(fn => fn(p)), count: ev => (handlers[ev] || []).length };
+  if (opts.unconfirmed && opts.confirm) setTimeout(() => { bus.emit('agent.run.start', { runId: opts.confirm }); pageRunId = opts.confirm; }, 30);
   const shown = key => open.has(key) ? { open: true, key, title: key.toUpperCase(), section: null } : { open: false, key };
   const context = {
     Places, console, setTimeout, clearTimeout,
     document: { addEventListener: () => {} },
     fetch: async (url, init) => { acks.push(JSON.parse(init.body)); return { ok: true }; },
     Workstreams: { activeId: () => opts.active || 'ws1' },
-    Channels: { isBusy: id => id === 'ws1' && !opts.idle, runIdOf: id => id === 'ws1' ? 'run1' : null },
+    Channels: { isBusy: id => id === 'ws1' && !opts.idle, runIdOf: id => id === 'ws1' ? pageRunId : null },
     App: { agents: () => crew, openSummonBay: () => { calls.push('summon'); setTimeout(() => open.add('marketplace'), 250); }, openRecipes: () => { calls.push('recipes'); open.add('marketplace'); },
       showNeedsYou: () => { calls.push('needs-you'); return { open: !opts.railHidden, key: 'needs-you', waiting: 2 }; } },
     Marketplace: { currentTab: () => opts.tab || null },
@@ -84,12 +92,13 @@ function boot(opts) {
       showAgent: (id, section, desk) => { calls.push(['agent', id, section, desk]); return { open: true, key: desk ? 'desk' : 'agents', agent: id, section }; }
     }
   };
+  if (opts.unconfirmed) context.U = { bus };
   vm.createContext(context);
   const S = vm.runInContext(commands + '\nStationCommands;', context);
   const station = { request: async (verb, args) => { await S.run('r' + acks.length, verb, args); return acks.at(-1); } };
   const { tool } = makeStationShowTool({ station: opts.noPage ? null : station });
   const ctx = opts.ctx === undefined ? { streamId: 'ws1', runId: 'run1' } : opts.ctx;
-  return { run: args => tool.run(args, ctx), calls, tool };
+  return { run: args => tool.run(args, ctx), calls, tool, bus };
 }
 
 (async () => {
@@ -138,6 +147,16 @@ function boot(opts) {
     env = boot(o); r = await env.run({ place: 'settings' });
     ok(/^REFUSED: the Commander is not looking at this conversation/.test(r.content) && !env.calls.length, 'refused, nothing opened: ' + why);
   }
+  // a watched run's FIRST call can overtake its own agent.run.start (two connections, no order): the page waits for
+  // that confirmation instead of refusing the Commander's own run (station-show.e2e failed 1 in 10 on this, 2026-10-22)
+  env = boot({ unconfirmed: true, confirm: 'run1' }); r = await env.run({ place: 'deliverables' });
+  ok(/^OPEN on the Commander's screen: MY WORK › DELIVERABLES/.test(r.content), 'a first call that beats its run.start still opens: ' + r.content.slice(0, 90));
+  eq([env.calls, env.bus.count('agent.run.start')], [[['term', 'deliverables', undefined]], 0], 'opened once, and the wait left no listener behind');
+  env = boot({ unconfirmed: true, confirm: 'someone-else' }); r = await env.run({ place: 'settings' });
+  ok(/^REFUSED: the Commander is not looking at this conversation/.test(r.content) && !env.calls.length, 'the run that confirms is another run: still refused, nothing opened');
+  const t0 = Date.now(); env = boot({ unconfirmed: true }); r = await env.run({ place: 'settings' });
+  ok(/^REFUSED: the Commander is not looking at this conversation/.test(r.content) && !env.calls.length && env.bus.count('agent.run.start') === 0, 'a run that never confirms is refused, nothing opened, no listener left');
+  ok(Date.now() - t0 < 5000, 'and the wait is bounded inside the bridge deadline (' + (Date.now() - t0) + 'ms)');
   r = await boot({ noPage: true }).run({ place: 'settings' });
   ok(/^REFUSED: this run has no StarNet page attached/.test(r.content), 'no page attached: an honest refusal');
   r = await boot({ refuse: 'apps' }).run({ place: 'apps' });

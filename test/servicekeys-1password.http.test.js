@@ -85,6 +85,11 @@ function buildStub(dir) {
   };
 
   try {
+    // ---- the 0.14 upgrade path: a key PASTED before is replaced by its 1Password reference ----
+    const PASTED = 'sk_live_PASTED_BEFORE_7777';
+    A.eq((await j('POST', '/api/servicekeys', { name: 'Stripe', key: PASTED })).status, 200, 'a pasted key saved first');
+    A.eq((await j('POST', '/api/servicekeys', { name: 'Stripe', key: '', docsUrl: 'https://docs.stripe.com' })).status, 200, 'an edit that keeps it');
+
     // ---- save a reference: read at once, ready, value never echoed ----
     const up = await j('POST', '/api/servicekeys', { name: 'Stripe', key: GOOD });
     A.eq(up.status, 200, 'POST op:// -> 200');
@@ -102,6 +107,7 @@ function buildStub(dir) {
     const disk = fs.readFileSync(file, 'utf8') + (fs.existsSync(file + '.bak') ? fs.readFileSync(file + '.bak', 'utf8') : '');
     A.ok(disk.indexOf(GOOD) >= 0, 'the reference is persisted');
     A.ok(disk.indexOf(VALUE) < 0, 'the value read from 1Password is NEVER persisted');
+    A.ok(fs.existsSync(file + '.bak') && disk.indexOf(PASTED) < 0, 'the pasted key the reference replaced is in neither the main file nor its recovery copy');
 
     // ---- op's environment: OP_* yes, station secrets no ----
     const names = fs.readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean);

@@ -46,8 +46,14 @@
   // why a stopped run ended, as a short human note appended to the reply (mirrors chat.js endReason handling).
   // A 'budget' stop names WHICH spend cap fired (scope/cap ride the additive agent.run.end fields; absent on an
   // old payload → the generic money line) so a channel user isn't sent hunting through runtime settings.
-  function budgetNote(scope, capUsd, atBalance) {
+  function budgetNote(scope, capUsd, atBalance, projected) {
     const cap = (typeof capUsd === 'number' && isFinite(capUsd) && capUsd >= 0.01) ? '$' + capUsd.toFixed(2).replace(/\.00$/, '') + ' ' : '';   // sub-cent caps would read "$0.00"
+    // projected (agent.run.end budgetProjected): the run family's calls still in flight already took what was left, so
+    // the run stopped BEFORE the cap — never say it hit one it did not reach (mirrors chat.js budgetStopLine)
+    if (scope === 'run' && projected === true) {
+      if (atBalance === true) return '\n\n(' + (cap ? 'stopped before it would spend more than the ' + cap + 'left on your StarNet balance' : 'stopped before it would spend more than what is left on your StarNet balance') + ' — add credits in the app under SETTINGS → AI & MODELS.)';
+      return '\n\n(stopped before it would pass the ' + cap + 'per-run spend cap — raise it in the app under SETTINGS › SPENDING LIMITS.)';
+    }
     const what = scope === 'run' ? 'hit the ' + cap + 'per-run spend cap'
       : scope === 'agent' ? 'this agent hit its ' + cap + 'lifetime spend cap'
       : scope === 'day' ? 'hit the ' + cap + 'daily spend cap'
@@ -75,7 +81,7 @@
     if (reason === 'max_iters') return '\n\n(reached the step limit — message "continue" to keep going.)';
     if (reason === 'budget') {
       if (st.unpricedModel || st.subscriptionModel) return '\n\n(' + StopReason.stopSentence('budget', st) + '.)';
-      return budgetNote(st.budgetScope, st.budgetCapUsd, !!st.budgetCapIsBalance);
+      return budgetNote(st.budgetScope, st.budgetCapUsd, !!st.budgetCapIsBalance, st.budgetProjected === true);
     }
     // a /stop, a newer message or an E-STOP never reaches here (abandoned() owns those); what is left is a STOP by run
     // id from the station (the desk screen / HUD STOP → POST /api/cancel), so say so instead of going quiet.
@@ -232,16 +238,18 @@
   //   absent   — read-only, open to every admitted sender (status, agents, whoami, tools, help, start)
   // Commander-defined commands (userCommandNames) are owner-only too — they run the owner's own aliases.
   const COMMANDS = [
+    // `aliases` — the desktop registry's other spellings of the SAME command (sidecar/slash.js; pinned by
+    // test/channels.desktop-commands.test.js). Parsed to the canonical name, so the owner gate below reads one rule.
     { command: 'status', description: 'What this chat is doing right now' },
     { command: 'stop', description: 'Stop the run in progress', owner: 'always' },
-    { command: 'new', description: 'Forget this chat\'s history and start fresh', owner: 'always' },
-    { command: 'agents', description: 'List agents (→ marks the one you are talking to)' },
+    { command: 'new', description: 'Forget this chat\'s history and start fresh', owner: 'always', aliases: ['reset'] },
+    { command: 'agents', description: 'List agents (→ marks the one you are talking to)', aliases: ['tasks'] },
     { command: 'talk', description: 'Switch this chat to another agent', usage: '/talk <name>', owner: 'always' },
     { command: 'model', description: 'Show or change the current agent\'s model', usage: '/model [id]', owner: 'write' },
     { command: 'usage', description: 'Real spend from the station ledger', slash: true, owner: 'always' },
     { command: 'tools', description: 'The tools this agent can actually call', slash: true },
-    { command: 'routine', description: 'List, create or pause scheduled routines', usage: '/routine [list|add <schedule> | <task>|pause N|rm N]', slash: true, owner: 'always' },
-    { command: 'away', description: 'Queue work to build on the away shift', usage: '/away [<what to build>|list|on|off]', slash: true, owner: 'always' },
+    { command: 'routine', description: 'List, create or pause scheduled routines', usage: '/routine [list|add <schedule> | <task>|pause N|rm N]', slash: true, owner: 'always', aliases: ['routines'] },
+    { command: 'away', description: 'Queue work to build on the away shift', usage: '/away [<what to build>|list|on|off]', slash: true, owner: 'always', aliases: ['build-away', 'buildaway'] },
     { command: 'approvals', description: 'Approve/deny buttons for this chat (on or off)', usage: '/approvals [on|off]', owner: 'write' },
     { command: 'mention', description: 'In a group: when I answer, and whether I follow the rest', usage: '/mention [on|observe|off]', owner: 'write' },
     // A group is closed until the paired owner sends /allow IN it (2026-10-19). The adapter lets exactly these two
@@ -256,6 +264,7 @@
   ];
   const SLASH_CMDS = COMMANDS.reduce((m, c) => { if (c.slash) m[c.command] = 1; return m; }, {});
   const KNOWN_CMDS = COMMANDS.reduce((m, c) => { m[c.command] = 1; return m; }, {});
+  const ALIAS_CMDS = COMMANDS.reduce((m, c) => { for (const a of (c.aliases || [])) m[a] = c.command; return m; }, {});
   const OWNER_CMDS = COMMANDS.reduce((m, c) => { if (c.owner) m[c.command] = c.owner; return m; }, {});
   // Does this parsed command need the bound owner? Pure, exported for the policy test.
   function commandNeedsOwner(parsed) {
@@ -273,6 +282,27 @@
   function helpText() {
     return 'Commands:\n' + COMMANDS.map(c => (c.usage || '/' + c.command) + ' — ' + c.description).join('\n');
   }
+  /* A STEERING NOTE IS NOT PROSE (bug e903a199, 2026-10-23). The loop echoes a folded note as one token delta,
+     '\n[steering] <note>\n' (loop.js foldSteerNotes, and the NOT-applied notice at the run's end). COMMS draws that line
+     as its own steer row; buffered raw here it reached the phone as an internal marker glued between the answer before
+     the note and the answer after it. joinReplyDelta keeps both answers and every word of the note, but writes the
+     note as a readable line of its own ('↪ <note>', the same arrow the steer acknowledgement uses), with one blank line
+     on either side — the model's own paragraph break after it is folded in rather than stacked.
+     ONE LINE: this hub posts its notes flattened (steerNoteWire, the rule COMMS's steerWire keeps), but a note posted by
+     any other client may still carry a line break — the echo is matched whole and its note drawn on the one line. */
+  const STEER_ECHO_RE = /^\n\[steering\] ([\s\S]*?)\n?$/;
+  const AFTER_STEER_RE = /(?:^|\n)↪ [^\n]*\n\n$/;
+  // a steering note as the run gets it: one line, however many bubbles or line breaks it was typed in
+  function steerNoteWire(text) { return String(text == null ? '' : text).replace(/\s*\r?\n\s*/g, ' ').trim(); }
+  function joinReplyDelta(buf, delta) {
+    const b = String(buf == null ? '' : buf), d = String(delta == null ? '' : delta);
+    const m = STEER_ECHO_RE.exec(d);
+    if (m) return (b.trim() ? b.replace(/\s+$/, '') + '\n\n' : '') + '↪ ' + steerNoteWire(m[1]) + '\n\n';
+    if (AFTER_STEER_RE.test(b)) return b + d.replace(/^\s+/, '');
+    return b + d;
+  }
+  // the registry's NOTE commands (slash.js steer, queue/q, background/bg/btw) -> what the words after them are for here
+  const NOTE_CMDS = Object.freeze({ steer: 'steer', queue: 'queue', q: 'queue', background: 'background', bg: 'background', btw: 'background' });
   function parseCommand(text) {
     const s = String(text == null ? '' : text).trim();
     if (s[0] !== '/') return null;
@@ -280,6 +310,7 @@
     let head = (sp === -1 ? s.slice(1) : s.slice(1, sp)).toLowerCase();
     const at = head.indexOf('@');                 // '/talk@mybot' -> 'talk'
     if (at !== -1) head = head.slice(0, at);
+    if (head && !KNOWN_CMDS[head] && ALIAS_CMDS[head]) head = ALIAS_CMDS[head];   // '/reset' -> 'new', '/routines' -> 'routine'
     if (!head || !KNOWN_CMDS[head]) return null;   // not a control command -> treat as a normal message
     const arg = sp === -1 ? '' : s.slice(sp + 1).trim();
     return { cmd: head, arg: arg };
@@ -449,6 +480,10 @@
     // Canonical transcript projection. Ordinary channel chats share the durable workstream ledger used by
     // desktop COMMS; the legacy channel history remains an offline fallback only.
     const historyFor = typeof o.historyFor === 'function' ? o.historyFor : null;
+    // observeInto(streamId, agentId, text, taint) files an OVERHEARD group line (/mention observe) as a run-less user row
+    // in that canonical stream — the one historyFor replays. Without it a hub with historyFor never shows the agent what
+    // it overheard, so observe is offered only where it can be kept (observeKept below).
+    const observeInto = typeof o.observeInto === 'function' ? o.observeInto : null;
     // ONE-RESOLVER LAW: any telemetry that attributes an inbound message to an agent (workitem crates, queue
     // HUD) must come from THIS hub's resolution, never a parallel guess. onResolved fires once per real message
     // (never for /commands) with the exact agentId the run will execute as, in onInbound's first synchronous
@@ -465,6 +500,9 @@
     const runSlashFn = typeof o.runSlash === 'function' ? o.runSlash : null;
     // names of the Commander's own commands, so this hub can recognise one without owning the list
     const userCommandNames = typeof o.userCommandNames === 'function' ? o.userCommandNames : (() => []);
+    // desktopCommand(token) -> true when the shared registry's BUILT-IN table knows this name or alias (slash.resolve):
+    // a desktop palette command this hub has no row for (/version, /q, /retry…). Optional; absent = the old fall-through.
+    const desktopCommandFn = typeof o.desktopCommand === 'function' ? o.desktopCommand : null;
     // The composition root may mint this only for an authenticated Telegram owner DM. It deliberately lives at
     // the hub edge so every other channel and every Telegram group message stays on its ordinary policy.
     const ownerTrustedFor = typeof o.ownerTrusted === 'function' ? o.ownerTrusted : (() => false);
@@ -955,7 +993,13 @@
       if (ok) { try { kickOutbox(); } catch (_) {} }   // a proven-healthy send is the cue to drain any backlog
       // The adapter acknowledged this message only after its durable INBOX receipt existed. If the failed answer
       // cannot enter the outbox, reject processing so that receipt remains and replays once capacity returns.
-      if (mustPersistFailure && !failurePersisted) throw new Error('failed reply could not be persisted: ' + ((failurePersistError && failurePersistError.message) || 'outbox unavailable'));
+      // `heldText` is the remainder the outbox refused: processInbound keeps it on that receipt (deliverHeld), so the
+      // replay sends this finished answer instead of running the message a second time.
+      if (mustPersistFailure && !failurePersisted) {
+        const err = new Error('failed reply could not be persisted: ' + ((failurePersistError && failurePersistError.message) || 'outbox unavailable'));
+        err.heldText = chunks.slice(failedAt).join('');
+        throw err;
+      }
       // `text` is the FINAL chunk's text — the one a keyboard was attached to, and therefore the exact string a
       // later editMessage must rebuild on top of when it stamps the chosen answer in place.
       return { ok: ok, messageId: messageId, text: chunks.length ? chunks[chunks.length - 1] : '' };
@@ -1068,6 +1112,20 @@
       catch (_) { return false; }
     }
 
+    // '/version', '/v@starnetbot args' -> { name, line } when the injected registry check knows the name, else null
+    // (the same head grammar parseUserCommand reads: "/tmp/notes.md" is a path, never a command)
+    function parseDesktopCommand(text) {
+      const s = String(text == null ? '' : text).trim();
+      const m = /^\/([A-Za-z0-9_-]+)(?:@[A-Za-z0-9_]+)?(?=\s|$)/.exec(s);
+      if (!m) return null;
+      const name = m[1].toLowerCase();
+      let known = false;
+      try { known = desktopCommandFn(name) === true; } catch (e) { failNote('channels.hub.desktopCommand', e); known = false; }
+      if (!known) return null;
+      const rest = s.slice(m[0].length).trim();
+      return { name: name, line: '/' + name + (rest ? ' ' + rest : '') };
+    }
+
     // Resolve which agent a chat is currently bound to, from the SAME precedence run resolution uses (minus the
     // live floor plan, which is content-per-message and not a stable "who am I talking to"). Used by /agents,
     // /talk confirmations, and /model to name the target honestly.
@@ -1127,7 +1185,11 @@
       if (SLASH_CMDS[cmd]) {
         if (!runSlashFn) { await deliver(chatId, '⚠ ' + '/' + cmd + ' is not available on this channel.', '', 'command'); return; }
         let r;
-        try { r = await runSlashFn('/' + cmd + (arg ? ' ' + arg : ''), { agentId: boundId, ownerTrusted: !!ownerTrusted }); }
+        // deliveryOrigin: the SAME shape a run from this chat carries (runOnce below), so a "/routine add" typed here
+        // reports back to this chat exactly like a routine the agent creates when asked in words (bug 3b958e41)
+        const sctx = { agentId: boundId, ownerTrusted: !!ownerTrusted,
+          deliveryOrigin: { channel: channel, chatId: String(chatId), threadId: (routes.get(String(chatId)) || {}).threadId || null } };
+        try { r = await runSlashFn('/' + cmd + (arg ? ' ' + arg : ''), sctx); }
         catch (e) { try { console.error('[' + channel + '] /' + cmd + ' threw:', (e && e.message) || e); } catch (_) {} r = null; }
         if (!r) { await deliver(chatId, '⚠ Could not run /' + cmd + ' right now — try again in a moment.', '', 'command'); return; }
         const body = (r.lines && r.lines.length)
@@ -1275,6 +1337,8 @@
           : (/^(off|no|disable|disabled|false|0)$/i.test(arg) ? 'off'
           : (/^(observe|watch|listen|follow|context)$/i.test(arg) ? 'observe' : null));
         if (want === null) { await deliver(chatId, 'Usage: /mention on  ·  /mention observe  ·  /mention off', '', 'command'); return; }
+        // never confirm a promise this hub cannot keep (see observeTurn): nothing is saved, so nothing changes
+        if (want === 'observe' && !observeKept()) { await deliver(chatId, '⚠ This channel cannot keep what I overhear, so /mention observe is not available here — I still ' + describe[state] + '.', '', 'command'); return; }
         // requireMention and observeUnmentioned are written TOGETHER, always. Two independent toggles would let a
         // chat end up "answer everything AND observe", which would file every message twice.
         const patch = { requireMention: want !== 'off', observeUnmentioned: want === 'observe' };
@@ -1462,8 +1526,19 @@
       if (!body) return;
       const who = String(msg.userName || '').trim();
       const agentId = currentBoundAgent(chatId, boundAgentId, sec);
-      try { store.appendTurn(agentId, 'user', who ? (who + ': ' + body) : body); } catch (e) { failNote('channels.hub.appendTurn', e); }
+      const line = who ? (who + ': ' + body) : body;
+      try { store.appendTurn(agentId, 'user', line); } catch (e) { failNote('channels.hub.appendTurn', e); }
+      /* THE RUN READS THE CANONICAL STREAM (historyFor), not the store file above — filed only there, the overheard room
+         never reached the model and "I read the rest of the room" was a promise nobody kept. Filed into the SAME stream
+         the next addressed run replays, with the provenance an addressed message from this room would carry: clean,
+         unless it is a forwarded third party's words (initialTaint's rule below). */
+      if (historyFor && observeInto) {
+        const sid = resolvedStreamId(chatId);
+        if (sid) { try { observeInto(sid, agentId, line, carriesThirdPartyText(msg) ? 'forwarded message' : null); } catch (e) { failNote('channels.hub.observeInto', e); } }
+      }
     }
+    // can an overheard line reach the model on this hub? (legacy history is what a hub without historyFor replays)
+    function observeKept() { return !historyFor || !!observeInto; }
 
     // ---- ALBUM (media-group) BATCHING --------------------------------------------------------------------
     // A Telegram album arrives as N SEPARATE messages sharing one media_group_id (caption usually on only one).
@@ -1498,9 +1573,12 @@
         if (intake && typeof intake.onAccepted === 'function') { try { intake.onAccepted({ id, durable: true, duplicate: true }); } catch (_) {} }
         return live;
       }
-      store.pushInbox({ id: id, channel: channel, message: msg });   // throws synchronously -> adapter does NOT ack
+      const receipt = store.pushInbox({ id: id, channel: channel, message: msg });   // throws synchronously -> adapter does NOT ack
       if (intake && typeof intake.onAccepted === 'function') { try { intake.onAccepted({ id, durable: true }); } catch (_) {} }
-      const running = Promise.resolve().then(() => routeInbound(msg, intake)).then((value) => {
+      // A receipt that already carries an attempt is a RE-DELIVERY of work whose run had started — from recoverInbox,
+      // or Telegram handing the same update over again. processInbound decides what that may do (attemptOf, heldOf).
+      const routed = withInbox(intake, [id], attemptOf(receipt), heldOf(receipt));
+      const running = Promise.resolve().then(() => routeInbound(msg, routed)).then((value) => {
         store.removeInbox(id);   // reply delivered OR its undelivered remainder is now durable in the outbox
         return value;
       }).finally(() => { activeInbox.delete(id); });
@@ -1509,7 +1587,84 @@
       return running;
     }
 
+    /* RECOVERY KNOWS HOW FAR THE RUN GOT (e5ecd6b8, 2026-10-21). The `recovered` flag had no reader: a crash after the
+       run had appended a line to a file replayed the whole message as a second identical user turn, the line went in
+       twice, and the chat was told "Appended one line". The durable receipt now carries an attempt marker
+       (store.markInbox: the run's id once it starts, a count of the tool steps it began), and a re-delivered receipt
+       is handled by what that proves, the same split the station's own run recovery makes (COMMS continues a run only
+       when nothing uncertain happened, and asks first otherwise):
+         no attempt              -> never reached a run: replay it as before
+         attempt, 0 tool steps   -> nothing could have happened: run it again, said so, without a second copy of the turn
+         attempt, N tool steps   -> something may already be done: do NOT run it again; tell the chat, and leave the next
+                                    run in this chat a one-shot note (interruptedAttempt) so a "continue" finishes only
+                                    what is left
+       The intake copy carries every receipt this message stands for (a merged text batch or album is one run over several
+       receipts), so the marker lands on all of them.
+       ONLY A REAL RESTART GETS THE CRASH RULE (review, 2026-10-21). A receipt also comes back inside the SAME process:
+       the full outbox refused a finished reply (flushOutbox -> recoverInbox replays it once capacity returns), or
+       processing threw. Taking that for a crash told the chat "StarNet restarted" when nothing restarted, and — with a
+       tool step counted — never delivered the answer the run had finished. So the attempt carries the store's bootId:
+       an attempt from THIS process is no restart and replays as before; and a finished reply the outbox refused is kept
+       on the receipt (held) and delivered by the replay, whatever process it lands in, without running anything. */
+    function attemptOf(receipt) {
+      const a = receipt && receipt.attempt;
+      if (!a || typeof a !== 'object' || !String(a.runId || '')) return null;
+      const here = (store && store.bootId != null) ? String(store.bootId) : '';
+      if (here && String(a.boot || '') === here) return null;   // this process left it pending: not a restart
+      return { runId: String(a.runId), tools: Math.max(0, Math.floor(Number(a.tools) || 0)) };
+    }
+    function heldOf(receipt) {
+      const h = receipt && receipt.held;
+      if (!h || typeof h !== 'object' || typeof h.text !== 'string') return null;
+      return { text: h.text, runId: String(h.runId || ''), reason: String(h.reason || ''), agentId: String(h.agentId || ''),
+        ids: Array.isArray(h.ids) ? h.ids.filter(x => typeof x === 'string' && x) : [] };
+    }
+    function withInbox(intake, ids, prior, held) {
+      const out = Object.assign({}, intake || {}, { inboxIds: ids.slice() });
+      if (prior) out.priorAttempt = prior;
+      else delete out.priorAttempt;
+      if (held) out.heldReply = held;
+      else delete out.heldReply;
+      return out;
+    }
+    function inboxIdsOf(intake) {
+      return (intake && Array.isArray(intake.inboxIds)) ? intake.inboxIds.filter(x => typeof x === 'string' && x) : [];
+    }
+    function clipAsk(text) {
+      const t = String(text || '').replace(/\s+/g, ' ').trim();
+      return t.length > 80 ? t.slice(0, 79) + '…' : t;
+    }
+    function stepsWord(n) { return n === 1 ? '1 tool step' : n + ' tool steps'; }
+    // run ids whose interruption this hub already told the chat about: a merged batch is ONE run over several receipts
+    const reportedAttempts = new Set();
+    async function reportInterruptedAttempt(chatId, agentId, msg, prior) {
+      const runId = String(prior.runId || '');
+      if (reportedAttempts.has(runId)) return;
+      // the next run in this chat reads this once (interruptedAttemptNote). Counts only — never the message text, which
+      // may be a third party's words and has no business in a system prompt.
+      if (typeof store.saveChatRecord === 'function') {
+        try { store.saveChatRecord(chatId, { interruptedAttempt: { runId: runId, tools: prior.tools } }); }
+        catch (e) { failNote('channels.hub.interruptedAttempt.save', e); }
+      }
+      const ask = clipAsk(msg && msg.text);
+      await deliver(chatId, '⚠ StarNet restarted while it was working on ' + (ask ? '"' + ask + '"' : 'your message')
+        + '. That attempt had already begun ' + stepsWord(prior.tools) + ', so part of it may already be done. It was NOT run again, '
+        + 'so nothing is done twice. Reply "continue" to finish what is left — the next run is told those steps already began.',
+        runId, 'interrupted', agentId);
+      if (reportedAttempts.size >= 500) reportedAttempts.clear();
+      reportedAttempts.add(runId);   // only once it was delivered (or durably queued): a refused notice replays with its receipt
+    }
+    function interruptedAttemptNote(a) {
+      const n = Math.max(0, Math.floor(Number(a && a.tools) || 0));
+      return '\n\nHOST NOTE — AN EARLIER REQUEST WAS INTERRUPTED: StarNet restarted while an earlier request in this chat was being '
+        + 'worked on, after that attempt had begun ' + stepsWord(n) + '. It was not run again. Any tool result of it in this conversation '
+        + 'already happened. If the Commander asks to continue it, finish only what is still missing: never repeat a step whose result '
+        + 'is already here, and check the current state before redoing a step whose result is not.';
+    }
+
     async function routeInbound(msg, intake) {
+      // work that already had a run is never merged into a newer batch: it is settled on its own, exactly once
+      if (intake && (intake.priorAttempt || intake.heldReply)) return processInbound(msg, intake);
       const gid = (msg && msg.mediaGroupId != null && String(msg.mediaGroupId))
         ? (String(msg.chatId) + '|' + String(msg.mediaGroupId)) : '';
       if (gid) return albumInbound(msg, gid, intake);
@@ -1557,11 +1712,12 @@
       const key = String(msg.chatId) + '|' + String(msg.userId || '') + '|' + String(msg.threadId || '');
       let rec = textBatches.get(key);
       if (!rec) {
-        rec = { msg: Object.assign({}, msg), intake: intake, seq: 0, resolve: null, reject: null, done: null };
+        rec = { msg: Object.assign({}, msg), intake: intake, inboxIds: inboxIdsOf(intake), seq: 0, resolve: null, reject: null, done: null };
         rec.done = new Promise((res, rej) => { rec.resolve = res; rec.reject = rej; });
         rec.done.catch(swallow('channels.hub.textBatch.done'));   // the winner never awaits rec.done — keep a loserless rejection handled
         textBatches.set(key, rec);
       } else {
+        rec.inboxIds = rec.inboxIds.concat(inboxIdsOf(intake));   // the merged run stands for every bubble's receipt
         const prior = String(rec.msg.text || '').trim();
         const next = String(msg.text || '').trim();
         rec.msg.text = prior && next ? prior + '\n' + next : (prior || next);
@@ -1575,7 +1731,7 @@
       // The batch's outcome must reach EVERY merged bubble: resolving unconditionally told the losing
       // bubbles' durable-inbox wrappers "handled" even when processing threw, so their rows were removed
       // and only the winner's original (unmerged) message survived for recovery — the rest were lost.
-      try { await processInbound(rec.msg, rec.intake); }
+      try { await processInbound(rec.msg, withInbox(rec.intake, rec.inboxIds, null, null)); }
       catch (e) { rec.reject(e); throw e; }
       rec.resolve();
     }
@@ -1583,11 +1739,12 @@
     async function albumInbound(msg, gid, intake) {
       let rec = albums.get(gid);
       if (!rec) {
-        rec = { msg: Object.assign({}, msg, { media: Array.isArray(msg.media) ? msg.media.slice() : [] }), intake: intake, seq: 0, resolve: null, reject: null, done: null };
+        rec = { msg: Object.assign({}, msg, { media: Array.isArray(msg.media) ? msg.media.slice() : [] }), intake: intake, inboxIds: inboxIdsOf(intake), seq: 0, resolve: null, reject: null, done: null };
         rec.done = new Promise((res, rej) => { rec.resolve = res; rec.reject = rej; });
         rec.done.catch(swallow('channels.hub.albumBatch.done'));   // same handled-rejection guard as the text batch
         albums.set(gid, rec);
       } else {
+        rec.inboxIds = rec.inboxIds.concat(inboxIdsOf(intake));   // one run for every part's receipt
         if (Array.isArray(msg.media) && msg.media.length) rec.msg.media = rec.msg.media.concat(msg.media);
         if (!rec.msg.text && msg.text) rec.msg.text = msg.text;   // the caption rides on whichever part carried it
         if (carriesThirdPartyText(msg)) rec.msg.forwarded = true;
@@ -1597,12 +1754,30 @@
       if (albums.get(gid) !== rec || rec.seq !== mySeq) return rec.done;   // a newer part re-armed the debounce
       albums.delete(gid);
       // Same failure propagation as textInbound: every merged part's durable-inbox row must survive a throw.
-      try { await processInbound(rec.msg, rec.intake); }
+      try { await processInbound(rec.msg, withInbox(rec.intake, rec.inboxIds, null, null)); }
       catch (e) { rec.reject(e); throw e; }
       rec.resolve();
     }
 
     async function processInbound(msg, intake) {
+      // the durable receipts this message stands for, and how far an earlier run of it got (attemptOf, above)
+      const inboxIds = inboxIdsOf(intake);
+      const priorAttempt = (intake && intake.priorAttempt) || null;
+      const markAttempt = (patch) => {
+        if (!inboxIds.length || typeof store.markInbox !== 'function') return;
+        for (const id of inboxIds) { try { store.markInbox(id, patch); } catch (e) { failNote('channels.hub.markInbox', e); } }
+      };
+      /* A FINISHED ANSWER THE OUTBOX REFUSED IS KEPT, NOT RE-EARNED. deliver throws (heldText = the undelivered
+         remainder) so these receipts stay; the text rides on every one of them, and their replay sends it (heldReply,
+         below) instead of running the message again — the run already happened, its tool steps included. */
+      const heldReply = (intake && intake.heldReply) || null;
+      async function deliverHeld(toChat, text, runId, reason, agentId, sendOpts, seedId, ids) {
+        try { return await deliver(toChat, text, runId, reason, agentId, sendOpts, seedId); }
+        catch (e) {
+          if (e && typeof e.heldText === 'string') markAttempt({ held: { text: e.heldText, runId: runId || '', reason: reason || '', agentId: agentId || '', ids: ids } });
+          throw e;
+        }
+      }
       if (msg && msg.directReply) {
         const directChatId = String(msg.chatId);
         noteRoute(msg);
@@ -1629,6 +1804,16 @@
       // Remember where this came from BEFORE anything can reply — the very first deliver() below (a command
       // answer, a config error) must already land in the right topic, not just the run's final reply.
       noteRoute(msg);
+      // the replay of a receipt whose run FINISHED but whose reply the full outbox refused: send that reply, run nothing
+      if (heldReply) {
+        const ids = heldReply.ids.length ? heldReply.ids : inboxIds;
+        await deliverHeld(chatId, heldReply.text, heldReply.runId, heldReply.reason || 'done', heldReply.agentId || undefined, undefined, '', ids);
+        // one run answered every receipt in ids (a merged batch): the others must not send it again
+        if (typeof store.removeInbox === 'function') {
+          for (const sid of ids) { if (inboxIds.indexOf(sid) < 0) { try { store.removeInbox(sid); } catch (e) { failNote('channels.hub.heldReply.remove', e); } } }
+        }
+        return;
+      }
       /* THEY ARE BACK. A chat marked unreachable (we were blocked or kicked) has just spoken, which is proof the
          block is over — clear the flag here rather than waiting for a `my_chat_member` we may never be sent.
          A stale unreachable flag would suppress this chat's outbox forever, which is the failure mode that made
@@ -1681,7 +1866,28 @@
       // through the SAME deliver() path so chunking/limits apply. Channel-agnostic: this lives in the hub, so
       // Telegram/Discord/any future adapter get identical behavior.
       // A FORWARDED "/away on" is a third party's words, not the Commander's command — never parse it as one.
-      const parsed = carriesThirdPartyText(msg) ? null : parseCommand(msg.text);
+      let parsed = carriesThirdPartyText(msg) ? null : parseCommand(msg.text);
+      /* THE COMMANDER'S OWN /allow OR /deny KEEPS RUNNING IN A DM. Both became built-ins in 0.14.0 and the built-ins are
+         parsed first, so a command of that name the Commander defined earlier silently stopped running over messaging
+         ("/allow and /deny are for groups"). The built-in means something only in a group; in a direct chat theirs
+         runs, exactly as before (the user-command path below, owner-gated the same way). */
+      if (parsed && (parsed.cmd === 'allow' || parsed.cmd === 'deny') && String(msg.chatType || '') !== 'group' && runSlashFn) {
+        let theirs = false;
+        try { theirs = (userCommandNames() || []).some(n => String(n).toLowerCase() === parsed.cmd); } catch (e) { failNote('channels.hub.userCommandNames', e); }
+        if (theirs) parsed = null;
+      }
+      // "/deny @spammer" in a group is another bot's command (a moderation bot's), never ours: ours takes no argument
+      // unless it names this bot — "/deny@thisbot …" (the adapter has already checked the suffix is us) or
+      // "/deny @thisbot" (the adapter marks it argNamesUs). Taken as ours it admitted or closed the owner's station for a
+      // room. Silent — answering would put us in their conversation — with ONE exception: the OWNER's /deny in a room
+      // we answer in. An ignored close fails open, so the owner is told the room is still open and how to close it.
+      if (parsed && (parsed.cmd === 'allow' || parsed.cmd === 'deny') && parsed.arg && String(msg.chatType || '') === 'group'
+          && !/^\s*\/[A-Za-z]+@/.test(String(msg.text || '')) && msg.argNamesUs !== true) {
+        if (parsed.cmd === 'deny' && senderIsOwner && chatAdmitted(chatId)) {
+          await deliver(chatId, '⚠ That /deny had something after it, so I left it alone — this group is still admitted. Send /deny on its own to remove me.', '', 'command');
+        }
+        return;
+      }
       if (parsed) {
         // OWNER GATE: a non-owner may talk to the agent, never reconfigure the station. Refused for free, before
         // any handler, write or slash-registry call — and said plainly, so the member knows it is a policy.
@@ -1723,6 +1929,45 @@
         return;
       }
 
+      /* A DESKTOP COMMAND typed here (bug 6cd531b1): "/version", "/q", "/retry" are the shared registry's own built-ins
+         with no row in this hub's table, so they fell through to the model — a paid run whose answer was a guess at
+         what the command does. The registry answers instead (for a desktop-only command: "That command only works in
+         the StarNet desktop app."), for free. Owner-only like the Commander's own commands: every one of them acts
+         on the owner's station. Same provenance rule: a forwarded "/version" is a third party's words. */
+      let deskCmd = (runSlashFn && desktopCommandFn && !carriesThirdPartyText(msg)) ? parseDesktopCommand(msg.text) : null;
+      /* THE NOTE COMMANDS are the exception: the words after /steer, /queue (/q) and /background (/bg, /btw) are the
+         sender's own note, and this hub HAS a way to act on one — sent as a plain follow-up it joins the task already
+         running here (the live steer below) or starts one. So the command word is stripped and the note goes on exactly
+         as if typed on its own (same sender, same gates). The one refusal is the desktop's own: a /steer with nothing
+         running never mints a paid run out of a steering note. */
+      if (deskCmd && NOTE_CMDS[deskCmd.name]) {
+        const noteText = deskCmd.line.slice(deskCmd.name.length + 1).trim();
+        if (!noteText) {
+          const joins = !!steerRun && msg.chatType !== 'group';
+          await deliver(chatId, '/' + deskCmd.name + ' needs your note after it. Or just send the note as a message'
+            + (joins ? ' — while a task is running here it joins that task at its next step.' : '.'), '', 'command');
+          return;
+        }
+        const lr = inflight.get(chatId);
+        if (NOTE_CMDS[deskCmd.name] === 'steer' && !(lr && !lr.superseded && !lr.halted)) {
+          await deliver(chatId, 'Nothing is running here to steer — send your note as a message to start a task.', '', 'command');
+          return;
+        }
+        msg = Object.assign({}, msg, { text: noteText });
+        deskCmd = null;
+      }
+      if (deskCmd) {
+        if (!senderIsOwner) { await deliver(chatId, ownerOnlyReply('/' + deskCmd.name), '', 'command'); return; }
+        let r;
+        try { r = await runSlashFn(deskCmd.line, { agentId: currentBoundAgent(chatId, boundAgentId, sec), ownerTrusted: ownerTrusted, chatType: msg.chatType === 'group' ? 'group' : 'dm', ownerDmExec: ownerDmExec }); }
+        catch (e) { failNote('channels.hub.desktopCommand.run', e); r = null; }
+        const body = (r && Array.isArray(r.lines) && r.lines.length)
+          ? ((r.title ? r.title + '\n' : '') + r.lines.join('\n'))
+          : String((r && r.text) || '');
+        await deliver(chatId, body || ('⚠ Could not run /' + deskCmd.name + ' right now — try again in a moment.'), '', 'command');
+        return;
+      }
+
       // ---- a TYPED answer to a live choice keyboard ---------------------------------------------------------
       // Resolve it to the canonical option text BEFORE anything reads msg.text (routing, the classifier and the
       // stored turn all must see the real answer, not a bare "2"). Then retire this chat's keyboards either way:
@@ -1756,6 +2001,10 @@
       // the dock this run is AT: only when the floor's own resolution picked this agent (never inferred)
       const dockId = (routedDock && routed && String(routed) === agentId) ? routedDock : null;
 
+      // A re-delivered receipt whose run had already BEGUN tool steps before the crash is never run again from the top
+      // (attemptOf, above): before anything below can steer it into a run, supersede one, or start one.
+      if (priorAttempt && priorAttempt.tools > 0) { await reportInterruptedAttempt(chatId, agentId, msg, priorAttempt); return; }
+
       /* A FOLLOW-UP JOINS THE RUN IN FLIGHT (2026-10-11 — "they start a task and then stop repeatedly with no
          explanation as to why"). Every message used to ABORT this chat's working run and delete its partial, so a
          "also make it blue" or a "how's it going?" silently killed the task. When the host can steer (steerRun) and
@@ -1786,7 +2035,9 @@
           && msg.chatType !== 'group' && !msg.edited && !carriesThirdPartyText(msg)
           && !(Array.isArray(msg.media) && msg.media.length) && !(msg.replyTo && Array.isArray(msg.replyTo.media) && msg.replyTo.media.length)
           && String(msg.text || '').trim() && !STOP_WORDS_RE.test(String(msg.text || ''))) {
-        const note = String(msg.text).trim();
+        // ONE LINE ON THE WIRE: two quick bubbles arrive here joined by a newline (the text batch), and every reader of
+        // the loop's '\n[steering] <note>\n' echo — this hub, COMMS, the phone relay — reads one line
+        const note = steerNoteWire(msg.text);
         let steered = false;
         try { const r = await steerRun(liveRun.runId, note); steered = !!(r && r.ok); letPrevFinish = !steered && !!r && r.status === 409; }
         catch (e) { failNote('channels.hub.steer', e); steered = false; }
@@ -1858,6 +2109,13 @@
       if (!sec.model || (!usingCodex && !sec.configured && !sec.key)) {
         await deliver(chatId, '⚠ ' + (sec.error || 'No provider/model is configured yet. Open the STARNET app → Messaging tab and connect.'), '', 'error');
         return;
+      }
+      // an earlier run of this message began no tool step before the crash: running it again cannot do anything twice —
+      // but the chat is told it is a second go, never left to think it is the first
+      if (priorAttempt) {
+        const ask = clipAsk(msg.text);
+        await deliver(chatId, '↻ StarNet restarted while it was working on ' + (ask ? '"' + ask + '"' : 'your message')
+          + '. It had not begun any tool step yet, so nothing can happen twice — running it again now.', priorAttempt.runId, 'command', agentId);
       }
 
       // TYPING: from here on a real run WILL happen — light the platform's "typing…" bubble now (it also covers
@@ -1943,6 +2201,13 @@
         history = canonicalStreamId && historyFor ? historyFor(canonicalStreamId, agentId) : store.loadHistory(agentId);
         if (!Array.isArray(history)) history = [];
       } catch (_) { try { history = store.loadHistory(agentId); } catch (_) { history = []; } }
+      // A SECOND GO HAS ONE COPY OF THE TURN. The interrupted run already filed these words (the legacy history below, and
+      // its directive row in the canonical stream); with nothing after them, they are this message, not an earlier ask.
+      const storedTurn = turnText || '[the user sent a media message]';
+      if (priorAttempt && history.length) {
+        const last = history[history.length - 1];
+        if (last && last.role === 'user' && (last.content === storedTurn || last.content === turnText)) history = history.slice(0, -1);
+      }
       // "YES" TO AN OFFER IS A GO: classified on its own, "yes" is chat and the run gets no task prompt. Ask again with the
       // agent's last reply: an affirmation that answers its offer to act ("want me to draft it?") IS the directive.
       if (!isTask && history.length) {
@@ -1951,7 +2216,7 @@
           try { isTask = !!classify(msg.text || '', { priorAgentTurn: prior.content }); } catch (e) { failNote('channels.hub.classify.offer', e); }
         }
       }
-      try { store.appendTurn(agentId, 'user', turnText || '[the user sent a media message]'); } catch (e) { failNote('channels.hub.appendTurn', e); }
+      if (!priorAttempt) { try { store.appendTurn(agentId, 'user', storedTurn); } catch (e) { failNote('channels.hub.appendTurn', e); } }
       const userTurn = { role: 'user', content: turnText };
       if (mediaIngest.attachments.length) userTurn.attachments = mediaIngest.attachments;
       let messages = history.map(m => ({ role: m.role, content: m.content })).concat([userTurn]);
@@ -1972,7 +2237,13 @@
       // no floor / no brief composes the exact pre-brief system string.
       let dockBrief = null;
       if (stageBriefFor) { try { dockBrief = dockId ? stageBriefFor(agentId, dockId) : stageBriefFor(agentId); } catch (_) { dockBrief = null; } }
-      const system = dockSystem(persona, dockBrief, isTask);
+      // the one-shot note an interrupted attempt left this chat (reportInterruptedAttempt): read by this run, then cleared
+      let interruptedNote = '';
+      if (rec && rec.interruptedAttempt && typeof store.saveChatRecord === 'function') {
+        interruptedNote = interruptedAttemptNote(rec.interruptedAttempt);
+        try { store.saveChatRecord(chatId, { interruptedAttempt: null }); } catch (e) { failNote('channels.hub.interruptedAttempt.clear', e); }
+      }
+      const system = dockSystem(persona, dockBrief, isTask) + interruptedNote;
 
       // B5: if this agent runs at a bound BAY, its tools are that bay room's objects (resolveStation), not the
       // default office — so a routed agent's reach is exactly what the floor granted it. null -> office default.
@@ -1995,6 +2266,10 @@
       // agent, aged from startedAt) — a reconnect then keeps the agent's live floor/HUD state instead of clearing it.
       // abort/superseded are what halt.js's E-STOP reads; the extra fields are additive and invisible to it.
       const myRec = { runId: '', abort: null, superseded: false, halted: false, agentId: agentId, startedAt: null };
+      // tool steps this message's runs have BEGUN (entry run, every retry attempt, every line hop), stamped on its receipts
+      // as each one is announced — loop.js emits agent.tool_call before it dispatches, so the count is durable first
+      let attemptTools = 0;
+      const noteToolStep = () => { attemptTools++; markAttempt({ tools: attemptTools }); };
 
       /* AN E-STOP IS NOT A SUPERSEDE. Both set `superseded`, because both must abandon this run's now-stale
          partial reply — but a supersede means a NEWER message owns the conversation and is already running its
@@ -2043,11 +2318,11 @@
           if (name === 'agent.run.start') state.runId = p.runId || state.runId;
           // The reply is already being assembled here, delta by delta — so this is also where it can be SHOWN.
           // stream.push is fire-and-forget and throttled; it can never delay or fail the run.
-          else if (name === 'agent.token') { state.buf += (p.delta || ''); if (stream) stream.push(state.buf); }
-          else if (name === 'agent.tool_call') { state.buf = ''; state.toolsRan++; }   // counted: an 'empty' end after tools is not "nothing was done"
+          else if (name === 'agent.token') { state.buf = joinReplyDelta(state.buf, p.delta); if (stream) stream.push(state.buf); }
+          else if (name === 'agent.tool_call') { state.buf = ''; state.toolsRan++; noteToolStep(); }   // counted: an 'empty' end after tools is not "nothing was done"
           else if (name === 'agent.run.error') { state.errMsg = p.message || 'run error'; state.transient = !!p.transient; }
           else if (name === 'capdenied') state.errMsg = state.errMsg || ('no ' + (p.need || 'capability') + ' — ' + (p.reason || ''));
-          else if (name === 'agent.run.end') { state.reason = p.reason; state.finishReason = p.finishReason || null; state.unpricedModel = p.unpricedModel || null; state.unpricedCapTokens = Number(p.unpricedCapTokens) || 0; state.subscriptionModel = p.subscriptionModel || null; state.subscriptionCapTokens = Number(p.subscriptionCapTokens) || 0; state.budgetScope = p.budgetScope || null; state.budgetCapUsd = (typeof p.budgetCapUsd === 'number' && isFinite(p.budgetCapUsd)) ? p.budgetCapUsd : null; state.budgetCapIsBalance = p.budgetCapIsBalance === true; if (typeof p.usd === 'number' && isFinite(p.usd)) state.usd = Math.max(state.usd || 0, p.usd); }
+          else if (name === 'agent.run.end') { state.reason = p.reason; state.finishReason = p.finishReason || null; state.unpricedModel = p.unpricedModel || null; state.unpricedCapTokens = Number(p.unpricedCapTokens) || 0; state.subscriptionModel = p.subscriptionModel || null; state.subscriptionCapTokens = Number(p.subscriptionCapTokens) || 0; state.budgetScope = p.budgetScope || null; state.budgetCapUsd = (typeof p.budgetCapUsd === 'number' && isFinite(p.budgetCapUsd)) ? p.budgetCapUsd : null; state.budgetCapIsBalance = p.budgetCapIsBalance === true; state.budgetProjected = p.budgetProjected === true; if (typeof p.usd === 'number' && isFinite(p.usd)) state.usd = Math.max(state.usd || 0, p.usd); }
         };
 
         // CONSENT SURFACE (per-chat, default OFF — see /approvals). With it off nothing changes: the run stays
@@ -2073,11 +2348,16 @@
           return Promise.resolve(asked).finally(release);
         } : undefined;
 
+        // the receipt now names the run that is about to start (written AFTER the user turn was filed above)
+        markAttempt({ runId: runId });
         try {
           await runOnce({
             key: usingCodex ? '' : sec.key, model: sec.model, provider, baseUrl: sec.baseUrl || sec.base_url || '', reasoningEffort, system, messages, agentId, isTask,
             emit: sink, signal: ac.signal, runId, lineId, trigger: 'event',
             streamId: canonicalStreamId || undefined,
+            // a second go of an interrupted run reuses that run's durable directive row instead of filing the words again
+            // (runOnceCore retryDirective: matched by run id, agent, stream AND exact text, so it can only ever dedupe this)
+            retryUserRunId: (priorAttempt && attempt === 0) ? priorAttempt.runId : undefined,
             // a VOICE NOTE is a spoken turn: the voice chat model may answer it (never a work line's stage)
             voiceTurn: (!!spoken && !lineId) || undefined,
             initialTaint: entryTaint || (mediaIngest.attachments.length ? 'channel attachment' : (carriesThirdPartyText(msg) ? 'forwarded message' : null)),
@@ -2178,8 +2458,8 @@
             const hopSink = (name, payload) => {
               let p; try { p = redact(payload); } catch (_) { p = payload; }
               if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
-              if (name === 'agent.token') hs.buf += (p.delta || '');
-              else if (name === 'agent.tool_call') hs.buf = '';
+              if (name === 'agent.token') hs.buf = joinReplyDelta(hs.buf, p.delta);
+              else if (name === 'agent.tool_call') { hs.buf = ''; noteToolStep(); }   // a hop's step is this message's step too
               else if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
               else if (name === 'capdenied') hs.errMsg = hs.errMsg || ('no ' + (p.need || 'capability') + ' — ' + (p.reason || ''));
               else if (name === 'agent.run.end') { if (typeof p.usd === 'number' && isFinite(p.usd)) hs.usd = p.usd; }
@@ -2309,8 +2589,8 @@
       } finally { stopTyping(); clearAck(); if (stream && withdrawn) stream.abandon(); }
       // seal() hands deliver() the streamed message so chunk 0 replaces it in place. It also closes the stream,
       // so a late token delta can never race the final text back out of order.
-      const dr = await deliver(chatId, reply, lastRunId, state.errMsg ? 'error' : (state.reason || 'done'), finalAgentId,
-        choiceEntry ? { reply_markup: keyboardFor(choiceEntry) } : undefined, stream ? stream.seal() : '');
+      const dr = await deliverHeld(chatId, reply, lastRunId, state.errMsg ? 'error' : (state.reason || 'done'), finalAgentId,
+        choiceEntry ? { reply_markup: keyboardFor(choiceEntry) } : undefined, stream ? stream.seal() : '', inboxIds);
       // Stitch the delivered message onto the keyboard's registry entry so a tap can edit THAT message in place.
       // A send that failed retires the token immediately: leaving it would let a phantom keyboard (buttons the
       // user can see from a partially-sent reply) resolve against a question they never fully received.
@@ -2437,7 +2717,12 @@
       if (!chatId || !status) return;
       const gone = status === 'kicked' || status === 'left';
       if (!gone) return;                                    // added/promoted/restricted: nothing to stop doing
-      try { if (typeof store.saveChatRecord === 'function') store.saveChatRecord(chatId, { unreachable: true }); } catch (e) { failNote('channels.hub.chatRecord.save', e); }
+      /* A GROUP THAT REMOVED US IS NO LONGER ADMITTED. The owner's /allow admitted the room as it was; whoever adds the
+         bot back later (any group admin) must not re-open the owner's station to it without a fresh /allow there. Only
+         an admission THIS channel granted is withdrawn — the chat map is shared across platforms (chatAdmitted). */
+      const patch = { unreachable: true };
+      if (String((ev && ev.chatType) || '') === 'group' && chatAdmitted(chatId)) patch.admittedOn = '';
+      try { if (typeof store.saveChatRecord === 'function') store.saveChatRecord(chatId, patch); } catch (e) { failNote('channels.hub.chatRecord.save', e); }
       try { console.error('[' + channel + '] chat ' + chatId + ' has ' + (status === 'kicked' ? 'blocked or banned' : 'removed') + ' this bot — queued replies for it are being dropped'); } catch (_) {}
       if (typeof store.loadOutbox !== 'function' || typeof store.removeOutbox !== 'function') return;
       let items = [];
@@ -2455,5 +2740,5 @@
     };
   }
 
-  return { makeChannelHub, dockSystem, chunkText, chunkTextParts, endNote, parseCommand, parseUserCommand, matchAgent, fmtAgentLine, isSupersedeRaceRefusal, coerceChoice, menuCommands, helpText, replyPreamble, REPLY_QUOTE_MAX, COMMANDS, commandNeedsOwner, _internals: { TASK_SUFFIX, DEFAULT_PERSONA, parseCommand, matchAgent, fmtAgentLine, isSupersedeRaceRefusal, coerceChoice, menuCommands, helpText, replyPreamble, COMMANDS } };
+  return { makeChannelHub, dockSystem, joinReplyDelta, chunkText, chunkTextParts, endNote, parseCommand, parseUserCommand, matchAgent, fmtAgentLine, isSupersedeRaceRefusal, coerceChoice, menuCommands, helpText, replyPreamble, REPLY_QUOTE_MAX, COMMANDS, commandNeedsOwner, _internals: { TASK_SUFFIX, DEFAULT_PERSONA, NOTE_CMDS, parseCommand, matchAgent, fmtAgentLine, isSupersedeRaceRefusal, coerceChoice, menuCommands, helpText, replyPreamble, COMMANDS } };
 });

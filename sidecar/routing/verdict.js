@@ -50,16 +50,24 @@ function stripVerdict(text) {
   return lines.join('\n').replace(/\s+$/, '');
 }
 
-/* verdictBrief(when) -> the instruction a reviewer dock receives when its lane meets a LOOP gate keyed on a
-   verdict word; '' when the gate is not verdict-keyed. Prompt text only. */
-function verdictBrief(when) {
+/* verdictBrief(when, handsOn) -> the instruction a reviewer dock receives when its lane meets a LOOP gate keyed on a
+   verdict word; '' when the gate is not verdict-keyed. Prompt text only; pipeline.js handoffPrompt keeps its first 600
+   characters. `handsOn` === true only when the caller KNOWS a bare approval at that gate hands on the work the reviewer was
+   handed (chain.js hopTurn → bareApprovalHandsOn, the rule in chain.js bareApproval, 2026-10-21): only then does the brief offer
+   it. Everyone else — a self-loop gate, a crate another gate framed, the browser's COMMS work line (/api/routing/chain), which
+   hands on the reply as it is — gets the plain promise that the reply is what moves on. */
+function verdictBrief(when, handsOn) {
   if (!isVerdictWord(when)) return '';
   const other = when.toLowerCase() === 'approved' ? 'revise' : 'approved';
   return 'YOUR VERDICT DECIDES THE LOOP GATE AFTER YOU: end your reply with one final line, exactly '
     + '"VERDICT: ' + when.toLowerCase() + '" when the work should leave the loop, or "VERDICT: ' + other + '" when it should go '
     + 'back round. Nothing after that line. A reply with no VERDICT line is treated as "' + other + '". '
-    + 'When the work passes, your reply is what moves on past the gate: lead with the finished work itself (with any fixes '
-    + 'applied), and keep review notes short.';
+    + (handsOn === true
+      ? 'When the work passes, a reply of only the VERDICT line, or a bare approval such as "Looks good.", passes it on exactly as '
+        + 'you were handed it. Any other reply is what moves on past the gate: lead with the finished work itself (with any fixes '
+        + 'applied), and keep review notes short.'
+      : 'When the work passes, your reply is what moves on past the gate: lead with the finished work itself (with any fixes '
+        + 'applied), and keep review notes short.');
 }
 
 module.exports = { parseVerdict, stripVerdict, isVerdictWord, verdictBrief, VERDICT_WORDS };

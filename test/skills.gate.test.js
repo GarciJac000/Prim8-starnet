@@ -248,7 +248,9 @@ function approvalsMap() {
   A.ok(/the real steps/.test(s.view('a', id, { bump: false }).body), 'the pinned body is intact');
   A.eq(s.view('a', id, { bump: false }).updatedAt, before, 'and nothing was stamped');
 
-  A.eq(s.manage({ agentId: 'a', action: 'unpin', target: id }).ok, true, 'unpin is allowed (lifecycle, not content)');
+  // only the Commander takes the lock off (bug 97743dff: a model unpin used to open the next patch)
+  A.eq(s.manage({ agentId: 'a', action: 'unpin', target: id }).ok, false, 'a model (default writer) cannot unpin it');
+  A.eq(s.manage({ agentId: 'a', action: 'unpin', target: id, createdBy: 'user' }).ok, true, 'the Commander can unpin it (lifecycle, not content)');
   A.eq(s.manage({ agentId: 'a', action: 'edit', target: id, body: 'new steps' }).ok, true, 'and then the edit lands');
 
   // the human surface may override its own pin, but only with an explicit force

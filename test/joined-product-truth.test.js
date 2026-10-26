@@ -35,7 +35,8 @@ function surface(plan) {
     convey: { enqueueAt: (x, y, payload) => crates.push({ x, y, payload }) },
     outboundBeltTile: (aid, dockId) => (plan.dockChains[dockId] || plan.chains[aid] || {}).tile,
     setTimeout: (fn, ms) => { const t = { fn, ms, active: true }; timers.push(t); return t; },
-    clearTimeout: t => { if (t) t.active = false; } });
+    clearTimeout: t => { if (t) t.active = false; },
+    motionWake: () => {} });   // the still tier (10-21): a crate that starts moving wakes the pacer — a no-op here
   vm.runInContext(pairing + worked + shipping + ending + `
     globalThis.proof = {
       end(aid, dockId, lineId, runId, workitemId, usd = 0.01, productive = true) {

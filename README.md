@@ -118,6 +118,27 @@ npm run desktop:dev     # dev shell
 npm run desktop:build   # build installers locally
 ```
 
+## Terminal mode
+
+The desktop app ships a `starnet` command beside it. Run it with no arguments and it opens a live
+dashboard on the station the app is running: the crew down the left (a spinner on whoever is working),
+the chosen agent's conversation beside it, and every approval as a card you answer with `y` or `n`
+(`v` shows the full request first). It reads the same state the app does, so it never shows work the
+station cannot prove.
+
+| Platform | The command |
+| --- | --- |
+| **Windows** | `%LOCALAPPDATA%\StarNet\bin\starnet.cmd` |
+| **macOS** | `/Applications/StarNet.app/Contents/Resources/bin/starnet` |
+
+So you can just type `starnet` in a new terminal: the Windows installer puts that folder on your user
+`PATH` (the uninstaller takes it off), and on macOS StarNet links the command into `~/.local/bin` the
+first time it starts, adding that folder to `~/.zprofile` if no shell profile has it yet
+(`STARNET_NO_CLI_LINK=1` turns that off). Other commands: `starnet ls` (every agent
+and its open asks), `starnet approve` / `starnet deny`, `starnet watch` (the live event stream, one line
+each), `starnet flow` (workflows) and `starnet -p "<task>"` (one run, answer on stdout).
+`starnet --help` lists them all. From a checkout, use `node bin/starnet.js`.
+
 ## Coming from OpenClaw or Hermes?
 
 StarNet can import an existing agent: point it at your on-disk OpenClaw or Hermes home and it

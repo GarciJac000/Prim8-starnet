@@ -213,6 +213,19 @@ function twoStagePlan() {
     A.ok(/no work line is armed/.test(String(noPlan.j.error || '')), 'the refusal names the real reason: ' + noPlan.j.error);
 
     /* ---- 3. HAPPY PATH through a posted two-stage floor ---- */
+    /* the docks' ROOM is bounded by the saved station (a posted plan may only narrow it — qa/bugs/a9a4f53c): save both
+       bays with a workstation each and a workbench in their room, so the bay room is computer + workbench and the shell
+       probe in section 5 meets a projected, consent-gated shell.exec */
+    const WM = require('../frontend/app/worldmodel.js');
+    const stDoc = WM.defaultDoc();
+    stDoc.props.push({ id: 'b1', t: 'bay', x: 2, y: 1, w: 1, h: 1, agentId: 'research-agent' }, { id: 'pc1', t: 'console', x: 4, y: 1, w: 2, h: 1, agentId: 'research-agent' },
+      { id: 'b2', t: 'bay', x: 8, y: 1, w: 1, h: 1, agentId: 'writer-agent' }, { id: 'pc2', t: 'console', x: 10, y: 1, w: 2, h: 1, agentId: 'writer-agent' },
+      { id: 'wb1', t: 'workbench', x: 13, y: 1, w: 2, h: 1, block: true });
+    stDoc._nid = 6;
+    const prior = ((await (await fetch(B + '/api/save?agent=agent', { headers })).json()) || {}).save;
+    const sv = await fetch(B + '/api/save', { method: 'POST', headers,
+      body: JSON.stringify({ schema: 'starnet.save', version: 5, _saveRevision: (prior && prior._saveRevision) || 0, updatedAt: Date.now(), agent: { id: 'agent' }, station: stDoc }) });
+    A.ok(sv.status === 200 && ((await sv.json()) || {}).ok === true, 'the station the line runs on (two bays, a workstation each, a workbench) is saved');
     const posted = await fetch(B + '/api/routing', { method: 'POST', headers, body: JSON.stringify(twoStagePlan()) });
     A.eq(posted.status, 200, 'the two-stage floor deploys');
     sse = await startSseCollector(B + '/api/channels/events?' + require('./_httpToken.js').sseQuery(token));
@@ -336,6 +349,10 @@ function twoStagePlan() {
     for (const rq of mock.requests.slice(before)) {
       for (const m of ((rq && rq.messages) || [])) if (m && m.role === 'tool') toolMsgs.push(String(m.content || ''));
     }
+    // the saved WORKBENCH is in the probe's bay room (its consent-free shell_bg_status rides the wire; the consent-gated
+    // shell_exec is withheld from an unattended run), so the denial below is the workbench's consent posture, not a missing room
+    A.ok(mock.requests.slice(before).some(rq => ((rq && rq.tools) || []).some(t => /^shell[._]bg[._]status$/.test(String((t.function && t.function.name) || t.name || '')))),
+      'the probe\'s bay room holds the saved workbench (shell_bg_status offered)');
     A.ok(toolMsgs.length >= 1, 'the model\'s shell.exec attempt produced a tool result the provider saw');
     A.ok(!toolMsgs.some(t => /pwned/.test(t)), 'the command NEVER executed — no unattended grant reached the sample run: ' + JSON.stringify(toolMsgs).slice(0, 300));
 

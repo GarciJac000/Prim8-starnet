@@ -227,6 +227,7 @@ A.eq(runTeeView('agent.reasoning', { agentId: 'a1', runId: 'r1', on: true }), nu
     let bridgePaused = false, chanES = null, retryTimer = null, backoff = 1000;
     let bridgeCursor = '', bridgeRecovering = false;
     const emitted = []; let snapshots = 0; const readyOrder = [];
+    const motionWake = () => {};   // STILL (world.js): the link state is drawn on the next vsync — a no-op here
     let lastSseEventAt = 0, fnow = 0;
     const apiUrl = x => x, fetchSnapshot = () => { snapshots++; readyOrder.push('snapshot'); };
     // FIRST SHIP's own reset (world.js forgetShipBase) — the one collaborator the bridge's replay completion calls besides the snapshot

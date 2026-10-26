@@ -34,7 +34,9 @@ function liftHarness(fetchImpl, win) {
     A.ok(b.length > 40 && b.length < 4000, h + ' located (length guard)');
     return b;
   });
-  return new Function('fetch', 'window', 'let restartInflight = null;\n' + parts.join('\n') + '\nreturn { engineState, restartEngine, tauriCoreNow };')(fetchImpl, win);
+  // #137: a restart that came back re-hands the desktop endpoints (pushDesktopEndpoints — counted here)
+  return new Function('fetch', 'window', 'let restartInflight = null, endpointPushes = 0;\nfunction pushDesktopEndpoints() { endpointPushes++; }\n' + parts.join('\n') +
+    '\nreturn { engineState, restartEngine, tauriCoreNow, endpointPushes: () => endpointPushes };')(fetchImpl, win);
 }
 const textReply = (status, text) => async () => ({ ok: status === 200, status, text: async () => text });
 
@@ -76,8 +78,10 @@ const textReply = (status, text) => async () => ({ ok: status === 200, status, t
     await new Promise(r => setTimeout(r, 0));
     release(true);
     A.eq([await a, calls], [true, 1], 'exactly one starnet_restart_sidecar per click burst');
+    A.eq(H.endpointPushes(), 1, 'a restart that came back re-hands the desktop endpoints once (#137)');
     const failing = liftHarness(textReply(200, 'ok'), { __TAURI__: { core: { invoke: async () => { throw new Error('StarNet is shutting down'); } } } });
     A.eq(await failing.restartEngine(), false, 'a refused restart is false, never a thrown page error');
+    A.eq(failing.endpointPushes(), 0, 'a refused restart pushes nothing');
   }
 
   /* ---- topbar LINK DOWN chip: reason after 15s, restart door on desktop only ---- */

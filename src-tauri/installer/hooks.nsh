@@ -160,6 +160,55 @@ FunctionEnd
   !insertmacro STARNET_STOP_INSTALL_PROCESSES
 !macroend
 
+; ── TERMINAL MODE: `starnet` ON THE USER'S PATH ────────────────────────────────────────────────
+; The app ships the `starnet` command in $INSTDIR\bin (starnet.cmd runs it on the app's own node.exe). After an install
+; that folder joins the CURRENT USER's PATH, so typing `starnet` in any NEW terminal opens the dashboard — the way
+; Hermes's installer puts `hermes` on PATH. The uninstaller takes it back off. (macOS: the app links it on launch,
+; sidecar/cli-link.js — a dragged-in app has no installer.)
+; - Through the .NET registry API, NEVER ReadRegStr/WriteRegStr: an NSIS string caps at NSIS_MAX_STRLEN, so a long
+;   user PATH read that way comes back TRUNCATED and writing it back would destroy the rest of it.
+; - Read UNEXPANDED, written back as REG_EXPAND_SZ: entries like %USERPROFILE%\bin stay exactly as they were.
+; - Idempotent (an entry already there — any case, with or without a trailing \ — is not added twice; a reinstall or an
+;   update adds nothing) and FAIL-OPEN (a PowerShell failure leaves PATH untouched and the install goes on).
+; - The broadcast (WM_SETTINGCHANGE "Environment") is what makes Explorer, and every terminal opened after it, see it.
+; Same 64-bit PowerShell as above; NSIS expands `$`, so every PowerShell variable below is written `$$`, and `$\'` is a
+; PowerShell single quote. test/cli-path-hook.test.js runs these exact lines against a scratch registry key.
+; - The folder reaches PowerShell through the ENVIRONMENT (STARNET_PATH_DIR, set in this installer process and inherited
+;   by nsExec's child), never pasted into the command: a profile path with an apostrophe (C:\Users\O'Brien\...) broke the
+;   quoted literal, PowerShell refused to parse, and fail-open meant `starnet` silently never reached PATH.
+!macro STARNET_RESOLVE_POWERSHELL
+  StrCpy $R9 "$WINDIR\SysNative\WindowsPowerShell\v1.0\powershell.exe"
+  IfFileExists "$R9" +2 0
+    StrCpy $R9 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  Push $0
+  Push $R9
+  !insertmacro STARNET_RESOLVE_POWERSHELL
+  DetailPrint "Putting the starnet command on your PATH ($INSTDIR\bin)..."
+  System::Call 'Kernel32::SetEnvironmentVariable(t "STARNET_PATH_DIR", t "$INSTDIR\bin")'
+  ; STARNET_PATH_ADD
+  nsExec::ExecToLog '"$R9" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d=$$env:STARNET_PATH_DIR; if (-not $$d) { exit }; $$k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($\'Environment$\'); $$p=[string]$$k.GetValue($\'Path$\',$\'$\',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $$a=@($$p -split $\';$\' | Where-Object { $$_ -ne $\'$\' }); if (-not ($$a | Where-Object { $$_.TrimEnd($\'\$\') -eq $$d.TrimEnd($\'\$\') })) { $$k.SetValue($\'Path$\', (@($$a) + $$d) -join $\';$\', [Microsoft.Win32.RegistryValueKind]::ExpandString) }"'
+  Pop $0
+  SendMessage 0xFFFF 0x001A 0 "STR:Environment" /TIMEOUT=5000
+  Pop $R9
+  Pop $0
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  Push $0
+  Push $R9
+  !insertmacro STARNET_RESOLVE_POWERSHELL
+  System::Call 'Kernel32::SetEnvironmentVariable(t "STARNET_PATH_DIR", t "$INSTDIR\bin")'
+  ; STARNET_PATH_REMOVE
+  nsExec::ExecToLog '"$R9" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d=$$env:STARNET_PATH_DIR; if (-not $$d) { exit }; $$k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($\'Environment$\'); $$p=[string]$$k.GetValue($\'Path$\',$\'$\',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $$a=@($$p -split $\';$\' | Where-Object { $$_ -ne $\'$\' }); $$keep=@($$a | Where-Object { $$_.TrimEnd($\'\$\') -ne $$d.TrimEnd($\'\$\') }); if ($$keep.Count -ne $$a.Count) { $$k.SetValue($\'Path$\', $$keep -join $\';$\', [Microsoft.Win32.RegistryValueKind]::ExpandString) }"'
+  Pop $0
+  SendMessage 0xFFFF 0x001A 0 "STR:Environment" /TIMEOUT=5000
+  Pop $R9
+  Pop $0
+!macroend
+
 ; Future uninstallers own the same process cleanup. This does not repair an already-corrupt old
 ; uninstaller (the in-place upgrade above makes that irrelevant), but it prevents a healthy future
 ; uninstall from failing merely because the shell or bundled sidecar is still running.

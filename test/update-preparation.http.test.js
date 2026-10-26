@@ -45,6 +45,22 @@ async function call(base, route, method, body) {
   const sentinel = path.join(workspace, 'canonical-user-state.json');
   const bytes = JSON.stringify({ agents: 4, workstreams: 33, marker: 'transactional-update' });
   fs.writeFileSync(sentinel, bytes);
+  // bug 31db37b0: five recovery points from earlier install attempts (read-only, like prepare leaves them) + a user file
+  const snapshots = path.join(sandbox, 'update-snapshots');
+  fs.mkdirSync(snapshots);
+  const old = [];
+  for (let i = 0; i < 5; i++) {
+    const name = 'pre-0.12.' + i + '-' + (1760000000000 + i) + '-old.starnet-backup.json';
+    const at = new Date(Date.parse('2026-01-01T00:00:00Z') + i * 86400000);
+    for (const f of [name, name + '.receipt.json']) {
+      fs.writeFileSync(path.join(snapshots, f), '{}');
+      fs.utimesSync(path.join(snapshots, f), at, at);
+      fs.chmodSync(path.join(snapshots, f), 0o400);
+    }
+    old.push(name);
+  }
+  fs.writeFileSync(path.join(snapshots, 'keep-me.txt'), 'user file');
+  const bundles = () => fs.readdirSync(snapshots).filter(n => /^pre-.+\.starnet-backup\.json$/.test(n)).sort();
   const port = await freePort();
   const child = spawn(process.execPath, [INDEX], {
     env: Object.assign({}, process.env, {
@@ -60,6 +76,9 @@ async function call(base, route, method, body) {
   try {
     await waitFor(() => output.includes('http://127.0.0.1:' + port), 12000, 'sidecar boot timeout:\n' + output);
     const base = 'http://127.0.0.1:' + port;
+    A.eq(bundles(), old.slice(2), 'boot keeps the three newest pre-update recovery points');
+    A.eq(old.slice(0, 2).some(n => fs.existsSync(path.join(snapshots, n + '.receipt.json'))), false, 'and removes the older ones with their receipts');
+    A.eq(fs.existsSync(path.join(snapshots, 'keep-me.txt')), true, 'nothing else in update-snapshots is touched');
     const prepared = await call(base, '/api/update/prepare', 'POST', {
       targetVersion: '9.9.9', browserStore: { 'starnet.save': JSON.stringify({ version: 5, updatedAt: 123 }) }
     });
@@ -67,6 +86,7 @@ async function call(base, route, method, body) {
     A.eq(prepared.body && prepared.body.ok, true, 'route returns a verified receipt');
     A.ok(fs.existsSync(prepared.body.receipt.snapshot.file), 'receipt names a real recovery bundle');
     A.eq(fs.readFileSync(sentinel, 'utf8'), bytes, 'snapshot preparation preserves canonical bytes');
+    A.eq(bundles(), [old[3], old[4], path.basename(prepared.body.receipt.snapshot.file)].sort(), 'a verified prepare keeps itself + the two newest older recovery points');
 
     const blocked = await call(base, '/api/activity', 'POST', { at: Date.now() });
     A.eq(blocked.status, 423, 'mutation after snapshot is locked');
@@ -80,7 +100,6 @@ async function call(base, route, method, body) {
   } finally {
     try { child.kill('SIGKILL'); } catch (_) {}
     await new Promise(resolve => { if (child.exitCode != null || child.signalCode != null) resolve(); else child.once('exit', resolve); });
-    const snapshots = path.join(sandbox, 'update-snapshots');
     try { for (const name of fs.existsSync(snapshots) ? fs.readdirSync(snapshots) : []) fs.chmodSync(path.join(snapshots, name), 0o666); } catch (_) {}
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

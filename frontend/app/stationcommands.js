@@ -209,7 +209,8 @@ const StationCommands = (() => {
     }
     if (act === 'session.delete') {
       if (!sc.remove || !await sc.remove(id)) throw new Error('the session could not be deleted (General cannot be deleted, and a session that is working must be stopped first)');
-      await persistWorkstreams(save => !rowOf(save) && (save.deletedIds || []).indexOf(id) >= 0);
+      // a deleted conversation is forgotten: its id is in the save's forgetIds too (qa/bugs/3e926b6a)
+      await persistWorkstreams(save => !rowOf(save) && (save.deletedIds || []).indexOf(id) >= 0 && (save.forgetIds || []).indexOf(id) >= 0);
       return { deleted: label, id };
     }
     throw new Error('unknown session action "' + act + '"');
@@ -1032,7 +1033,7 @@ const StationCommands = (() => {
       if (agentId && typeof App !== 'undefined' && App.agents && !(App.agents() || []).some(x => x && x.id === agentId)) {
         throw new Error('no crew member with id "' + agentId + '" — use station.crew for the roster, or omit agentId');
       }
-      if (a && a.focus) requireCurrentFocus(a.origin);
+      if (a && a.focus) await requireCurrentFocus(a.origin);
       const ws = Workstreams.create(title, { agentId: agentId || undefined, activate: !!(a && a.focus) });
       if (!ws) throw new Error('the station could not create the session');
       if (a && a.focus && typeof Chat !== 'undefined' && Chat.load) { try { Chat.load(ws); } catch (_) {} }
@@ -1046,7 +1047,7 @@ const StationCommands = (() => {
        they did not ask to be. */
     'station.switch_session': async (a) => {
       const hit = resolveSession(a && a.session);
-      requireCurrentFocus(a && a.origin);
+      await requireCurrentFocus(a && a.origin);
       const ws = Workstreams.switch(hit.w.id);
       if (!ws) throw new Error('the station could not switch sessions');
       if (typeof Chat !== 'undefined' && Chat.load) { try { Chat.load(ws); } catch (_) {} }
@@ -1172,7 +1173,7 @@ const StationCommands = (() => {
        its dock button / tab / menu entry uses, raise it to the front, and answer with what is really on screen. Only the
        run the Commander is watching may move their eyes (requireWatching). */
     'station.show': async (a) => {
-      requireWatching(a && a.origin);
+      await requireWatching(a && a.origin);
       const place = typeof Places !== 'undefined' && Places.get ? Places.get(a && a.place) : null;
       if (!place) throw new Error('there is no StarNet place "' + String((a && a.place) || '') + '"; places: ' + (typeof Places !== 'undefined' ? Places.ids().join(', ') : 'none loaded — reload the page'));
       if (typeof StationUI === 'undefined' || !StationUI.showTerm) throw new Error('the station windows are not ready yet');
@@ -1285,7 +1286,36 @@ const StationCommands = (() => {
     return reconciling[key].finally(() => { delete reconciling[key]; });
   }
 
-  function requireCurrentFocus(origin) {
+  /* A RUN'S FIRST CALL CAN OVERTAKE ITS OWN START (2026-10-22). A station command reaches this page on the event stream;
+     the run's agent.run.start reaches it on that run's own /api/run stream — two connections, no order between them. A
+     watched run whose FIRST tool call was station.show landed here a few ms before the page learned its runId, so the
+     Commander's own run was refused as "not looking at this conversation" and the window never rose (station-show.e2e,
+     1 run in 10). The same race refused a first-call session switch. So when the origin names the focused session and
+     that session has a send in flight the sidecar has not confirmed to this page yet, wait for the confirmation (its
+     agent.run.start, bounded) before a guard reads it. The guards themselves are unchanged: a different run, an ended
+     run or another session is refused exactly as before. */
+  const RUN_CONFIRM_WAIT_MS = 2000;   // well inside the bridge's 6s answer deadline (sidecar/station-bridge.js)
+  function unconfirmedWatchedRun(origin) {
+    if (!origin || !origin.streamId || !origin.runId) return false;
+    const active = typeof Workstreams !== 'undefined' && Workstreams.activeId ? Workstreams.activeId() : null;
+    return active === origin.streamId && typeof Channels !== 'undefined' && !!Channels.isBusy && Channels.isBusy(origin.streamId)
+      && !!Channels.runIdOf && !Channels.runIdOf(origin.streamId);
+  }
+  function runConfirmed(origin) {
+    if (!unconfirmedWatchedRun(origin) || typeof U === 'undefined' || !U.bus || !U.bus.on || !U.bus.off) return Promise.resolve();
+    return new Promise(resolve => {
+      let timer = 0;
+      const done = () => { clearTimeout(timer); U.bus.off('agent.run.start', onStart); resolve(); };
+      // the bus hears run.start BEFORE the run's own handler stamps the channel (harness.js emits, then calls onRunId),
+      // so read the channel once that handler has run; a run.start for another session keeps waiting
+      const onStart = () => setTimeout(() => { if (!unconfirmedWatchedRun(origin)) done(); }, 0);
+      U.bus.on('agent.run.start', onStart);
+      timer = setTimeout(done, RUN_CONFIRM_WAIT_MS);
+    });
+  }
+
+  async function requireCurrentFocus(origin) {
+    await runConfirmed(origin);
     if (typeof Chat === 'undefined' || !Chat.canFocusSession || !Chat.canFocusSession(origin)) {
       throw new Error('session focus was left unchanged: the originating run is no longer current or the Commander has a draft; do not retry the switch automatically');
     }
@@ -1294,7 +1324,8 @@ const StationCommands = (() => {
   /* station.show moves the Commander's EYES, so only the run they are watching may call it: its session is the focused
      one and it is that session's live run. A background worker, a routine, a phone/Telegram turn, or a run that ended is
      refused. Unlike a session switch, a typed draft is no reason to refuse — opening a window leaves the composer alone. */
-  function requireWatching(origin) {
+  async function requireWatching(origin) {
+    await runConfirmed(origin);
     const active = typeof Workstreams !== 'undefined' && Workstreams.activeId ? Workstreams.activeId() : null;
     const live = !!(origin && origin.streamId && origin.runId && active === origin.streamId
       && typeof Channels !== 'undefined' && Channels.isBusy && Channels.isBusy(origin.streamId)

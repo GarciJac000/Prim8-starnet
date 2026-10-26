@@ -287,8 +287,10 @@ function intervalJob(id, everyStr) {
     A.eq(s.getStore().filter(j => j.repeat.completed === 1).length, 200, 'every burst completion is durably accounted once');
   }
   {
+    // Results for ONE chat collapse to the newest (cron.delivery-backlog.test.js); results bound for DIFFERENT
+    // destinations stay separate receipts, and backpressure holds for those too.
     const j = intervalJob('backlog', 'every 1m');
-    const waiting = i => ({ runId: 'old-' + i, state: 'pending', result: 'result-' + i, nextAttemptAt: cron._internals.iso(T0 + 999999) });
+    const waiting = i => ({ runId: 'old-' + i, state: 'pending', result: 'result-' + i, nextAttemptAt: cron._internals.iso(T0 + 999999), deliver: 'origin', origin: { channel: 'telegram', chatId: String(1000 + i) } });
     j.deliveryBacklog = Array.from({ length: 99 }, (_, i) => waiting(i)); j.finalization = waiting(99);
     const s = setup([j]); s.clock.set(T0 + 60000);
     const tick = s.driver.applyTick(s.clock.now());
@@ -297,6 +299,29 @@ function intervalJob(id, everyStr) {
     A.eq(s.runs.length, 0, 'a full outbox starts no additional paid work');
     const restarted = cronStore.loadEnvelope(JSON.stringify(cronStore.toEnvelope(s.getStore()))).jobs;
     A.eq(cronStore.pendingDeliveries(restarted[0]).length, 100, 'every pending result survives a serialized restart');
+  }
+  {
+    // the same full outbox bound for ONE chat (0.13.x left exactly this behind) collapses to its newest result, which
+    // still STANDS FOR all 100: the routine stays held back (no paid run) until that result lands, then runs again.
+    // Counting receipts alone, a chat that refuses every message (bot blocked) let the routine fire forever.
+    const j = intervalJob('backlog-one-chat', 'every 1m');
+    const waiting = i => ({ runId: 'old-' + i, state: 'pending', result: 'result-' + i, nextAttemptAt: cron._internals.iso(T0 + 999999), deliver: 'origin', origin: { channel: 'telegram', chatId: '777' } });
+    j.deliveryBacklog = Array.from({ length: 99 }, (_, i) => waiting(i)); j.finalization = waiting(99);
+    const s = setup([j]); s.clock.set(T0 + 60000);
+    const tick = s.driver.applyTick(s.clock.now());
+    A.eq(cronStore.pendingDeliveries(s.getJob(j.id)).map(f => f.runId), ['old-99'], 'a one-chat outbox collapses to its newest result');
+    A.eq(s.getJob(j.id).finalization.superseded, 99, 'which carries how many earlier results it replaces');
+    A.eq(cronStore.undeliveredCount(s.getJob(j.id)), 100, 'and still counts as 100 undelivered results');
+    A.eq(tick.deferred, [j.id], 'so the routine stays held back by backpressure');
+    A.eq(s.runs.length, 0, 'and starts no paid run');
+    // the destination recovers: the newest result's retry comes due (still inside the routine's due minute) and lands
+    s.setStore(js => js.map(x => x.id !== j.id ? x : Object.assign({}, x, { finalization: Object.assign({}, x.finalization, { nextAttemptAt: cron._internals.iso(T0 + 60000) }) })));
+    await s.driver.recoverFinalizations(); await flush();
+    A.eq(cronStore.undeliveredCount(s.getJob(j.id)), 0, 'once the newest result lands, the count is spent');
+    const t2 = s.driver.applyTick(s.clock.now());
+    A.eq(t2.deferred, [], 'and the routine is no longer held back');
+    A.eq(s.runs.length, 1, 'it runs again');
+    s.runs.forEach(r => r.resolve()); await flush();
   }
 
   A.report('cron.dispatch');

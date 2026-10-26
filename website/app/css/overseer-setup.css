@@ -85,7 +85,7 @@
 #screen-connect .prov-byok-lab { padding:0; margin:20px 0 12px; font-size:14px; letter-spacing:0; text-transform:none; text-align:left; color:var(--text); opacity:.75; }
 @property --ov-border-angle { syntax:'<angle>'; initial-value:0deg; inherits:false; }
 #screen-connect .prov-hero { position:relative; isolation:isolate; display:block; width:100%; overflow:hidden; padding:22px; border:1px solid var(--gd-edge); border-radius:12px; background:var(--gd-face); text-align:left; box-shadow:var(--gd-shadow); }
-#screen-connect .prov-hero::before { content:''; position:absolute; inset:0; padding:2px; border-radius:inherit; pointer-events:none; background:conic-gradient(from var(--ov-border-angle),transparent 0deg 265deg,rgba(var(--ph-rgb),.25) 300deg,var(--ph-bright) 340deg,transparent 360deg); mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0); mask-composite:exclude; animation:ov-orbit calc(var(--t-slow)*18) linear infinite; }
+#screen-connect .prov-hero::before { content:''; position:absolute; inset:0; padding:2px; border-radius:inherit; pointer-events:none; background:conic-gradient(from var(--ov-border-angle),transparent 0deg 265deg,rgba(var(--ph-rgb),.25) 300deg,var(--ph-bright) 340deg,transparent 360deg); mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0); mask-composite:exclude; animation:ov-orbit calc(var(--t-slow)*18) steps(60, jump-end) infinite; }
 #screen-connect .prov-hero::after { display:none; }
 #screen-connect .prov-hero-row { padding-top:1px; gap:20px; justify-content:space-between; align-items:center; }
 #screen-connect .prov-hero-title { display:flex; flex-direction:column; align-items:flex-start; gap:12px; line-height:1; }

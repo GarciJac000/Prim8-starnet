@@ -256,7 +256,36 @@ const Updates = (() => {
     // App.pushRoster() returns true only after the sidecar accepts and parses the full roster replacement.
     const roster = (typeof App !== 'undefined' && App && typeof App.pushRoster === 'function')
       ? await withTimeout(App.pushRoster(), budget, false) : false;
-    return { ok: !!(saveConfirmed && roster === true), save, saveConfirmed, roster: roster === true };
+    // a latched save conflict never clears by waiting: the station file refused this window's copy (kept aside on the
+    // station), so the install path names it instead of "try again in a moment"
+    return { ok: !!(saveConfirmed && roster === true), save, saveConfirmed, roster: roster === true, conflict: saveConfirmed ? null : saveConflict() };
+  }
+
+  // the save conflict this window holds (CloudSave latches the station file's refusal in page memory), or null
+  function saveConflict() {
+    try {
+      const h = (typeof CloudSave !== 'undefined' && CloudSave && typeof CloudSave.health === 'function') ? CloudSave.health() : null;
+      return h && h.conflict ? h.conflict : null;
+    } catch (_) { return null; }
+  }
+
+  // The words follow the save notice (stationui.js refreshSaveDurability) and name ITS buttons, the only ways out.
+  function conflictRefusal(c) {
+    if (c.reset === true) {
+      return 'This computer’s station was reset after the station in this window was founded, so this window’s changes were kept separately on the station, not saved to the station file. The update was not installed. In the save notice at the top, press Download this window’s save to keep a copy, then Open the fresh station, and install the update.';
+    }
+    // erased work: this window's copy is from before this computer's station was reset and the station is from after it.
+    // The notice shows NO Restore key for it (the station refuses that restore), so the card never names one
+    if (c.predatesReset === true) {
+      return 'This window holds a station from before this computer’s station was reset, so its changes were not saved into the current station; this window’s copy is kept separately on the station. The update was not installed. In the save notice at the top, press Download this window’s save to keep a copy, then Reload current station, and install the update.';
+    }
+    return 'Your latest station changes conflict with the station file, so they were not saved to it; this window’s copy is kept separately on the station. The update was not installed. In the save notice at the top, ' +
+      (c.recovery ? 'press Restore this window’s sessions (or Reload current station), then install the update.'
+        : 'press Download this window’s save to keep a copy, then Reload current station, and install the update.');
+  }
+  // the notice is drawn when the save dot refreshes; a conflict latched by this very drain may not have drawn it yet
+  function raiseConflictNotice() {
+    try { if (typeof StationUI !== 'undefined' && StationUI && typeof StationUI.refreshSave === 'function') StationUI.refreshSave(); } catch (_) {}
   }
 
   function browserStoreSnapshot() {
@@ -348,12 +377,16 @@ const Updates = (() => {
     const drained = await preInstallDrain();
     if (!drained.ok) {
       state.phase = 'available';
+      const conflict = drained.saveConfirmed === false ? drained.conflict : null;
       // #121: name the save when it is the save that was not proven — the user's newest edits are the thing at risk
-      state.error = drained.saveConfirmed === false
+      state.error = conflict ? conflictRefusal(conflict)
+        : drained.saveConfirmed === false
         ? 'Your latest station changes are not confirmed in the station file yet, so the update was not installed. StarNet stays open; try again in a moment.'
         : 'State could not be verified on disk. The update was not installed; your current StarNet remains open.';
       busy = false;
-      notify(drained.saveConfirmed === false ? 'Update paused - latest station changes are not confirmed in the station file' : 'Update paused - state verification failed', 'warn');
+      if (conflict) raiseConflictNotice();
+      notify(conflict ? 'Update paused - this window’s changes conflict with the station file (see the save notice at the top)'
+        : drained.saveConfirmed === false ? 'Update paused - latest station changes are not confirmed in the station file' : 'Update paused - state verification failed', 'warn');
       emit();
       return snapshot();
     }

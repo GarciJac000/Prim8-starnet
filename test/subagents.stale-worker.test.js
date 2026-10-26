@@ -87,6 +87,31 @@ const counter = (p) => { let n = 0; return () => (p || 'id_') + (++n); };
     A.eq(inTool.map(s => s.id), [t.id], 'a tool call silent for 1200s stalls the worker');
     A.ok(/while a tool call was still running/.test(mgr.get(t.id).reason), 'the reason says it was stuck inside a tool: ' + mgr.get(t.id).reason);
 
+    // ---- a call HELD by the run's spend pool stops the stall clock (bug d3a76db3, review of 8f4267c08) ----
+    // A held worker emits nothing while its call waits for room under the shared PER RUN cap; the runner reports the
+    // hold through its handle (orchestration.js watchedPool). The held stretch is neither progress nor silence.
+    {
+      const s = mgr.start({ leadId: 'agent', agentId: 'clone', prompt: 'waits its turn' }, hang('s'));
+      await tick();
+      A.eq(typeof held.s.holdStall, 'function', 'the runner handle can report a spend-pool hold');
+      T += 100000;                    // 100s of real quiet before the call reached the pool
+      held.s.holdStall();
+      T += 10000000;                  // then held for 10,000s behind a fellow's long call
+      A.eq(mgr.checkStalls(), [], 'a worker whose call is held is never stopped as stalled, however long the hold');
+      held.s.holdStall(); held.s.releaseStall();
+      A.eq(mgr.checkStalls(), [], 'holds nest: one release of two leaves it held');
+      held.s.releaseStall();
+      A.eq(mgr.checkStalls(), [], 'released: the 100s before the hold still count, the 10,000s held do not');
+      T += 349999;
+      A.eq(mgr.checkStalls(), [], '449.999s of quiet outside the hold is not a stall');
+      held.s.releaseStall();          // an extra release is a no-op (never a negative hold)
+      T += 1;
+      A.eq(mgr.checkStalls().map(x => x.id), [s.id], 'then 450s of quiet outside the hold stalls it, as before');
+      A.eq(mgr.get(s.id).stalledAfterMs, 450000, 'the quiet it reports excludes the held stretch');
+      held.s.holdStall();
+      A.eq(mgr.get(s.id).status, 'stale', 'a hold reported after the verdict changes nothing');
+    }
+
     // ---- the aborted run settling late never rewrites the stale verdict ----
     {
       let finish;

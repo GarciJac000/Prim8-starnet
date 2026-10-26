@@ -109,6 +109,8 @@ async function collect(provider, req) { const out = []; for await (const e of pr
     const models = await p.listModels();
     A.eq(models[0].id, 'gemini-x', 'models/ prefix stripped for UI');
     A.eq(p.contextLimit('gemini-x'), 1000, 'context limit from inputTokenLimit');
+    A.eq(p.outputLimit('gemini-x'), 200, 'output limit from outputTokenLimit (bug d3a76db3: what a call can bill)');
+    A.eq(p.outputLimit('gemini-unknown'), 0, 'an unknown model has no output limit (0)');
     A.eq(_internals.modelPath('gemini-x'), 'models/gemini-x', 'modelPath restores models/ prefix');
     // GitHub #98: the routed id 'google/gemini-2.5-flash' (the OpenRouter spelling a station keeps after switching to the
     // native GEMINI provider) names the native model, never a 'google/…' resource path Google answers 404 for

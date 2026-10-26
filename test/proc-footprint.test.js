@@ -112,6 +112,25 @@ const path = require('node:path');
   assert.equal(F.phaseValidity({ hz: 239 }, { ...ok, vsyncMs: 1000 / 239.76 }).valid, true, 'the integer Hz Windows reports is within 3%');
   assert.equal(F.phaseValidity({ visibility: 'hidden' }, ok).valid, false, 'a minimized phase must read hidden');
   assert.equal(F.phaseValidity({ camera: 'manual' }, { ...ok, cameraMode: 'auto' }).valid, false, 'the cinecam drifted the pinned camera');
+  // 7b. THE STILL PACE (world.js, 2026-10-21) books rAF from a timer ~30x a second: the passive probe reads the TIMER's gaps
+  // (33.3 ms on 60 Hz, 34.7 on 144, 33.4 on 239.76), never the panel's. Such an observation says why, and is not hz-checked —
+  // reported in `skipped`, never silent. One that does not say why is still judged (a 30 Hz reading on a 60 Hz pass is INVALID).
+  const stillObs = { ...ok, vsyncMs: 1000 / 30, hzExempt: 'the still pace is timer-booked' };
+  const sv = F.phaseValidity({ focus: 'focused', hz: 60 }, [stillObs, { ...stillObs, vsyncMs: 1000 / 28.8 }]);
+  assert.equal(sv.valid, true, 'a still-pace observation is not judged on the probe\'s timer-gap Hz');
+  assert.deepEqual(sv.skipped, ['hz not checked: the still pace is timer-booked'], '...and the skip is reported');
+  assert.equal(F.phaseValidity({ hz: 60 }, { ...ok, vsyncMs: 1000 / 30 }).valid, false, 'a 30 Hz reading without a reason stays INVALID');
+  assert.equal(F.phaseValidity({ hz: 60 }, [stillObs, { ...ok, vsyncMs: 1000 / 144 }]).valid, false, 'an exempt observation never excuses the other one');
+  // the still pace's draw rate: the timer fires 2 ms early, the draw lands on the first vsync at/past pace - 2
+  assert.equal(F.expectedDraws(1000 / 30, 1000 / 60, 'still'), 30, 'still on 60 Hz: 30 draws/s');
+  assert.equal(F.expectedDraws(1000 / 30, 1000 / 144, 'still'), 28.8, 'still on 144 Hz: 28.8 draws/s (5 vsyncs)');
+  assert.equal(F.expectedDraws(1000 / 30, 1000 / 239.76, 'still'), 30, 'still on 239.76 Hz: 30.0 draws/s (8 vsyncs)');
+  assert.equal(F.expectedDraws(1000 / 30, 0, 'still'), 30, 'still with no vsync known: 1000 / pace');
+  assert.equal(F.expectedDraws(1000 / 60, 1000 / 144), 72, 'the visible pace keeps its half-vsync rule (60 on 144 Hz rounds to every 2nd vsync)');
+  // a window's still share and what kept it moving, from renderPace's cumulative counters
+  const sw = F.stillWindow({ draws: 100, stillFrames: 40, stillWhyCounts: { body: 10 } }, { draws: 400, stillFrames: 280, stillWhyCounts: { body: 50, sky: 20 } });
+  assert.deepEqual(sw, { share: 0.8, draws: 300, why: { body: 40, sky: 20 } }, '240 of 300 draws still; the rest were a body (40) and the sky (20)');
+  assert.equal(F.stillWindow({ draws: 5 }, { draws: 9 }), null, 'a world without the counters reports no still window');
 
   // 8. the verdict rule
   assert.equal(F.verdict([10, 11, 12], [5, 6, 7]).verdict, 'IMPROVED');
@@ -152,6 +171,12 @@ const path = require('node:path');
   assert.ok(bench.includes('hermeticEnv(') && !/\.\.\.process\.env/.test(bench), 'the bench sidecar env is hermetic (never spreads process.env)');
   assert.ok(!/taskkill[^\n]*\/IM/i.test(bench) && !/Stop-Process\s+-Name/i.test(bench), 'teardown is by recorded pid, never by image name');
   assert.ok(!/getImageData|captureScreenshot/.test(bench), 'no screenshot or getImageData inside the bench');
+  // 13. the bench can prove the still tier: a still observation is hz-exempt (with its reason), every row carries its still
+  // window, and a still AB slice is expected from the world's vsync on the timer rule
+  assert.ok(/hzExempt: s\.pace\.mode === 'still' \?/.test(bench), 'an observation taken at the still pace says why its Hz cannot be read');
+  assert.ok(/still: F\.stillWindow\(/.test(bench), 'every measured window records its still share and what kept it moving');
+  assert.ok(/F\.expectedDraws\(pace, mode === 'still' \? \(row\.worldVsyncHz/.test(bench), "a still AB slice is expected from the world's own vsync");
+  assert.ok(/checksSkipped: v\.skipped/.test(bench), 'a skipped check is reported on the row');
 
   console.log('proc-footprint: tree walk from the app pid (no foreign webview, pid reuse refused), roles, EBWebView identity, GPU% per adapter+type, contention, phase labels, verdict, hermetic env, sampler/bench locks — OK');
 })().catch(e => { console.error(e); process.exitCode = 1; });

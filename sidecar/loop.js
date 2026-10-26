@@ -37,6 +37,13 @@
     || ((s) => ({ text: repairToolCallArguments(s), closedOpenString: false }));
   // API error classification (L3): makes `transient` on agent.run.error honest. Degrades to non-retryable if absent.
   const classifyApiError = (errorClass && errorClass.classifyApiError) || (() => ({ retryable: false, message: '' }));
+  // the transport code a failed outbound call carries (ECONNREFUSED / ENOTFOUND …); '' when none
+  const transportCodeOf = (errorClass && errorClass._internals && errorClass._internals.transportCode)
+    || (err => (err && (err.code || err.errno || (err.cause && err.cause.code))) || '');
+  // bug 8873fd77: a refused or unresolvable endpoint (nothing listening — Ollama not started — or no network) retries in
+  // the 'timeout' class, but the retry line must not send the Commander looking at a slow provider: it says unreachable
+  const retryReasonOf = (reason, err) => (reason === 'timeout' && /ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i.test(String(transportCodeOf(err) || '')))
+    ? 'unreachable' : String(reason || 'transient');
   const continuation = outputContinuation || {
     maxFor: () => 0, shouldContinue: () => false, prompt: () => '',
     novelText: (_before, after) => ({ text: String(after == null ? '' : after), removed: 0 }),
@@ -974,6 +981,11 @@
     const approxTokens = o.approxTokens || 0;   // initial rough estimate; feeds the error classifier's overflow ratio
     let contextLimit = o.contextLimit || 0;     // 0 = unknown (cold catalog) -> the ratio heuristic is skipped;
                                                 // re-resolved on a provider fallback (see the fallback branch)
+    // The window the next call's PRICE may lean on (nextCallUsd): only one a provider reported for the CURRENT model —
+    // never the context manager's cold guess (index.js sizes it to 131072 when nothing reported a window), and never a
+    // window kept from the model a fallback left (contextLimit keeps that one: stale beats none for folding, not for
+    // pricing). Lowered by a provider-named window like contextLimit.
+    let callWindow = contextLimit;
     // OPTIONAL cross-run cost governor (sidecar/budget.js): consulted in the guards each turn; null = ungoverned
     // (every existing caller/test, byte-identical). The per-RUN ceiling stays maxCostUsd below.
     const budget = o.budget;
@@ -1309,6 +1321,13 @@
        aborted (its phase, how long it had lasted on the injected clock, the adapter's note) is kept here and returned as
        `cancelledWhile`, for the run record. A wait the Commander had already seen output in (paused) is not recorded. */
     let abortedWait = null;
+    /* A STOP THAT CUT A MODEL CALL OFF MID-STREAM (bug 80de2a75). The provider bills a call from its first streamed byte,
+       but the call's full usage arrives only as the stream ends, so a cancel that cut an attempt off after it began
+       streaming leaves that call booked short (nothing, or Anthropic's message_start input only). Returned as
+       `streamCut` on a cancelled result, so the run record says its spend is a floor (or unknown), never a known
+       figure. A cancel before the first byte, between calls, or after a stream had closed does not set it, nor does
+       a cut call its adapter said bills nothing per call ({ type:'billing', perCall:false }: a subscription sign-in). */
+    let streamCut = false;
     function waitClock() {
       try { const t = Number(clock.now()); return isFinite(t) ? t : 0; }
       catch (e) { failNote('loop.wait.clock', e); return 0; }
@@ -1486,6 +1505,10 @@
       if (reason === 'budget' && (bs === 'run' || bs === 'agent' || bs === 'day' || bs === 'global')) {
         endPayload.budgetScope = bs;
         if (typeof extra.budgetCapUsd === 'number' && isFinite(extra.budgetCapUsd)) endPayload.budgetCapUsd = extra.budgetCapUsd;
+        // PROJECTED (additive, present only when true): the run family's spend pool stopped this run BEFORE the cap,
+        // because calls still in flight already take what is left — every stop line says "before it would pass the $X
+        // cap", never "hit" a cap that was not reached (bug d3a76db3 review)
+        if (extra.budgetProjected === true) endPayload.budgetProjected = true;
         // the UNPRICED-token ceiling: name the model the seatbelt could not price so the stop is legible
         // ("hit the 2,000,000-token ceiling for unpriced model X") instead of a $-cap with no dollar figure.
         if (extra.unpricedModel) {
@@ -1506,7 +1529,7 @@
       const terminalText = tail && tail.role === 'assistant' && !tail.tool_calls ? String(tail.content == null ? '' : tail.content) : '';
       const out = { reason, messages, text: terminalText, usd: spentUsd, turns, tokens: spentTokens, cachedTokens: spentCachedTokens, model, unpricedUsage: unpricedUsage.slice() };
       if (cut) out.finishReason = cut;
-      if (endPayload.budgetScope) { out.budgetScope = endPayload.budgetScope; if (endPayload.budgetCapUsd != null) out.budgetCapUsd = endPayload.budgetCapUsd; }
+      if (endPayload.budgetScope) { out.budgetScope = endPayload.budgetScope; if (endPayload.budgetCapUsd != null) out.budgetCapUsd = endPayload.budgetCapUsd; if (endPayload.budgetProjected) out.budgetProjected = true; }
       if (endPayload.unpricedModel) {
         out.unpricedModel = endPayload.unpricedModel; out.unpricedTokens = endPayload.unpricedTokens; out.unpricedCapTokens = endPayload.unpricedCapTokens;
         out.budgetNote = 'stopped: ' + endPayload.unpricedTokens.toLocaleString('en-US') + ' tokens on unpriced model ' + endPayload.unpricedModel + ' reached the ' + endPayload.unpricedCapTokens.toLocaleString('en-US') + '-token ceiling (no published rate - SETTINGS > APP & BACKUP > Runtime limits > UNPRICED MODEL TOKEN CEILING, or STARNET_MAX_UNPRICED_TOKENS, or a price in SKYNET_MODEL_PRICES)';
@@ -1516,8 +1539,10 @@
         out.budgetNote = 'stopped: ' + endPayload.subscriptionTokens.toLocaleString('en-US') + ' subscription tokens on ' + endPayload.subscriptionModel + ' (cache re-reads count 1/10) reached the ' + endPayload.subscriptionCapTokens.toLocaleString('en-US') + '-token per-run ceiling (SETTINGS > APP & BACKUP > Runtime limits, or STARNET_MAX_SUBSCRIPTION_TOKENS)';
       }
       if (reason === 'cancelled' && abortedWait) out.cancelledWhile = Object.assign({}, abortedWait);   // #99: what the cancel interrupted
+      if (reason === 'cancelled' && streamCut) out.streamCut = true;   // 80de2a75: a call's usage never arrived (see streamCut)
       if (extra && extra.failureStage) out.failureStage = String(extra.failureStage).slice(0, 80);
       if (extra && extra.failureCode) out.failureCode = String(extra.failureCode).slice(0, 80);
+      if (extra && extra.failureUnsupportedPart === true) out.failureUnsupportedPart = true;
       if (accUsed > 0) out.acceptanceNudges = accUsed;   // SOP: how many times the host sent the model back to its checks
       return out;
     }
@@ -1633,6 +1658,7 @@
       const n = Math.floor(Number(limit) || 0);
       if (!(n > 0)) return;
       if (!contextLimit || n < contextLimit) contextLimit = n;
+      if (!callWindow || n < callWindow) callWindow = n;
       if (context && typeof context.setContextLimit === 'function') {
         const cur = Number(context.contextLimit) || 0;
         if (!cur || n < cur) { try { context.setContextLimit(n); } catch (e) { failNote('loop.compaction.adoptWindow', e); } }
@@ -1803,6 +1829,56 @@
       return true;
     }
 
+    /* THE MOST OUTPUT ONE CALL CAN BILL, when anything says (bug d3a76db3, review of 32fc352e4): the lowest of the
+       provider's own ceiling for this model (provider.outputLimit: the catalog's max output, or the max_tokens the
+       adapter sends — anthropic always sends one) and an output ceiling a provider named after a refusal (it rides
+       the request as req.maxTokens). 0 = nothing says. */
+    function outputCeilingTokens() {
+      let n = outputCapTokens > 0 ? outputCapTokens : 0;
+      if (provider && typeof provider.outputLimit === 'function') {
+        try {
+          const v = Math.floor(Number(provider.outputLimit(model)) || 0);
+          if (v > 0) n = n > 0 ? Math.min(n, v) : v;
+        } catch (e) { failNote('loop.budget.outputLimit', e); }
+      }
+      return n;
+    }
+    /* THE MOST THE NEXT CALL CAN COST, before it goes out (bug d3a76db3, reviews of a1234b154 and 32fc352e4). The
+       prompt this boundary would send — the local ruler (messages + tool schemas), the run-start estimate as its floor —
+       at the current model's catalog INPUT price, cache-blind (a cache read bills less), plus the most output the call
+       can bill at its catalog OUTPUT price: the output ceiling (outputCeilingTokens) or every token the window leaves
+       room for, whichever is lower. The window is only one a provider REPORTED for this model (callWindow), never the
+       context manager's cold 131072 guess: under a guess, a 400k-window model with a 128k output was reserved below
+       what it bills. Nothing known about either — a window nobody reported and no output ceiling (the OpenAI API's
+       /models publishes neither) — reads $0, and so does a model nothing prices: no price. A model its catalog prices at a
+       KNOWN $0 (an OpenRouter :free row, { in: 0, out: 0 }) is not "no price": it reads a token $0.000000001, so the pool
+       reserves it as a call about $0 and other members' calls go out beside it (counted as a call, a free team took turns,
+       one call at a time, with nothing on screen saying why). The run's shared spend pool
+       (run-spend-pool.js) RESERVES this for the call while it is in flight, so calls that go out together pass the
+       cap by less than the call sent last; a call with no price is counted as a call instead, and nothing goes out
+       beside it. What this cannot cover: a prompt-cache WRITE premium (up to 1.25x input), and a prompt the provider
+       counts above the ruler when the output ceiling, not the window, is the bound. Handed over as a function: only a
+       pool with workers ever asks. */
+    const KNOWN_FREE_CALL_USD = 1e-9;   // a known-$0 call's price: priced (reserved), never "no price"
+    function knownFreeModel() {
+      const zero = x => x != null && x !== '' && Number(x) === 0;
+      const p = (provider && typeof provider.priceOf === 'function') ? provider.priceOf(model) : null;
+      return !!p && zero(p.in != null ? p.in : p.prompt) && zero(p.out != null ? p.out : p.completion);
+    }
+    function nextCallUsd() {
+      if (!cost || typeof cost.estimate !== 'function') return 0;
+      try {
+        const promptTokens = Math.max(rulerTokens(messages), approxTokens);
+        const room = callWindow > 0 ? Math.max(0, callWindow - promptTokens) : null;   // null = no window reported
+        const ceiling = outputCeilingTokens();
+        // nothing bounds the output: no price, counted as a call — unless the catalog prices the model at a known $0
+        if (room === null && !(ceiling > 0)) return knownFreeModel() ? KNOWN_FREE_CALL_USD : 0;
+        const outTokens = room === null ? ceiling : (ceiling > 0 ? Math.min(room, ceiling) : room);
+        const r = cost.estimate({ prompt_tokens: promptTokens, completion_tokens: outTokens }, model);
+        const v = r ? Number(r.usd) : 0;
+        return (isFinite(v) && v > 0) ? v : (knownFreeModel() ? KNOWN_FREE_CALL_USD : 0);
+      } catch (e) { failNote('loop.budget.nextCallUsd', e); return 0; }
+    }
     emit('agent.run.start', { agentId, runId, trigger, model });
     // Reconcile each attempt before enforcing the same spending limits again. Retries and
     // post-compaction calls are paid work too, even when the turn counter does not advance.
@@ -1819,7 +1895,8 @@
       // CROSS-RUN BUDGET: day/global pool over the ledger. check() emits any threshold crossing itself and
       // returns a block descriptor when a soft cap is reached (no resume headroom left) -> stop as 'budget'.
       if (budget) {
-        const b = budget.check(spentUsd);
+        const b = budget.check(spentUsd, nextCallUsd);
+        if (b && b.hold) return b;   // the run's spend pool holds this call: forSpend() waits, then asks again
         if (b && b.unknown) {
           // name the fix that works for THIS cause: a restart replays a failed save, but never settles an interrupted run
           const message = b.cause === 'unsettled'
@@ -1832,9 +1909,29 @@
           emit('agent.run.error', { agentId, runId, message, transient: false });
           return end('error', { failureStage: 'budget', failureCode: 'spend_history_unavailable' });
         }
-        if (b) return end('budget', { budgetScope: b.scope, budgetCapUsd: b.cap });
+        // projected: a check that stops a call BEFORE its cap was reached says so, and the stop line must not say the cap
+        // was hit (bug d3a76db3 review). The run's spend pool (run-spend-pool.js) never does: it HOLDS such a call instead
+        if (b) return end('budget', { budgetScope: b.scope, budgetCapUsd: b.cap, budgetProjected: b.projected === true });
       }
       return null;
+    }
+    /* A HELD CALL WAITS FOR ROOM (bug d3a76db3, reviews of 9d4fc52b5 and a1234b154). The run's spend pool holds a call
+       ({ hold: Promise }) while the calls its family has in flight, each reserved at the most it can cost, leave no room
+       for it under the shared cap (or one of them has no price at all). It waits until a call in flight settles on
+       what it really cost, and the check runs again. A hold never outlasts a stop: it ends the moment the signal aborts. */
+    async function forSpend(s) {
+      while (s && s.hold) {
+        await new Promise(resolve => {
+          if (signal.aborted) return resolve();
+          const canHear = typeof signal.addEventListener === 'function';
+          const done = () => { if (canHear) signal.removeEventListener('abort', done); resolve(); };
+          if (canHear) signal.addEventListener('abort', done, { once: true });
+          Promise.resolve(s.hold).then(done, done);
+        });
+        if (signal.aborted) return end('cancelled');
+        s = stopForSpend();
+      }
+      return s;
     }
 
     // Admission may have promoted a Commander-configured fallback because the selected primary is definitively
@@ -1859,7 +1956,8 @@
         // fall through: the grace turn runs below. Tools stay ON THE WIRE (see GRACE TURN NEVER DISPATCHES after
         // the stream) — but any call it emits is dropped, never executed, and the run ends max_iters.
       }
-      const spendStop = stopForSpend();
+      let spendStop = stopForSpend();
+      if (spendStop && spendStop.hold) spendStop = await forSpend(spendStop);
       if (spendStop) return spendStop;
       // COMPUTE GATE: a model turn needs a compute capability (a computer in the room).
       if (capCtx && typeof capCtx.canRun === 'function' && !capCtx.canRun()) {
@@ -1932,13 +2030,16 @@
       while (true) {
         bookUsage(usage, usageModel);   // a re-entry after retry/compress/fallback: book the partial attempt BEFORE the reset
         if (signal.aborted) return end('cancelled');
-        const attemptSpendStop = stopForSpend();
+        let attemptSpendStop = stopForSpend();
+        if (attemptSpendStop && attemptSpendStop.hold) attemptSpendStop = await forSpend(attemptSpendStop);
         if (attemptSpendStop) return attemptSpendStop;
         acc.text = ''; acc.toolCalls = {}; acc.reasoning = []; streamedTextChunks = []; usage = null; lastFinishReason = null;
         usageModel = model;
         let streamErr = null;
         let sawTruncation = false;
         let sawStreamEvent = false;   // any event from this attempt's stream: provider.retry `stage` + the waiting phase
+        let streamClosed = false;     // the provider's stream ran to its own end (not cut off by a cancel)
+        let billedPerCall = true;     // false once the adapter says this call bills nothing per call (a subscription sign-in)
         /* The wait this attempt opens ends at the first visible output (a streamed token) or when the attempt
            settles. A retried attempt announces itself with an immediate sinceMs:0 beat, so a "retry in 30s"
            line is replaced the moment the retry actually goes out instead of lingering until the next tick. */
@@ -1955,6 +2056,7 @@
           for await (const ev of provider.stream(req)) {
             if (signal.aborted) break;
             if (ev.type === 'waiting') { waiting.note(ev.phase, ev.note); continue; }   // the adapter's wait facts, not stream output (#99)
+            if (ev.type === 'billing') { if (ev.perCall === false) billedPerCall = false; continue; }   // the adapter's billing fact for this call, not stream output (80de2a75)
             if (!sawStreamEvent) { sawStreamEvent = true; waiting.phase('streaming'); }
             if (ev.type === 'text') {
               const delta = String(ev.delta == null ? '' : ev.delta);
@@ -1981,8 +2083,11 @@
             else if (ev.type === 'done') { lastFinishReason = ev.finishReason; sawTruncation = !!ev.truncated; }   // A3: remember WHY the turn stopped
             // 'tool_done' needs no action here
           }
+          streamClosed = !signal.aborted;
         } catch (e) { streamErr = e; }
         finally { waiting.stop(); }
+        // a call that bills nothing per call (claude-cli on a subscription sign-in) cost nothing when cut: never a floor
+        if (signal.aborted && sawStreamEvent && !streamClosed && billedPerCall) streamCut = true;
         if (!streamErr) {
           // TRUNCATED STREAM (truthful-telemetry law). The response body ended CLEANLY mid-generation: the
           // adapter observed neither its protocol's end-of-stream sentinel nor a finish_reason. There is no
@@ -2118,8 +2223,10 @@
                overflow ratio (contextLimit below) had the same stale denominator. Only a KNOWN (>0) limit
                applies — a cold catalog on the new provider keeps the old number (stale beats none), matching
                setContextLimit's own guard. */
+            callWindow = 0;   // the next call's price never leans on the window of the model we left
             if (typeof provider.contextLimit === 'function') {
               const nl = Number(provider.contextLimit(model)) || 0;
+              callWindow = nl;
               if (nl > 0) {
                 contextLimit = nl;
                 if (context && typeof context.setContextLimit === 'function') context.setContextLimit(nl);
@@ -2163,7 +2270,7 @@
           // policy shrank it to fit), it is the last local rung, so the total is n. (A server-stated Retry-After is
           // honored outside the budget and is not predictable here, so it keeps the rung count.)
           const patienceSpent = decision.ladderMs > 0 && ladderWaitMs >= STREAM_RETRY_PATIENCE_MS;
-          emitRetry({ attempt: retriesUsed, reason: String(decision.reason || 'transient'), delayMs: decision.delayMs, maxAttempts: patienceSpent ? Math.min(retriesUsed, MAX_STREAM_RETRIES) : MAX_STREAM_RETRIES,
+          emitRetry({ attempt: retriesUsed, reason: retryReasonOf(decision.reason, streamErr), delayMs: decision.delayMs, maxAttempts: patienceSpent ? Math.min(retriesUsed, MAX_STREAM_RETRIES) : MAX_STREAM_RETRIES,
             stage: sawStreamEvent ? 'mid_stream' : 'pre_stream', retryAfterMs: cls.retryAfterMs, waitedMs: waitedBefore, patienceMs: STREAM_RETRY_PATIENCE_MS });
           if (sleep) { const backoff = startWaiting('retry_backoff', false); try { await sleep(decision.delayMs); } catch (_) {} backoff.stop(); }
           if (signal.aborted) break;   // a cancel during the backoff ends cleanly below
@@ -2209,7 +2316,9 @@
             + '\n\n[response interrupted — ' + (fatal.reason ? 'provider error: ' + String(fatal.reason).slice(0, 60) : 'provider stream failed') + '; this answer is incomplete]';
         }
         emit('agent.run.error', { agentId, runId, message: fatal.message || 'model call failed', transient: !!fatal.retryable });
-        return end('error', { failureStage: 'provider_stream', failureCode: fatal.reason || 'provider_failure' });
+        // failureUnsupportedPart: the model refused a PART of this request (image input, tool use), not the request —
+        // the classifier's own fact, carried so the run-end failure review knows a plain text request still reaches it
+        return end('error', { failureStage: 'provider_stream', failureCode: fatal.reason || 'provider_failure', failureUnsupportedPart: fatal.reason === 'model_not_found' && fatal.unsupportedPart === true });
       }
 
       // cancellation mid-stream: keep partial text, then stop. A continuation call buffered its opening bytes for

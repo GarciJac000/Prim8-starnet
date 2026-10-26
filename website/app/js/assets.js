@@ -578,7 +578,7 @@ const SPRITES = (() => {
        an attempt to reuse it on demand (reaching for a prop, working an arcade cabinet, waving)
        was removed 2026-08-08 because a stretch played at those moments reads as a glitch. New
        meanings need new frames, not this one re-labelled. */
-    let fixedIdx = null;
+    let fixedIdx = null, clockNext = Infinity;   // clockNext: the next time this body's drawn frame changes on the clock alone (see _renderNextAt)
     if (!reduced && key && key.indexOf('.rot.') !== -1 && b.state !== 'walk'
         && !b.working && !b.sitting && !b.speaking && !meeting && !glancing) {
       // EXACT direction only — never fall back to another facing. Most sets ship the stretch
@@ -601,7 +601,8 @@ const SPRITES = (() => {
         if (gt < gdur) {
           key = gk; fixedIdx = Math.min(glen - 1, Math.floor(gt / (1000 / GFPS)));
           bob = 0;   // the frames carry the motion; bobbing on top reads as jitter
-        }
+          clockNext = nowMs + (1000 / GFPS) - (gt % (1000 / GFPS));   // the stretch's next frame (or its end)
+        } else clockNext = nowMs + (GESTURE_PERIOD - gt);           // the next stretch begins
       }
     }
 
@@ -614,6 +615,7 @@ const SPRITES = (() => {
       if (frames[bk]) {
         const bt = (nowMs + aph * 900) % 3300;
         if (bt < 130) key = bk;
+        clockNext = Math.min(clockNext, nowMs + (bt < 130 ? 130 - bt : 3300 - bt));   // the eyes open / next shut
       }
     }
     if (!key) return null;
@@ -650,6 +652,14 @@ const SPRITES = (() => {
         ? Math.floor(b.odo / stride + aph)
         : Math.floor(nowMs / (1000 / fps) + aph);
     b._renderFrame = fr.length > 1 ? ((idx % fr.length) + fr.length) % fr.length : 0;
+    // STILL PACER readout (world.js, 2026-10-21): when this body's drawn frame next changes on the CLOCK alone — the next frame
+    // of a clock-driven track (sit, type, talk, a meeting), a blink edge, a stretch — so a still floor draws that vsync instead
+    // of up to 33 ms later. Walk and pivot frames follow distance and angle, and read as motion there already. Never drawn from.
+    if (fixedIdx == null && !turnStep && fr.length > 1 && !(key.indexOf('.walk.') !== -1 && b.odo != null && stride > 0)) {
+      const q = nowMs / (1000 / fps) + aph;
+      clockNext = Math.min(clockNext, nowMs + (Math.floor(q) + 1 - q) * (1000 / fps));
+    }
+    b._renderNextAt = clockNext;
     const f = fr.length > 1 ? fr[((idx % fr.length) + fr.length) % fr.length] : fr[0];
     // WALK IN-BETWEENS (2026-09-22, Andrew: "smooth out the walking frames"). An eight-drawing cycle
     // cut from one drawing to the next 14-26 times a second, and every cut read as a visible step.
@@ -716,6 +726,16 @@ const SPRITES = (() => {
     const speech=planted&&!reduced?(b._speechEase||0)*accent:0;
     b._renderSpeechAccent=speech;
     const breath = planted && !reduced ? Math.sin(nowMs / 1050 + aph) * 0.12 - speech*.18 : 0;
+    // STILL PACER readouts (world.js, 2026-10-21), never drawn from. _renderLive: this body's drawn geometry moves on the clock
+    // between frames — the idle bob (a standing body that is not planted, a glance; snapped to whole device px, and the shadow
+    // under it lifts) or the speech accent while its ease can still show it (the accent rests flat between its lobes and rises
+    // again on the clock, so it is judged by the ease, its ceiling: past 0.001, ~1.2 s after the line, the skew is under 0.002
+    // device px at MAXZ). A body that moves is never drawn at the still pace. _renderDrift: the planted breath (and the accent's
+    // dying tail) — a sub-pixel swell of the smooth-sampled drawn height, under 0.004 x zoom device px between two still
+    // frames, which every still frame draws at its true phase, so it is not motion (review 10-21, option b); an overlay that
+    // rounds to whole px over its head (a bubble, a nameplate) still is, and world.js reads this flag for that.
+    b._renderLive = bob !== 0 || (planted && !reduced && (b._speechEase || 0) > 1e-3);
+    b._renderDrift = breath !== 0 || speech !== 0;
     const breathScale = 1 + breath / Math.max(12, dh - pad);
     const drawHeight = dh * breathScale;
     const y = planted ? snap(b.py + GROUND_BITE - seatLift) - (dh - pad) * breathScale

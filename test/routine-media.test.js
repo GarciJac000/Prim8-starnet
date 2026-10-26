@@ -23,8 +23,18 @@ const { MAX_FILES } = require('../sidecar/tools/builtin/comms.js');
     A.eq(p1.files, ['charts/today.png'], 'and its path is collected');
 
     const p2 = M.parseReply('Two views:\r\n- attach: `a/one.png`\r\n* MEDIA: "b/two.jpg"\r\nATTACH: a/one.png\r\nEnd.');
-    A.eq(p2.files, ['a/one.png', 'b/two.jpg'], 'bullets, quotes, backticks, MEDIA: and any case are read; duplicates collapse');
+    A.eq(p2.files, ['a/one.png', 'b/two.jpg'], 'bullets, quotes, backticks, MEDIA: and a lowercase word with a quoted path are read; duplicates collapse');
     A.eq(p2.text, 'Two views:\nEnd.', 'all instruction lines are gone, the prose remains');
+
+    // upgrade review 2026-10-23: digests written long before ATTACH existed carry these as PROSE
+    const prose = 'Morning brief\n- Media: TV coverage was strong\nAttach: invoice before replying\nMEDIA: CNN, BBC and Reuters\n'
+      + 'Attach: invoice.pdf\n* media: photos.zip\nMEDIA: https://example.com/a.png\nATTACH: see the chart\nDone.';
+    const p5 = M.parseReply(prose);
+    A.eq(p5.files, [], 'prose "Media:" / "Attach:" lines name no files');
+    A.eq(p5.text, prose, 'and the reply is delivered byte-identical, every line kept');
+    const p6 = M.parseReply('Report\n- MEDIA: reports/q3 summary.pdf\nATTACH: `reports/q3 summary.pdf`');
+    A.eq(p6.files, ['reports/q3 summary.pdf'], 'a path with a space is read only when quoted');
+    A.eq(p6.text, 'Report\n- MEDIA: reports/q3 summary.pdf', 'the unquoted line stays as words');
 
     const p3 = M.parseReply('Mention of ATTACH: in a sentence stays: see ATTACH: x.png inline');
     A.eq(p3.files, [], 'ATTACH inside a sentence is prose, not an instruction');
@@ -32,6 +42,44 @@ const { MAX_FILES } = require('../sidecar/tools/builtin/comms.js');
     const p4 = M.parseReply('ATTACH: only.png');
     A.eq(p4.text, '', 'a reply that is only an ATTACH line leaves no words');
     A.eq(p4.files, ['only.png'], 'but still names the file');
+
+    // review 2026-10-23: uppercase field labels in a digest ("MEDIA: N/A") look like instructions. The host strips
+    // ONLY the lines whose file it really read (readNamed) — every other line stays as the routine wrote it.
+    const digest = 'Head\r\nMEDIA: N/A\r\n- MEDIA: TV/radio\r\nMEDIA: Reuters.com\r\nMEDIA: 2.1K\r\nATTACH: charts/today.png\r\nTail';
+    const cand = M.parseReply(digest);
+    A.eq(cand.files, ['N/A', 'TV/radio', 'Reuters.com', '2.1K', 'charts/today.png'], 'path-shaped values are only CANDIDATES');
+    A.eq(M.parseReply(digest, []).text, digest, 'none of them read -> the reply is delivered byte for byte');
+    A.eq(M.parseReply(digest, []).files, cand.files, 'the candidates are still listed');
+    A.eq(M.parseReply(digest, ['charts/today.png']).text, 'Head\nMEDIA: N/A\n- MEDIA: TV/radio\nMEDIA: Reuters.com\nMEDIA: 2.1K\nTail', 'only the line whose file was read is removed');
+    A.eq(M.parseReply('A\nATTACH: x.png\nB\nATTACH: x.png', ['x.png']).text, 'A\nB', 'every line naming a read file is removed');
+  }
+
+  // ---- readNamed: a named path is an instruction only when the file is really on the station ------------------
+  {
+    const disk = { 'agent:charts/today.png': Buffer.from('PNG1'), 'writer:out/b.png': Buffer.from('PNG2') };
+    const reads = [];
+    const read = async (agentId, rel) => {
+      reads.push(agentId + ':' + rel);
+      const buf = disk[agentId + ':' + rel];
+      return buf ? { ok: true, buffer: buf, name: rel.split('/').pop(), mime: 'image/png' } : { ok: false, error: 'not a file' };
+    };
+    const r = await M.readNamed(['N/A', 'charts/today.png', 'out/b.png', 'Reuters.com'], ['writer', 'agent'], read);
+    A.eq(r.found.map(f => f.path), ['charts/today.png', 'out/b.png'], 'only files that exist in a workspace of the fire are found');
+    A.eq(r.missing.map(f => f.path), ['N/A', 'Reuters.com'], 'prose values are missing, not files');
+    A.ok(r.found[0].got && r.found[0].got.buffer.equals(disk['agent:charts/today.png']), 'a found file carries its bytes (read once)');
+    A.eq(M.fireAgents([{ agentId: 'writer' }, { agentId: 'agent' }, { agentId: 'writer' }], 'own'), ['writer', 'agent', 'own'], 'fire agents: newest first, then the routine\'s own');
+    // the found files go out from that single read: sendFiles does not read them again
+    const picked = M.pickFiles({ named: r.found, runs: [], agentId: 'agent' });
+    A.eq(picked.files.map(f => f.path), ['charts/today.png', 'out/b.png'], 'pickFiles takes the found files as named');
+    const before = reads.length, uploaded = [];
+    const sent = await M.sendFiles(picked.files, { read: read, send: async (item) => { uploaded.push(item.filename); return { ok: true }; } });
+    A.eq(sent.attached, ['charts/today.png', 'out/b.png'], 'both attach');
+    A.eq(reads.length, before, 'without a second read');
+    A.eq(uploaded, ['today.png', 'b.png'], 'under their own names');
+    const over = await M.readNamed(['charts/today.png', 'out/b.png', 'charts/today.png', 'out/b.png', 'charts/today.png'], ['writer', 'agent'], read);
+    A.eq(over.found.filter(f => f.got).length, MAX_FILES, 'only the first MAX_FILES found keep their bytes');
+    A.eq(over.found.length, 5, 'the rest are still known to exist (the cap names them as left behind)');
+    A.eq((await M.readNamed(['a.png'], ['agent'], null)).missing.map(f => f.path), ['a.png'], 'no reader wired -> nothing is found');
   }
 
   // ---- pickFiles: named first, generated images otherwise, capped --------------------------------------
@@ -44,12 +92,18 @@ const { MAX_FILES } = require('../sidecar/tools/builtin/comms.js');
     A.eq(named.files.map(f => f.path), ['charts/today.png'], 'a named file wins over generated images');
     A.eq(named.files[0].agents, ['writer', 'agent'], 'it is looked up in every agent of the fire, newest first');
 
-    const auto = M.pickFiles({ named: [], runs: runs, agentId: 'agent' });
+    const auto = M.pickFiles({ named: [], runs: runs, agentId: 'agent', generatedImages: true });
     A.eq(auto.files.map(f => f.path), ['images/draft.png', 'images/final.png'], 'with nothing named, the generated images ride in the order they were made');
     A.eq(auto.files.map(f => f.agents[0]), ['agent', 'writer'], 'each read from the workspace of the agent that made it');
     A.ok(auto.files.every(f => f.path !== 'notes.md'), 'a plain written file is never auto-sent — only images');
 
-    const none = M.pickFiles({ named: [], runs: [{ agentId: 'agent', artifacts: [{ kind: 'file', path: 'x.md' }] }], agentId: 'agent' });
+    // upgrade review 2026-10-23: only a routine granted ALLOW IMAGES has its generated pictures sent unasked; a
+    // routine that makes images for another purpose (wallpapers into a folder) keeps its chat words-only
+    const ungranted = M.pickFiles({ named: [], runs: runs, agentId: 'agent' });
+    A.eq(ungranted.files, [], 'without the images grant, generated images stay on the station');
+    A.eq(M.pickFiles({ named: ['charts/today.png'], runs: runs, agentId: 'agent' }).files.map(f => f.path), ['charts/today.png'], 'a file the reply names still rides without the grant');
+
+    const none = M.pickFiles({ named: [], runs: [{ agentId: 'agent', artifacts: [{ kind: 'file', path: 'x.md' }] }], agentId: 'agent', generatedImages: true });
     A.eq(none.files, [], 'a run that generated no image attaches nothing (the old delivery, unchanged)');
 
     const many = M.pickFiles({ named: ['1.png', '2.png', '3.png', '4.png', '5.png', '6.png'], runs: [], agentId: 'agent' });

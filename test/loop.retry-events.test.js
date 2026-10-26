@@ -181,5 +181,22 @@ async function run(provider, extra) {
     A.eq(p.calls.length, 4, 'every attempt went out');
   }
 
+  // ---- 11. a refused / unresolvable endpoint retries as before but reads 'unreachable', never '(timeout)' (bug 8873fd77) ----
+  {
+    const fetchFailed = code => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ' + code + ' 127.0.0.1:11434'), { code }) });
+    for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']) {
+      const p = scripted(n => (n <= 2 ? { throw: fetchFailed(code) } : { events: answer('ok') }));
+      const { res, retries, recov, dropped } = await run(p);
+      A.eq(res.reason, 'done', code + ': the ladder still rides it out');
+      A.eq(retries.map(r => r.reason), ['unreachable', 'unreachable'], code + ': the retry line says nothing answered there, not a slow provider');
+      A.eq(dropped.length, 0, code + ': the payload passes the event contract');
+      A.ok(recov.every(r => r.reason === 'timeout'), code + ': the retry class itself (and the recovery record) is unchanged');
+    }
+    for (const code of ['ETIMEDOUT', 'ECONNRESET']) {
+      const p = scripted(n => (n === 1 ? { throw: fetchFailed(code) } : { events: answer('ok') }));
+      A.eq((await run(p)).retries.map(r => r.reason), ['timeout'], code + ': a connection that went quiet or dropped still reads timeout');
+    }
+  }
+
   A.report('loop.retry-events');
 })().catch(e => { console.error(e); process.exit(1); });

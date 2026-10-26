@@ -872,7 +872,22 @@
 
   function makeContext(opts) {
     opts = opts || {};
-    let contextLimit = opts.contextLimit || 0;         // 0 = unknown (never auto-compact); mutable — see setContextLimit
+    /* WINDOW CEILING (context-cost-1023). opts.windowCeiling — tokens, or a function read LIVE (the run's model changes on
+       a fallback) — caps the window this manager works in: the fold threshold, the token tail and everything the host
+       scales off `contextLimit`. index.js passes the model's long-context PRICE-TIER boundary (prices.js
+       promptTierCeiling), so a 1M-window Gemini Pro run works in 200k and every turn stays at the rate the spend caps
+       price. 0 / unset = no ceiling: the window is the model's real one, exactly as before. Only ever LOWERS a window.
+       Applied when a window is SET and again whenever one is READ (liveLimit): a fallback onto a tier model whose
+       catalog is cold reports no window, so the loop never calls setContextLimit, and the kept window must still be
+       held under the NEW model's ceiling. */
+    const ceilingOf = typeof opts.windowCeiling === 'function' ? opts.windowCeiling : () => opts.windowCeiling;
+    function capWindow(n) {
+      let c = 0;
+      try { c = Math.floor(Number(ceilingOf()) || 0); } catch (_) { c = 0; }   // a throwing ceiling never wedges a run
+      return (n > 0 && c > 0 && c < n) ? c : n;
+    }
+    let contextLimit = capWindow(opts.contextLimit || 0);   // 0 = unknown (never auto-compact); mutable — see setContextLimit
+    function liveLimit() { return capWindow(contextLimit); }   // the window every consumer reads: the ceiling as of NOW
     const compactAt = opts.compactAt || 0.65;
     /* TAIL UNIT. keepTailTurns counts TURNS (an assistant message plus its tool results = 1; any other message =
        1) — six messages used to be two tool turns, far too short a verbatim window for an agentic run. Callers
@@ -945,9 +960,10 @@
     }
 
     function shouldCompact(usage) {
-      if (!contextLimit || !usage) return false;
+      const limit = liveLimit();
+      if (!limit || !usage) return false;
       const used = usage.prompt_tokens || usage.promptTokens || 0;
-      return used > compactAt * contextLimit;
+      return used > compactAt * limit;
     }
 
     // index of the first message of the last `turns` turn-groups (a tool result belongs to the turn before it)
@@ -965,7 +981,7 @@
        from the newest assistant message on (its tool calls, their results and anything after, e.g. a screenshot turn),
        or the newest group when there is no assistant message. Cuts land only on group starts, so a tool result is
        never separated from the call that produced it. */
-    function tailBudgetTokens() { return (tailShare && contextLimit) ? Math.floor(tailShare * contextLimit) : 0; }
+    function tailBudgetTokens() { const limit = liveLimit(); return (tailShare && limit) ? Math.floor(tailShare * limit) : 0; }
     function tokenTailCut(history, budget) {
       const n = history.length;
       let floor = -1;
@@ -1022,19 +1038,20 @@
        only the reactive compress path could catch — and if the summarizer had already tripped its breaker the
        run died 'error'. A fallback with an unknown (cold-catalog, 0) limit KEEPS the old limit rather than
        disabling proactive compaction: the previous number is stale but strictly safer than none. The exposed
-       `contextLimit` property is kept in sync so host-side consumers (e.g. the tool-output cap) read the live
-       value. */
+       `contextLimit` property is a getter over the same live value, so host-side consumers (e.g. the tool-output
+       cap) read the window the manager works in. */
     function setContextLimit(n) {
-      n = Math.max(0, Math.floor(Number(n) || 0));
-      if (n > 0) { contextLimit = n; api.contextLimit = n; }
-      return contextLimit;
+      n = capWindow(Math.max(0, Math.floor(Number(n) || 0)));   // the NEW model's tier ceiling (read live) still applies
+      if (n > 0) contextLimit = n;
+      return liveLimit();
     }
 
     // the proactive-fold threshold in tokens (compactAt × live window); 0 = unknown window. The loop's free
     // micro-compaction tier re-measures against this before paying for an LLM fold.
-    function thresholdTokens() { return contextLimit ? compactAt * contextLimit : 0; }
+    function thresholdTokens() { const limit = liveLimit(); return limit ? compactAt * limit : 0; }
 
-    const api = { systemPrompt, assemble, estimateTokens, estimateMessages, fit, shouldCompact, compact, planCompaction, setContextLimit, thresholdTokens, tailBudgetTokens, redact, contextLimit, keepTail, keepTailTurns, tailShare };
+    const api = { systemPrompt, assemble, estimateTokens, estimateMessages, fit, shouldCompact, compact, planCompaction, setContextLimit, thresholdTokens, tailBudgetTokens, redact,
+      get contextLimit() { return liveLimit(); }, keepTail, keepTailTurns, tailShare };
     return api;
   }
 

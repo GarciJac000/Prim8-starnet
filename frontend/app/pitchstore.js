@@ -323,7 +323,12 @@ const PitchStore = (() => {
     const sent = !(typeof Chat !== 'undefined' && Chat.isBusy && Chat.isBusy()) &&
       !(typeof Harness !== 'undefined' && Harness.configured && !Harness.configured()) &&
       deps.launchDirective && deps.launchDirective(task);
-    if (sent) { state.handoffPending = false; state.starterDone = true; delete state.firstMove; save(); }
+    if (sent) {
+      state.handoffPending = false; state.starterDone = true; delete state.firstMove; save();
+      // the first task went out for the Commander, not from the composer: put it in the composer's ArrowUp recall like a
+      // typed send, so a first run that fails at the provider never makes a beginner retype it (bug 159d44fc)
+      if (typeof Chat !== 'undefined' && Chat.rememberSent) { try { Chat.rememberSent(task); } catch (_) {} }
+    }
     else if (typeof Chat !== 'undefined' && Chat.prefill) Chat.prefill(task);
     return !!sent;
   }

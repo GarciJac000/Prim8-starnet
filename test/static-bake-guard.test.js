@@ -21,7 +21,8 @@ A.ok(from > 0 && to > from, 'world.js carries fixtureAnchorKey right before reba
 const fixtureAnchorKey = new Function(world.slice(from, to) + '; return fixtureAnchorKey;')();
 
 // the wiring: only a bake-changing edit (or a moved frame, or a moved lamp anchor) marks the bake dirty
-A.ok(/station\.onChange\(p => \{ geoDirty = true; if \(!p \|\| !p\.staticBakeUnchanged \|\| p\.global\) bakeEditPending = true; \}\)/.test(world),
+// (the STILL tier's wake rides after it: a layout edit is drawn on the next vsync — test/render-still.test.js)
+A.ok(/station\.onChange\(p => \{ geoDirty = true; if \(!p \|\| !p\.staticBakeUnchanged \|\| p\.global\) bakeEditPending = true; motionWake\(\); \}\)/.test(world),
   'the floor subscription marks the bake only for an edit WorldModel says changes it');
 A.ok(/if \(bakeEditPending \|\| frameMoved \|\| fixtureAnchorKey\(geo\) !== bakedAnchorKey\) bakeDirty = true;/.test(world),
   'rederive re-bakes for a bake edit, a moved frame, or a moved lamp anchor — nothing else');
@@ -67,7 +68,7 @@ A.ok(plan(g1) === plan0 && fixtureAnchorKey(g1) === key0, 'undo restores the pla
 const propsSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'frontend', 'app', 'propsprites.js'), 'utf8');
 const inval = A.fnBody(world, 'function invalidatePropShadows()');
 A.ok(inval && /propShadowLayer\.stamp\s*=\s*null/.test(inval) && !/rebake|StationBake/.test(inval), 'World.invalidatePropShadows only clears the shadow layer stamp (no bake)');
-A.ok(/return \{ init, rebake, invalidatePropShadows,/.test(world), 'World exports invalidatePropShadows');
+A.ok(/return (?:wakeOnCall\()?\{ init, rebake, invalidatePropShadows,/.test(world), 'World exports invalidatePropShadows');   // (through the STILL WAKE wrapper, 2026-10-21)
 const artLine = (propsSrc.match(/userArtChanged\(\) \{[^\n]*/) || [''])[0];
 A.ok(/World\.invalidatePropShadows\(\)/.test(artLine), 'userArtChanged repaints the shadow layer instead of baking: ' + artLine.slice(0, 160));
 A.ok(!/World\.rebake\(\)/.test(artLine.replace(/else if \(typeof World\.rebake === 'function'\) World\.rebake\(\);/, '')), 'userArtChanged rebakes only on a World without the cheap invalidation');

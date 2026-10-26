@@ -438,7 +438,7 @@ body.glass-demo :is(#chat-log, #gc-log) .cmsg.user  + .cmsg.user  > .cmsg-head {
 .comms-newpill.hasnew::before {
   content: ""; flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%;
   background: var(--ink); opacity: .85;
-  animation: newpill-beat 1.4s var(--ease-soft) infinite;
+  animation: newpill-beat 1.4s steps(8, jump-none) infinite;
 }
 .comms-newpill.hasnew.show { opacity: 1; }
 .comms-newpill:hover {

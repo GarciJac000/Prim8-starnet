@@ -20,7 +20,10 @@
      • a usage row carries no `name`, so an older StarNet skips it instead of replacing the skill;
      • the package mirror view() hydrates holds only accepted bytes (a refused edit never reaches SKILL.md), and a use
        repairs a mirror this process has not written from the current record (after a failed write, or a boot);
-     • a large library is not rewritten on every append (hysteresis); a torn row is reported, not silent. */
+     • a large library is not rewritten on every append (hysteresis); a torn row is reported, not silent;
+     • rollback safety: between compactions the live file stays inside v0.13.5's 16 MiB read window (a library that is
+       itself over the 12 MiB cap is compacted once per growth step, never per write; one that cannot fit the window, or
+       whose records are huge, keeps the plain hysteresis: a write never pays a full rewrite of the library). */
 'use strict';
 const A = require('./_assert.js');
 const fs = require('fs');
@@ -456,6 +459,89 @@ const seed = (s) => { for (const n of names) A.ok(s.write({ agentId: 'a', name: 
   A.ok(/const skillsIo = makeSkillsIo\(\{ fs, file: SKILLS_FILE/.test(src), 'index.js builds skillsIo with makeSkillsIo');
   A.ok(!/(rotateJsonl|readBoundedJsonl|loadBounded|rotateIfLarge)\(\s*(\{[^}]*\}\s*,\s*)?SKILLS_FILE/.test(src), 'SKILLS_FILE is never rotated or tail-read');
   A.ok(/skillStore\.markUsed\(/.test(src), 'the run end still records uses');
+}
+
+// ---- 12. rollback safety: the live file never outgrows v0.13.5's read window between compactions ----
+// v0.13.5 reads only the last 16 MiB (LOG_MAX_BYTES) of skills.jsonl and boot-compacts that partial view, so a live
+// file past 16 MiB loses the skills at its head for good if the Commander downgrades. Real defaults (the host's
+// SKILLS_COMPACT_BYTES is 4 MiB), sizes from an injected fs so no 16 MiB file is written.
+{
+  const MiB = 1024 * 1024, WINDOW_0135 = 16 * MiB;
+  const sizes = {};
+  const fakeFs = {
+    statSync(f) { if (sizes[f] == null) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; } return { size: sizes[f] }; },
+    unlinkSync() { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+  };
+  const live = path.join(tmp, 'window', 'skills.jsonl');
+  const mk = () => makeSkillsIo({ fs: fakeFs, file: live, writeDurable() {}, compactBytes: 4 * MiB });
+  // a library of `bytes` made of records of `record` bytes (the io sizes its growth step from its largest record)
+  const compactTo = (io, bytes, record) => {
+    record = record || 64 * 1024;
+    const rows = [];
+    for (let left = bytes; left > 0; left -= record) rows.push({ name: 'x' + rows.length, body: 'y'.repeat(Math.max(0, Math.min(record, left) - 40)) });
+    const total = rows.reduce((n, r) => n + JSON.stringify(r).length + 1, 0);   // ASCII: chars = bytes
+    if (total < bytes) rows[rows.length - 1].body += 'y'.repeat(bytes - total);   // the compacted size is exactly `bytes`
+    io.rewrite(rows); sizes[live] = bytes;
+  };
+  // the largest live size that does NOT ask for a compaction, after a compaction down to `lib` bytes
+  const ceiling = (lib, record) => {
+    const io = mk(); compactTo(io, lib, record);
+    let lo = lib, hi = 64 * MiB;
+    while (hi - lo > 1) { const mid = Math.floor((lo + hi) / 2); sizes[live] = mid; if (io.needsCompaction()) hi = mid; else lo = mid; }
+    return lo;
+  };
+  for (const lib of [0.5, 2, 5, 6, 8, 10, 11, 12].map(x => Math.round(x * MiB))) {
+    A.ok(ceiling(lib) < WINDOW_0135, 'window: a ' + (lib / MiB) + ' MiB library is compacted before the live file reaches 0.13.5\'s 16 MiB window (ceiling ' + (ceiling(lib) / MiB).toFixed(2) + ' MiB)');
+  }
+  A.eq(ceiling(1 * MiB), 4 * MiB, 'window: a small library keeps the 4 MiB threshold');
+  A.eq(ceiling(3 * MiB), 6 * MiB, 'window: hysteresis (2x the compacted size) is unchanged below the cap');
+  // a library over the cap that still fits the window: compacted once per growth step, never on every write
+  for (const lib of [12.5, 13, 14.5].map(x => Math.round(x * MiB))) {
+    const io = mk(); compactTo(io, lib);
+    A.ok(!io.needsCompaction(), 'window: right after compacting a ' + (lib / MiB) + ' MiB library, the next write does not compact again');
+    sizes[live] = lib + 64 * 1024;
+    A.ok(!io.needsCompaction(), 'window: nor after 64 KiB of appends (' + (lib / MiB) + ' MiB library)');
+    const c = ceiling(lib);
+    A.ok(c - lib >= 512 * 1024 && c <= WINDOW_0135, 'window: a ' + (lib / MiB) + ' MiB library is re-compacted after a bounded growth step, inside the window (' + ((c - lib) / MiB).toFixed(2) + ' MiB, ceiling ' + (c / MiB).toFixed(2) + ')');
+  }
+  // a library that cannot stay inside the window (its compacted size plus a growth step is past 16 MiB, or its records are
+  // so large that a step of a few of them is): rewriting it buys no rollback safety, so the plain hysteresis applies and
+  // a write never pays a full rewrite of the library (lane review: 1.1 MiB records over 13.5 MiB compacted on 10 of 10)
+  for (const [lib, record] of [[15.5, 0.0625], [20, 0.0625], [13.5, 1.13], [12.5, 1.1], [11.5, 1.13]].map(p => [Math.round(p[0] * MiB), Math.round(p[1] * MiB)])) {
+    const c = ceiling(lib, record);
+    A.ok(c >= 2 * lib - 1, 'window: a ' + (lib / MiB) + ' MiB library of ' + (record / MiB).toFixed(2) + ' MiB records keeps the 2x hysteresis (ceiling ' + (c / MiB).toFixed(2) + ' MiB)');
+  }
+  // after a restart (no compaction yet in this process) the boot threshold is the plain 4 MiB
+  const fresh = mk(); sizes[live] = 4 * MiB + 1;
+  A.ok(fresh.needsCompaction(), 'window: a fresh boot compacts a live file past 4 MiB');
+}
+
+// ---- 13. large records over a large library: a write never rewrites the whole file each time (real fs) ----
+// The reviewer's case: a ~12.5 MiB library whose records are ~1.1 MiB (a few imported packages: packageFiles AND files
+// are stored base64), one skill patched 10 times. Each patch appends ~1.1 MiB; the old growth step (1 MiB) asked for a
+// full fsync'd rewrite of the whole library after EVERY one of them.
+{
+  const MiB = 1024 * 1024;
+  const dir = path.join(tmp, 'big-records'); fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'skills.jsonl');
+  let rewrites = 0;
+  const io = makeSkillsIo({ fs, file, writeDurable: (f2, b) => { rewrites++; writeFileDurable({ fs, path }, f2, b); } });
+  const rec = (name, n) => ({ name, agentId: 'a', body: String.fromCharCode(97 + (n % 26)).repeat(Math.round(1.1 * MiB)) });
+  const library = [];
+  for (let i = 0; i < 11; i++) library.push(rec('pkg-' + i, i));
+  io.rewrite(library);
+  rewrites = 0;
+  const startSize = fs.statSync(file).size;
+  A.ok(startSize > 12 * MiB && startSize < 13 * MiB, 'big records: precondition: a ' + (startSize / MiB).toFixed(2) + ' MiB library of 1.1 MiB records');
+  let latest = library.slice(), compactions = 0;
+  for (let n = 1; n <= 10; n++) {
+    const next = rec('pkg-0', n);
+    io.append(next);
+    latest = [next].concat(latest.slice(1));
+    if (io.needsCompaction()) { compactions++; io.rewrite(latest); }
+  }
+  A.ok(compactions <= 1, 'big records: 10 patches of a 1.1 MiB record rewrite the whole library at most once (' + compactions + ')');
+  A.eq(fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length > 0, true, 'big records: the file still reads');
 }
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}

@@ -212,9 +212,25 @@ function makeThreadsStore(deps) {
     });
   }
 
+  // FORGET the threads mined from conversations that no longer exist (qa/bugs/3e926b6a: a deleted session's ideas
+  // must not keep riding night-shift proposals and the evidence pack). match(sourceRef) -> true removes that thread,
+  // whatever its state. The denylist keeps its fingerprints, so a declined idea stays declined. Resolves the count.
+  function forgetSources(match) {
+    if (typeof match !== 'function') return Promise.resolve(0);
+    let removed = 0;
+    return durable.update(STORE_KEY, (cur) => {
+      const rec = normalize(cur);
+      const kept = rec.threads.filter(t => !(t.sourceRef && match(t.sourceRef)));
+      removed = rec.threads.length - kept.length;
+      if (!removed) return undefined;
+      rec.threads = kept;
+      return rec;
+    }).then(() => removed);
+  }
+
   return {
     read, list, openThreads, isDeclined, knownFingerprints,
-    add, pick, deliver, decline, setState, declineFingerprint,
+    add, pick, deliver, decline, setState, declineFingerprint, forgetSources,
     fingerprint,
     _durable: durable
   };

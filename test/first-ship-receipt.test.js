@@ -31,7 +31,9 @@ const section1 = (async () => {
     markLineShipped: id => { if (spent.has(id)) return false; spent.add(id); quiet.push(id); return true; },
     noteLineShipped: (o, l) => { shipped.push([o, l]); if (spent.has(l)) return null; spent.add(l); return { first: true, name: 'LINE ' + l, tiles: { '1,1': 1 } }; }
   };
-  const ctx = vm.createContext({ fnow: 123, firstShipPulse: null, Date, Promise, Object, isFinite, Set, Pipeline: P, station: null,
+  let wakes = 0;   // STILL (world.js): the FIRST SHIP pulse lands between frames, so it wakes a still floor
+  // fnow is the last frame's clock (stale between frames); performance.now() the wall clock the pulse must start on (STILL tier)
+  const ctx = vm.createContext({ fnow: 123, performance: { now: () => 456 }, firstShipPulse: null, motionWake: () => { wakes++; }, Date, Promise, Object, isFinite, Set, Pipeline: P, station: null,
     routingPlan: { hash: 'h1', lines: [{ lineId: 'L1', intakes: ['i1'] }, { lineId: 'L2', intakes: ['i2'], name: 'Research' }] },
     apiUrl: p => p,
     fetch: async url => { asked.push(url); if (down) throw new Error('offline'); return { ok: true, json: async () => ({ ok: true, lines: Object.keys(server).map(k => ({ lineId: k, shipped: server[k] })) }) }; },
@@ -74,7 +76,8 @@ const section1 = (async () => {
   A.eq(shipped, [['o_L2', 'L2']], 'a receipt whose job minted the line\'s first shipment asks Build with its exact OUTBOX and line');
   A.eq(notes, [['FIRST SHIP · LINE RESEARCH', 'gold']], 'the first shipment shows the gold toast, the line named by the floor\'s rule (its named INBOX)');
   A.eq(sounds.length, 1, '…and plays the milestone once');
-  A.ok(ctx.pulse() && ctx.pulse().at === 123, '…and pulses the line');
+  A.ok(ctx.pulse() && ctx.pulse().at === 456, '…and pulses the line, from the wall clock (the answer lands between frames: a still floor\'s fnow is up to 33 ms old)');
+  A.eq(wakes, 1, '…and wakes a still floor, so the pulse starts on the next vsync (STILL tier)');
   const n = asked.length;
   A.eq(ctx.note(R('wi_L2', 'L2')), null, 'the SSE echo of the same receipt is ignored');
   server.L2 = 2;

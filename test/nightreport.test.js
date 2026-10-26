@@ -192,10 +192,30 @@ const pmReach = NR.panelModel({ status: Object.assign({}, stBase, { buildMode: '
 A.ok(/reach/i.test(pmReach.modeText), 'reach-gated draft mode names the REACH dial as the unlock');
 A.eq(pmReach.modeWarn, false, 'reach-gated drafting is the Commander’s setting, not a warning');
 A.eq(NR.panelModel({ status: stBase, tzOffsetMin: 0 }).modeText, '', 'an older sidecar without buildMode → empty modeText (never a guess)');
-// readiness: cold/warm tiers explain BOTH hot bars; hot / absent → no line.
-const rdWarm = { tier: 'warm', usableDims: ['goals', 'pain', 'ambition'], goalsUsable: true, activityCount: 1, hotDimsMin: 4, hotRunsMin: 4 };
+// readiness: cold/warm tiers explain BOTH grounding paths (current aims, or a recent run); hot / absent → no line.
+// (bug 41b2d015) the bars are one aim / one run — the line names those, never an area count that no longer gates.
+const rdWarm = { tier: 'warm', usableDims: ['pain', 'ambition'], goalsUsable: false, goalsStale: false, activityCount: 0, hotDimsMin: 1, hotRunsMin: 1 };
 const pmWarm = NR.panelModel({ status: Object.assign({}, stBase, { binding: 'readiness', readiness: rdWarm }), tzOffsetMin: 0 });
-A.ok(/3 of 4 areas/.test(pmWarm.readinessText) && /1 of 4 recent runs/.test(pmWarm.readinessText), 'readinessText shows dims and runs against the hot bars');
+A.ok(/has no aim it can act on yet/.test(pmWarm.readinessText) && /0 of 1 recent run;/.test(pmWarm.readinessText) && !/areas/.test(pmWarm.readinessText), 'readinessText shows the aims and runs against the grounding bars, no area count');
+A.ok(/too old to act on/.test(NR.readinessText(Object.assign({}, rdWarm, { goalsStale: true }))), 'stale aims are named as too old, not as unknown');
+// (41b2d015 review) the panel shows the stand-down WHY (the readiness binding phrase) right beside readinessText, and
+// the morning report reuses the same phrase. It must be true in EVERY non-hot state, so it can never contradict the line
+// beside it: nothing known (cold), a seed-only aim (a quick-setup chip), aims past the recency window, other areas only.
+for (const [label, rd] of [
+  ['cold', { tier: 'cold', usableDims: [], goalsUsable: false, goalsStale: false, activityCount: 0, hotDimsMin: 1, hotRunsMin: 1 }],
+  ['seed-only aim', { tier: 'warm', usableDims: ['goals'], goalsUsable: false, goalsStale: false, activityCount: 0, hotDimsMin: 1, hotRunsMin: 1 }],
+  ['stale aims', Object.assign({}, rdWarm, { goalsStale: true })],
+  ['other areas only', rdWarm]
+]) {
+  const pm = NR.panelModel({ status: Object.assign({}, stBase, { binding: 'readiness', readiness: rd }), tzOffsetMin: 0 });
+  A.eq(pm.why, NR.bindingPhrase('readiness'), label + ': the panel WHY is the readiness binding phrase');
+  A.ok(/no current aim or recent run/.test(pm.why) && !/nothing of yours|doesn’t know/.test(pm.why), label + ': the WHY says no CURRENT aim or recent run — never "nothing of yours" or "doesn’t know"');
+  A.ok(!/doesn’t know/.test(pm.readinessText) && !/I know what you want/.test(NR.readinessPlain(rd)), label + ': neither readiness line claims the station does not know what they want');
+}
+{
+  const pmStale = NR.panelModel({ status: Object.assign({}, stBase, { binding: 'readiness', readiness: Object.assign({}, rdWarm, { goalsStale: true }) }), tzOffsetMin: 0 });
+  A.ok(/too old to act on/.test(pmStale.readinessText) && /no current aim/.test(pmStale.why), 'stale panel: "aims too old" sits beside "no current aim" (they agree)');
+}
 A.eq(NR.panelModel({ status: Object.assign({}, stBase, { readiness: { tier: 'hot' } }), tzOffsetMin: 0 }).readinessText, '', 'hot readiness → no still-learning line');
 A.eq(NR.panelModel({ status: stBase, tzOffsetMin: 0 }).readinessText, '', 'absent readiness detail → no line (never invented)');
 // the new binding phrases are real sentences, not the forward-compat fallback.
@@ -249,13 +269,15 @@ A.ok(/while you.re away/i.test(outCold), 'the outlook is framed as what happens 
 A.ok(/draft small jobs, not build them/i.test(outCold) && /grant/i.test(outCold), 'a build pick that can only draft says so + names the missing grant');
 A.ok(/LAST REPORT in SETTINGS › AUTONOMY/.test(outCold), 'draft mode names where the drafts really surface (LAST REPORT), not a desk');
 // call #57 (org pass 10-14): a readiness hold reads as ONE plain reason, never a counter or an unlock ladder…
-A.ok(/I’ll start once I’ve seen a few of your runs/.test(outCold), 'the cold-start hold is one plain present-tense reason');
+// (bug 41b2d015) …and it names the one thing that grounds a job, never "a few of your runs".
+A.ok(/I’ll start once you tell me in your own words what you want help with, or I’ve seen one of your runs\./.test(outCold), 'the cold-start hold is one plain present-tense reason that names the requirement');
+A.ok(!/a few/.test(outCold), 'the hold never asks for "a few" runs (no usage ladder)');
 A.ok(!/\d+ of \d+/.test(outCold) && !/reaching either|lets it act|set REACH/i.test(outCold), 'the readout carries no N-of-M counter and no unlock instruction');
 // …and the exact counts are never dropped: readinessText keeps them for SETTINGS › AUTONOMY and LAST REPORT.
-A.ok(/still learning you/i.test(NR.readinessText(rdWarm)) && /3 of 4 areas/.test(NR.readinessText(rdWarm)), 'readinessText still carries the exact N-of-M counts');
+A.ok(/still learning you/i.test(NR.readinessText(rdWarm)) && /0 of 1 recent run/.test(NR.readinessText(rdWarm)), 'readinessText still carries the exact N-of-M run count');
 // P09 review fix: the counts line names a NECESSARY condition, never a promise — with the dial on WAIT / SUGGEST, clearing a
 // bar does not make it act, and LAST REPORT shows this line with no dial context at all.
-A.ok(/; to act on its own it needs either all 4 areas or 4 recent runs$/.test(NR.readinessText(rdWarm)) && !/starts acting|once either|lets it act|one of those is complete|won’t act on its own before/i.test(NR.readinessText(rdWarm)), 'readinessText names the bar it needs — EITHER all 4 areas or 4 recent runs, never read as both (g1 P09 final round) — and never promises it will act once a bar clears');
+A.ok(/; to act on its own it needs either your current aims or 1 recent run$/.test(NR.readinessText(rdWarm)) && !/starts acting|once either|lets it act|one of those is complete|won’t act on its own before/i.test(NR.readinessText(rdWarm)), 'readinessText names the bar it needs — EITHER current aims or 1 recent run, never read as both (g1 P09 final round) — and never promises it will act once a bar clears');
 A.eq(NR.readinessPlain({ tier: 'hot' }), '', 'a hot station has no hold-back reason');
 // a fully-hot, granted build station: present tense, the real pace from leashPerDay, each job a new session in the rail.
 const outBuild = NR.postureOutlook(Object.assign({}, stBase, { buildMode: 'build', draftReason: null, workshopGranted: true, readiness: { tier: 'hot' } }));

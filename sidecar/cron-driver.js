@@ -203,6 +203,17 @@
 
     const deliveries = new Map(); // job/run -> one in-flight send across boot, ticks and completion
     const deliveryReceipts = new Map(); // send finished but its acknowledgement has not reached disk
+    /* collapseBacklog — the routine's older idle results for a destination are superseded by its newest one
+       (cron-store supersedeDeliveries: one current result per chat, never a burst of stale ones). `own` is the run
+       id the caller is about to send — it is in `deliveries` already but is not "busy" for this decision. Returns
+       false only when the supersede could not reach disk (the caller retries on a later pass, sending nothing). */
+    function collapseBacklog(jobId, own) {
+      const jobs = getJobs();
+      const busy = cronStore.pendingDeliveries(cronStore.getJob(jobs, jobId)).map(p => String(p.runId))
+        .filter(r => r !== String(own) && (deliveries.has(jobId + '/' + r) || deliveryReceipts.has(jobId + '/' + r)));
+      const next = cronStore.supersedeDeliveries(jobs, jobId, { now: now(), busy: busy });
+      return next === jobs || setJobs(next) !== false;
+    }
     async function deliverFinalization(job, receipt) {
       const f = receipt || (job && job.finalization);
       if (!job || !f || f.state !== 'pending') return false;
@@ -211,15 +222,22 @@
       if (!deliveryReceipts.has(key) && Date.parse(f.nextAttemptAt) > now()) return false;
       deliveries.set(key, true);
       try {
-        const current = cronStore.getJob(getJobs(), job.id);
+        let current = cronStore.getJob(getJobs(), job.id);
         if (!cronStore.pendingDeliveries(current).some(p => p.runId === f.runId)) {
           deliveryReceipts.delete(key); return false;
         }
         let out = deliveryReceipts.get(key);
         if (!out) {
+          if (cronStore.deliveriesHeld(current)) return false;   // paused by the Commander: kept until resumed
+          // Nothing awaits before this point, so a pass that picked several receipts of one routine settles the
+          // collapse here, synchronously, before any of them sends.
+          if (!collapseBacklog(job.id, f.runId)) return false;
+          current = cronStore.getJob(getJobs(), job.id);
+          const live = cronStore.pendingDeliveries(current).find(p => p.runId === f.runId);
+          if (!live) return false;                                 // superseded by a newer result for the same chat
           // The committed routing/context snapshot wins over subsequent edits to the routine.
           const deliveryJob = Object.assign({}, job, f.deliveryContext || {}, { deliver: f.deliver, origin: f.origin });
-          try { out = deliverResult ? await deliverResult(deliveryJob, { runId: f.runId, outcome: f.outcome, text: f.result || '', error: f.error || null, deliveredTargets: f.deliveredTargets || [] }) : { ok: true }; }
+          try { out = deliverResult ? await deliverResult(deliveryJob, { runId: f.runId, outcome: f.outcome, text: f.result || '', error: f.error || null, deliveredTargets: live.deliveredTargets || f.deliveredTargets || [], superseded: Number(live.superseded) || 0 }) : { ok: true }; }
           catch (e) { out = { ok: false, error: (e && e.message) || String(e) }; }
           out = { ok: !out || out.ok !== false, error: out && out.error, deliveredTargets: out && out.deliveredTargets };
           deliveryReceipts.set(key, out);
@@ -234,7 +252,11 @@
       let count = 0;
       // Bound each pass; an unreachable destination must not flood transports on every tick.
       const work = [];
-      for (const job of getJobs().slice()) {
+      for (const listed of getJobs().slice()) {
+        if (!listed || cronStore.deliveriesHeld(listed)) continue;   // a paused routine's results wait for its resume
+        // Collapse first, so the per-pass bound is spent on results that will actually be sent.
+        if (cronStore.pendingDeliveries(listed).length > 1 && !collapseBacklog(listed.id, null)) continue;
+        const job = cronStore.getJob(getJobs(), listed.id) || listed;
         for (const f of cronStore.pendingDeliveries(job)) {
           if (work.length + deliveries.size >= 4) break;
           const key = job.id + '/' + f.runId;
@@ -748,7 +770,8 @@
         const job = cronStore.getJob(getJobs(), f.jobId);
         if (!job) continue;
         if (leases.has(job.id)) continue;                  // already-running: not attempted, not deferred (advances)
-        if (cronStore.pendingDeliveries(job).length >= cronStore.MAX_PENDING_DELIVERIES) {
+        // undelivered results, superseded ones included: one collapsed receipt can stand for a hundred
+        if (cronStore.undeliveredCount(job) >= cronStore.MAX_PENDING_DELIVERIES) {
           deferred.push(job.id); deferredSet.add(job.id);
           try { emit('cron.skipped', { jobId: job.id, reason: 'at-capacity' }); } catch (e) { failNote('cron.delivery.defer', e); }
           skips++; continue;

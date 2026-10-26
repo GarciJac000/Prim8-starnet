@@ -17,6 +17,8 @@ test/contract.test.js
 test/events-contract.test.js
 test/clock-rng.test.js
 test/context.test.js
+test/context.price-tier-window.test.js
+test/compress-run-window.test.js
 test/redact.known-values.test.js
 test/redact.masked-keys.test.js
 test/redact.linear.test.js
@@ -52,6 +54,7 @@ test/logbound.test.js
 test/budget.test.js
 test/budget-caps.test.js
 test/budget-stop-door.test.js
+test/run-spend-pool.test.js
 test/unpriced-ceiling-setting.test.js
 test/fallback-chain.test.js
 test/voice-chat-route.test.js
@@ -116,6 +119,7 @@ test/provider.catalog-cache.test.js
 test/provider.ollama-native.test.js
 test/provider.ollama-system.test.js
 test/ollama-wait-truth.test.js
+test/ollama-loaded-timeout.test.js
 test/provider.host-notes.test.js
 test/provider.host-fences.test.js
 test/realtime-voice.test.js
@@ -185,6 +189,7 @@ test/loop.turn-budget.test.js
 test/loop.provider-recovery.test.js
 test/loop.failure-recovery.test.js
 test/loop.stop-means-stop.test.js
+test/loop.stream-cut.test.js
 test/output-continuation.test.js
 test/compaction.test.js
 test/compaction-summarizer.test.js
@@ -343,6 +348,7 @@ test/skills.trust-origin.test.js
 test/skills.review-approval.test.js
 test/skills.worker-shared-approval.test.js
 test/skills.package-hardening.test.js
+test/skills.pin-lock.test.js
 test/slash.test.js
 test/slash-actions.test.js
 test/slash.parity.test.js
@@ -364,9 +370,13 @@ test/rename-migrate.test.js
 test/update-state-parity.test.js
 test/update-continuity.test.js
 test/update-preparation.test.js
+test/update-snapshot-budget.test.js
+test/update-snapshot-framing.test.js
+test/update-snapshot-prune.test.js
 test/update-drain-wiring.test.js
 test/updates-install.test.js
 test/update-drain-newest-save.test.js
+test/update-drain-conflict.test.js
 test/update-center-truth.test.js
 test/future-gate-update-door.test.js
 test/roster-clause.test.js
@@ -420,6 +430,9 @@ test/transcript.test.js
 test/transcript-history-v2.test.js
 test/transcript-perf-paths.test.js
 test/recall.test.js
+test/session-tombstones.test.js
+test/transcript-selftalk.test.js
+test/transcript-proof-reads.test.js
 test/fs.jail.test.js
 test/fs.search-gitignore.test.js
 test/fs.search-budget.test.js
@@ -539,6 +552,7 @@ test/bottle-wiring.test.js
 test/resummonstore.test.js
 test/pitch.test.js
 test/pitchstore.test.js
+test/first-task-recall.test.js
 test/suggeststore.test.js
 test/beat-coordination.test.js
 test/beatcard.test.js
@@ -586,6 +600,7 @@ test/nightshift-localday.test.js
 test/nightshift-decline-edge.test.js
 test/contextpack.test.js
 test/nightreport.test.js
+test/nightshift-chosen-autonomy.test.js
 test/autonomy-write.test.js
 test/autonotify.test.js
 test/permgrants.test.js
@@ -638,6 +653,7 @@ test/personality-no-sample.test.js
 test/modelpicker.test.js
 test/model-provider-reconcile.test.js
 test/managed-model-93.test.js
+test/batch-models.test.js
 test/model-catalog-truth.test.js
 test/agent-model-select.test.js
 test/station-default-wire.test.js
@@ -660,6 +676,7 @@ test/chat-code-url-link.test.js
 test/chat-code-copy.test.js
 test/mint.test.js
 test/ctxgauge.test.js
+test/ctx-gauge-run-window.test.js
 test/ctx-model-catalog.test.js
 test/ctx-conversation-scope.test.js
 test/floorstats.test.js
@@ -703,6 +720,7 @@ test/cron-human.test.js
 test/cron-store.test.js
 test/mint-ledger.test.js
 test/cron.dispatch.test.js
+test/cron.delivery-backlog.test.js
 test/cron.chain.test.js
 test/cron.tick.test.js
 test/cron.hardening.test.js
@@ -811,6 +829,10 @@ test/stationbake.plate-parity.test.mjs
 test/stationbake.offcanvas.test.mjs
 test/canvas-loss-recovery.test.js
 test/render-pacing.test.js
+test/no-smooth-infinite-animation.test.js
+test/render-still.test.js
+test/render-still-readouts.test.js
+test/render-still-wakes.test.js
 test/static-bake-guard.test.js
 test/stage-context-loss.test.js
 test/conveyor.test.js
@@ -911,6 +933,10 @@ test/channels.owner-pairing-all.test.js
 test/channels.owner-gates.test.js
 test/channels.group-user-commands.test.js
 test/channels.group-allow.test.js
+test/channels.group-admission-guard.test.js
+test/channels.group-readd.test.js
+test/channels.user-allow-command.test.js
+test/channels.observe-canonical.test.js
 test/channels.telegram.pairing-ux.test.js
 test/channels.telegram.test.js
 test/channels.telegram.format.test.js
@@ -935,16 +961,21 @@ test/channels.webhook-durability.test.js
 test/channels.secrets.test.js
 test/channels.setup-guide.test.js
 test/channels.hub.test.js
+test/channels.steer-reply.test.js
 test/channels.forwarded-taint.test.js
 test/channels.workline-transcript.test.js
 test/line-hop-stop.test.js
 test/cross-surface-continuity.test.js
 test/channels.first-message-stream.test.js
 test/channels.outbox.test.js
+test/channels.inbox-recovery.test.js
 test/channels.commands.test.js
+test/channels.desktop-commands.test.js
+test/channels.routine-add-origin.test.js
 test/channels.parity.test.js
 test/channels.buttons.test.js
 test/channels.sse.test.js
+test/observer.test.js
 test/channels.replay.test.js
 test/browser-workflow.test.js
 test/mcp.client.test.js
@@ -991,6 +1022,7 @@ test/brand-wordmark-mask.test.js
 test/personalization-authority-wiring.test.js
 test/sprite-loading.test.js
 test/textsize-screen-space.test.js
+test/webkit-zoom-pointer.test.js
 test/mobile-control-reachability.test.js
 test/mobile-topbar-glass-cascade.test.js
 test/station-tooltip.test.js
@@ -1121,6 +1153,11 @@ test/world-crew-approval.test.js
 test/world-movement-continuity.test.js
 test/save-concurrency.test.js
 test/cloudsave-concurrency.test.js
+test/save-empty-station-seed.test.js
+test/save-restore.test.js
+test/save-restore-safety.test.js
+test/save-conflicts-route.test.js
+test/save-restore-hardening.test.js
 test/sprite-direction-details.test.js
 test/chat-history-reconcile.test.js
 test/prop-industrial-remaster.test.js
@@ -1148,6 +1185,7 @@ test/projection-depth-rendering.test.js
 test/station-templates.test.js
 test/build-share.test.js
 test/community-maps.test.js
+test/community-hide-until-live.test.js
 test/remaster-physical-fit.test.js
 test/arrival.test.js
 test/genesis-wake-credential.test.js
@@ -1176,6 +1214,15 @@ test/workspace-owner-election.test.js
 test/project-home-ui.test.js
 test/cli.test.js
 test/cli.stop-child.test.js
+test/cli-desktop-closed.test.js
+test/cli-bootstrap-lineage.test.js
+test/cli-dashboard.test.js
+test/cli-dashboard-signal.test.js
+test/cli-dashboard-drive.test.js
+test/cli-version.test.js
+test/cli-launcher.test.js
+test/cli-link.test.js
+test/cli-path-hook.test.js
 test/loop.truncated-args-refuse.test.js
 test/loop.verify-on-stop-failed-check.test.js
 test/loop.grace-no-tools.test.js
@@ -1342,6 +1389,7 @@ test/source-collapsed-escapes.test.js
 test/openrouter-free-daily-cap.test.js
 test/openrouter-inband-error.test.js
 test/provider-403-truth.test.js
+test/provider-403-upstream-refusal.test.js
 test/oauth-refresh-throttle-copy.test.js
 test/proc-footprint.test.js
 test/skills-io.test.js
@@ -1357,3 +1405,4 @@ test/type-floor.test.js
 test/css-parse.test.js
 test/one-gutter.test.js
 test/dockglow-seen.test.js
+test/vision-input.test.js

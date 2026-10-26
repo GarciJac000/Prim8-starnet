@@ -305,22 +305,53 @@
   // Race a promise against a timeout. onTimeout (if given) fires BEFORE the reject so the caller can abort the
   // underlying work — otherwise a timed-out tool keeps running and SPENDING (worst case: a team.dispatch fan-out
   // whose workers burn tokens long after the lead gave up). The timer is always cleared on settle either way.
-  function withTimeout(value, ms, onTimeout) {
+  // `timer` (optional): a pausableTimer made before the tool started, so a hold the tool takes at once still counts
+  function withTimeout(value, ms, onTimeout, timer) {
     if (!ms || ms <= 0) return Promise.resolve(value);
     return new Promise((resolve, reject) => {
       let done = false;
-      const timer = setTimeout(() => {
+      const t = timer || pausableTimer(ms);
+      t.start(() => {
         if (!done) {
           done = true;
           if (typeof onTimeout === 'function') { try { onTimeout(); } catch (e) { failNote('tools.registry.onTimeout', e); } }   // abort the work BEFORE we reject
           const e = new Error('timeout'); e.__timeout = true; reject(e);
         }
-      }, ms);
+      });
       Promise.resolve(value).then(
-        v => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
-        e => { if (!done) { done = true; clearTimeout(timer); reject(e); } }
+        v => { if (!done) { done = true; t.clear(); resolve(v); } },
+        e => { if (!done) { done = true; t.clear(); reject(e); } }
       );
     });
+  }
+  /* PAUSABLE DEADLINE (bug d3a76db3, review of 32fc352e4). A tool whose work waits on something that is not its work —
+     team.spawn / team.dispatch while the run's spend pool holds a worker's call until a call in flight settles — stops
+     its own timeout for that wait: ctx.holdTimeout() pauses it and returns the release (idempotent). Holds nest; the
+     timeout runs again, with what was left, when the last one is released. What was left is measured by the registry's
+     injected clock (makeRegistry({ clock }), else ctx.clock); with no clock a release re-arms the whole timeout, so a
+     held deadline is late, never early. A tool that never holds keeps its one-shot timer exactly as before. */
+  function pausableTimer(ms, now) {
+    const clockNow = typeof now === 'function' ? now : null;
+    let left = ms, armedAt = 0, holds = 0, over = false, started = false, timer = null, onExpire = null;
+    function expire() { timer = null; if (!over) { over = true; if (onExpire) onExpire(); } }
+    function arm() { armedAt = clockNow ? clockNow() : 0; timer = setTimeout(expire, Math.max(1, left)); }
+    function start(fn) { onExpire = fn; started = true; if (holds === 0 && !over) arm(); }
+    function hold() {
+      if (over) return () => {};
+      if (holds++ === 0 && timer) {
+        clearTimeout(timer); timer = null;
+        if (clockNow) left = Math.max(0, left - Math.max(0, clockNow() - armedAt));
+      }
+      let released = false;
+      return function release() {
+        if (released) return;
+        released = true;
+        if (over || holds === 0 || --holds > 0) return;
+        if (started) arm();
+      };
+    }
+    function clear() { over = true; if (timer) clearTimeout(timer); timer = null; }
+    return { start, hold, clear };
   }
 
   /* STOP MUST REACH A DEAF TOOL (h1 audit 2026-09-22). withTimeout above races the tool only against its OWN timer;
@@ -442,6 +473,8 @@
   function makeRegistry(opts) {
     const tools = {};
     const registryGraceMs = graceOf(opts && opts.cancelGraceMs);
+    // the injected clock a held tool timeout measures what was left by (PAUSABLE DEADLINE); absent = late, never early
+    const registryNow = (opts && opts.clock && typeof opts.clock.now === 'function') ? () => opts.clock.now() : null;
 
     function register(def, registration) {
       const provenance = registration && registration.provenance === 'connector' ? 'connector' : 'host';
@@ -574,7 +607,9 @@
       // fit its own rows inside the same budget this dispatch will enforce on its result.
       const hostCap = hostOutputCap(ctx);
       const limit = hostCap || OUTPUT_MAX;
-      const runCtx = ac !== ctx.signal ? Object.assign({}, ctx, { signal: ac.signal, outputMax: limit }) : ctx;
+      // the tool's timeout, made before it starts so a hold it takes at once counts (PAUSABLE DEADLINE above)
+      const deadline = timeoutMs > 0 ? pausableTimer(timeoutMs, registryNow || ((ctx.clock && typeof ctx.clock.now === 'function') ? () => ctx.clock.now() : null)) : null;
+      const runCtx = ac !== ctx.signal ? Object.assign({}, ctx, { signal: ac.signal, outputMax: limit, holdTimeout: deadline ? deadline.hold : () => () => {} }) : ctx;
       const startedAt = (ctx.clock && typeof ctx.clock.now === 'function') ? ctx.clock.now() : 0;
       const elapsed = () => ((ctx.clock && typeof ctx.clock.now === 'function') ? ctx.clock.now() - startedAt : 0);
       try {
@@ -594,7 +629,7 @@
         }
         const graceMs = graceOf(ctx.cancelGraceMs) != null ? graceOf(ctx.cancelGraceMs) : (registryGraceMs != null ? registryGraceMs : DEFAULT_CANCEL_GRACE_MS);
         const work = withCancelGrace(tool.run(call.args, runCtx), ctx.signal, graceMs);
-        const out = await withTimeout(work, timeoutMs, () => { try { ac.abort(new Error('tool timeout')); } catch (_) { try { ac.abort(); } catch (_) {} } });
+        const out = await withTimeout(work, timeoutMs, () => { try { ac.abort(new Error('tool timeout')); } catch (_) { try { ac.abort(); } catch (_) {} } }, deadline);
         const shaped = (out && typeof out === 'object' && 'content' in out);
         const raw = shaped ? out.content : (out == null ? '' : out);
         // A narrower tool ceiling may already have produced a preview. `fullContent` crosses this persistence

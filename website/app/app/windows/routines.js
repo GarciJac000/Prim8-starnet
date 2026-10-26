@@ -240,10 +240,16 @@
       const pending = (Array.isArray(j.deliveryBacklog) ? j.deliveryBacklog : []).concat(j.finalization ? [j.finalization] : []).filter(f => f && f.state === 'pending');
       let line = '';
       if (pending.length) {
+        // a routine the Commander PAUSED holds its results until resumed (cron-store deliveriesHeld): no retry is due
+        const held = j.enabled === false && j.state === 'paused';
         const retry = pending.map(f => Date.parse(f.nextAttemptAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
+        // the driver defers on UNDELIVERED results (cron-store undeliveredCount): one collapsed receipt stands for
+        // itself plus every earlier result it superseded
+        const undelivered = pending.reduce((n, f) => n + 1 + Math.max(0, Number(f.superseded) || 0), 0);
         line = '<div class="mc-detail">' + pending.length + ' result' + (pending.length === 1 ? '' : 's') + ' awaiting delivery' +
-          (retry ? ' · next retry ' + esc(wallClock(new Date(retry).toISOString())) : '') +
-          (maxPendingDeliveries > 0 && pending.length >= maxPendingDeliveries ? ' · new runs deferred until the destination recovers' : '') + '</div>';
+          (held ? ' · held until the routine is resumed'
+            : (retry ? ' · next retry ' + esc(wallClock(new Date(retry).toISOString())) : '') +
+              (maxPendingDeliveries > 0 && undelivered >= maxPendingDeliveries ? ' · new runs deferred until the destination recovers' : '')) + '</div>';
       }
       if (j.lastDeliveryAt && j.lastDeliveryOk === false) line += '<div class="mc-detail" style="color:var(--bad)">✕ delivery failed — ' + esc(j.lastDeliveryError || 'notification could not be sent') +
         ' <span class="dim">' + esc(fmtRel(j.lastDeliveryAt)) + '</span></div>';

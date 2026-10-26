@@ -187,7 +187,7 @@
 .wf-arcs path.chev { stroke: var(--wf-cyan); stroke-width: 2; stroke-dasharray: 6 8; opacity: .85; }
 .wf-arcs path.stem { stroke: var(--wf-cyan); stroke-width: 2; opacity: .85; }
 .wf-arcs .head { fill: var(--wf-cyan); stroke: none; opacity: .85; }   /* the way back ends in the joins' arrowhead on a solid stem, up into its part */
-.wf-strip.live .wf-arcs path.chev { animation: wf-rollb 1s linear infinite; }   /* the way back moves only on a line that can run */
+.wf-strip.live .wf-arcs path.chev { animation: wf-rollb 1s steps(7, jump-end) infinite; }   /* the way back moves only on a line that can run */
 @keyframes wf-rollb { to { stroke-dashoffset: -14; } }
 .wf-arcs text { font-family: 'VT323', monospace; font-size: 15px; fill: var(--wf-cyan); letter-spacing: .6px; }
 
@@ -330,7 +330,7 @@ textarea.wf-io:focus { outline: none; border-color: var(--ph); box-shadow: var(-
 /* the tile of the step working now (the floor lamp's WORKING): its own lamp turns the floor's working amber and pulses like the
    bay lamp does, and the tile's edge brightens — never the selection's gold, so "working" and "picked" never look alike */
 .wf-node.working { border-color: rgba(var(--ph-rgb),.7); }
-.wf-node.working .dot { background: #ffb23e; box-shadow: 0 0 0 1px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.3); animation: wf-working 1.2s ease-in-out infinite; }
+.wf-node.working .dot { background: #ffb23e; box-shadow: 0 0 0 1px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.3); animation: wf-working 1.2s steps(8, jump-none) infinite; }
 @keyframes wf-working { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .wf-node.working .dot { animation: none; } }
 .wf-job-h { font-size: 16px; letter-spacing: .6px; color: var(--ph-dim); }

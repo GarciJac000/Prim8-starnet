@@ -14,9 +14,11 @@
    Which files (capped at MAX_FILES, the same 4 channel.send allows):
      1. ATTACH lines in the final reply — "ATTACH: charts/today.png", one per line. The agent's explicit choice,
         and the lines are removed from the delivered text (they are an instruction to the station, not prose).
-        "MEDIA:" is read the same way: it is the reference harness's spelling and models carry it over.
-     2. Otherwise the images the fire itself GENERATED (image_generate artifacts on its run rows), so a routine
-        whose model forgot the convention still delivers the picture it paid for.
+        "MEDIA:" is read the same way: it is the reference harness's spelling and models carry it over. A line is
+        removed only when its file was really READ from a workspace (readNamed); one naming nothing stays as written.
+     2. Otherwise — only for a routine granted ALLOW IMAGES (the studio grant) — the images the fire itself GENERATED
+        (image_generate artifacts on its run rows), so a routine whose model forgot the convention still delivers the
+        picture it paid for. A routine without that grant that makes images for another purpose keeps its chat words-only.
    Neither applies to a chat the fire already sent its own files to with channel.send (possible under Full Access —
    filesAlreadySent): the same picture must not arrive twice.
 
@@ -35,24 +37,42 @@
   const MAX_FILES = comms.MAX_FILES;
   const kindForMime = comms.kindForMime;
   // A whole line that is only the instruction: optional bullet, the word, then the path (optionally `quoted`).
-  const ATTACH_LINE = /^\s*(?:[-*•]\s*)?(?:ATTACH|MEDIA)\s*:\s*[`"']?([^`"'\r\n]+?)[`"']?\s*$/i;
+  const ATTACH_LINE = /^\s*(?:[-*•]\s*)?(ATTACH|MEDIA)\s*:\s*([`"']?)([^`"'\r\n]+?)\2\s*$/i;
+  /* PROSE IS NOT AN INSTRUCTION (upgrade review 2026-10-23). Every chat routine's reply goes through here, including
+     routines written long before this existed, and digests carry lines like "- Media: TV coverage was strong" or
+     "Attach: invoice before replying". Read as files, those lines vanished from the message and the chat got a false
+     "could not be attached" note. A line is a file instruction only when its path LOOKS like a workspace path (one
+     token, with a folder or an extension, not a web address) AND it is written the way the [DELIVERY] note teaches
+     (the uppercase word) or marks the path as code/quoted. Anything else is the routine's words and stays. */
+  function attachPath(keyword, quote, raw) {
+    const p = String(raw || '').trim();
+    if (!p || /^[a-z][a-z0-9+.-]*:\/\//i.test(p)) return '';
+    if (!quote && /\s/.test(p)) return '';
+    if (!(/[\\/]/.test(p) || /\.[A-Za-z0-9]{1,10}$/.test(p))) return '';
+    return (quote || keyword === keyword.toUpperCase()) ? p : '';
+  }
 
-  /* parseReply(text) -> { text, files }
+  /* parseReply(text, only?) -> { text, files }
      Pulls the ATTACH lines out of a reply. `text` is the reply without them (trailing blank lines trimmed);
-     `files` is the paths in order, de-duplicated. A reply with no ATTACH line comes back unchanged. */
-  function parseReply(text) {
+     `files` is the paths in order, de-duplicated. A reply with no ATTACH line comes back unchanged.
+     `only` (an array of paths): remove only the lines naming one of THESE paths — the host passes the files it really
+     read (readNamed), so a line naming nothing on the station ("MEDIA: N/A", "- MEDIA: TV/radio") stays in the
+     message as written. When nothing is removed the reply comes back byte for byte. */
+  function parseReply(text, only) {
     const src = String(text == null ? '' : text);
+    const strip = Array.isArray(only) ? only.map(String) : null;
     const files = [];
-    let found = false;
+    let removed = false;
     const kept = [];
     for (const line of src.split(/\r?\n/)) {
       const m = ATTACH_LINE.exec(line);
-      if (!m) { kept.push(line); continue; }
-      found = true;
-      const p = m[1].trim();
-      if (p && files.indexOf(p) < 0) files.push(p);
+      const p = m ? attachPath(m[1], m[2], m[3]) : '';
+      if (!p) { kept.push(line); continue; }
+      if (files.indexOf(p) < 0) files.push(p);
+      if (strip && strip.indexOf(p) < 0) { kept.push(line); continue; }
+      removed = true;
     }
-    if (!found) return { text: src, files: [] };
+    if (!removed) return { text: src, files: files };
     return { text: kept.join('\n').replace(/\s+$/, ''), files: files };
   }
 
@@ -72,22 +92,38 @@
     }));
   }
 
-  /* pickFiles({ named, runs, agentId }) -> { files:[{ path, agents:[agentId…] }], dropped:[path…] }
+  /* pickFiles({ named, runs, agentId, generatedImages }) -> { files:[{ path, agents:[agentId…] }], dropped:[path…] }
      runs = the fire's run rows ({ agentId, artifacts }), NEWEST first. A named path is tried in the workspace of
      every agent that ran in this fire, newest first (on a work line the delivered words are the LAST stage's),
-     then the routine's own agent. With nothing named, each image the fire generated is read from the workspace of
-     the agent that generated it, in the order they were made. `dropped` is what the cap left behind. */
+     then the routine's own agent. With nothing named and `generatedImages` true, each image the fire generated is
+     read from the workspace of the agent that generated it, in the order they were made. `dropped` is what the cap
+     left behind.
+     `generatedImages` is the host's answer to "does this routine hold the ALLOW IMAGES (studio) grant": a routine
+     that makes pictures for some other purpose ("render wallpapers into /wallpapers") never had them posted to its
+     chat before 0.14, and must not start now (upgrade review 2026-10-23). Absent -> false. */
+  // The workspaces a fire's files may live in: every agent that ran in it, newest first, then the routine's own agent.
+  function fireAgents(runs, agentId) {
+    const own = String(agentId || '');
+    const agents = [];
+    for (const r of (Array.isArray(runs) ? runs : [])) { const a = String((r && r.agentId) || ''); if (a && agents.indexOf(a) < 0) agents.push(a); }
+    if (own && agents.indexOf(own) < 0) agents.push(own);
+    return agents;
+  }
+
   function pickFiles(o) {
     o = o || {};
     const runs = Array.isArray(o.runs) ? o.runs.filter(r => r && typeof r === 'object') : [];
     const own = String(o.agentId || '');
-    const agents = [];
-    for (const r of runs) { const a = String(r.agentId || ''); if (a && agents.indexOf(a) < 0) agents.push(a); }
-    if (own && agents.indexOf(own) < 0) agents.push(own);
-    const named = Array.isArray(o.named) ? o.named.filter(p => typeof p === 'string' && p.trim()) : [];
+    const agents = fireAgents(runs, own);
+    // a named entry is a path, or a file readNamed already read ({ path, agents, got }) — it is sent from that read
+    const named = (Array.isArray(o.named) ? o.named : [])
+      .map(p => (typeof p === 'string' ? { path: p, agents: agents.slice() } : p))
+      .filter(p => p && typeof p.path === 'string' && p.path.trim());
     let all;
     if (named.length) {
-      all = named.map(p => ({ path: p, agents: agents.slice() }));
+      all = named.map(p => (p.got ? { path: p.path, agents: (p.agents || agents).slice(), got: p.got } : { path: p.path, agents: (p.agents || agents).slice() }));
+    } else if (o.generatedImages !== true) {
+      all = [];
     } else {
       all = [];
       for (const r of runs.slice().reverse()) {
@@ -105,20 +141,48 @@
   /* sendFiles(files, { read(agentId, rel), send(item) }) -> Promise<{ attached:[path], failed:[{ path, error }] }>
      Sequential, never throws. read answers { ok, buffer, name, mime } | { ok:false, error } (the host's jail proof);
      send answers the transport's SendResult. The first agent whose workspace holds the file wins. */
+  // One file from the first workspace that holds it -> { got } | { error }. Never throws.
+  async function readOne(f, read) {
+    let readError = '';
+    for (const agentId of (f.agents && f.agents.length ? f.agents : [''])) {
+      let got;
+      try { got = await read(agentId, f.path); } catch (e) { got = { ok: false, error: (e && e.message) || 'read threw' }; }
+      if (got && got.ok !== false && got.buffer && got.buffer.length) return { got: got };
+      readError = readError || (got && got.error) || 'not found';
+    }
+    return { error: readError || 'not found' };
+  }
+
+  /* readNamed(paths, agents, read) -> Promise<{ found:[{ path, agents, got }], missing:[{ path, error }] }>
+     Reads each path an ATTACH line names, in the fire's workspaces (fireAgents order). Only a FOUND file makes its line
+     an instruction (the host strips it and attaches the file, or says it could not be attached — true, the file is on
+     the station); a missing one leaves the line in the message as the routine wrote it, with no note: prose such as
+     "MEDIA: N/A" names nothing, and the station never claims a file it never saw (upgrade review 2026-10-23). Only the
+     first MAX_FILES found keep their bytes (the rest are over the cap and only need to be known to exist). */
+  async function readNamed(paths, agents, read) {
+    const found = [], missing = [];
+    const list = (Array.isArray(paths) ? paths : []).filter(p => typeof p === 'string' && p.trim());
+    for (const p of list) {
+      const f = { path: p, agents: (Array.isArray(agents) ? agents : []).slice() };
+      const r = typeof read === 'function' ? await readOne(f, read) : { error: 'attaching files is not wired on this host' };
+      if (!r.got) { missing.push({ path: p, error: r.error }); continue; }
+      found.push(found.length < MAX_FILES ? Object.assign(f, { got: r.got }) : f);
+    }
+    return { found: found, missing: missing };
+  }
+
   async function sendFiles(files, io) {
     const read = io && typeof io.read === 'function' ? io.read : null;
     const send = io && typeof io.send === 'function' ? io.send : null;
     const attached = [], failed = [];
     for (const f of (Array.isArray(files) ? files : [])) {
-      if (!read || !send) { failed.push({ path: f.path, error: 'attaching files is not wired on this host' }); continue; }
-      let got = null, readError = '';
-      for (const agentId of (f.agents && f.agents.length ? f.agents : [''])) {
-        try { got = await read(agentId, f.path); } catch (e) { got = { ok: false, error: (e && e.message) || 'read threw' }; }
-        if (got && got.ok !== false && got.buffer && got.buffer.length) break;
-        readError = readError || (got && got.error) || 'not found';
-        got = null;
+      if ((!read && !f.got) || !send) { failed.push({ path: f.path, error: 'attaching files is not wired on this host' }); continue; }
+      let got = f.got || null;
+      if (!got) {
+        const r = await readOne(f, read);
+        if (!r.got) { failed.push({ path: f.path, error: 'could not be read from the workspace (' + r.error + ')' }); continue; }
+        got = r.got;
       }
-      if (!got) { failed.push({ path: f.path, error: 'could not be read from the workspace (' + readError + ')' }); continue; }
       const name = String(got.name || f.path).split(/[\\/]/).pop();
       const item = { kind: kindForMime(got.mime, name), buffer: got.buffer, filename: name, mime: got.mime || '' };
       let r;
@@ -153,5 +217,5 @@
       + '; images arrive inline. Never write that the message or a file cannot be sent.';
   }
 
-  return { parseReply, pickFiles, filesAlreadySent, sendFiles, missedNote, deliveryNote, MAX_FILES };
+  return { parseReply, pickFiles, fireAgents, readNamed, filesAlreadySent, sendFiles, missedNote, deliveryNote, MAX_FILES };
 });
