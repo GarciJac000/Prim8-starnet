@@ -145,6 +145,60 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   A.eq(ro.calls[0].maxToolCalls, undefined, 'a worker asked to fix main.py has no 3-tool one-host cap');
 }
 
+/* ---- THE ONE-HOST BOUND IS FOR A PURE READ (starnet-releases#5): a worker brief that named one host beside "review"
+   was cut to 3 turns / 3 tools / 45s even when it also asked for engineering work — "Review the deployment script for
+   starnet-demo.io, write a unit test for it, and run it" stopped after three tools and read as a broken worker. Both
+   ways, on all three dimensions: the worker's slice is the setTimeout the dispatcher arms (no injected clock). ---- */
+{
+  const realSetTimeout = global.setTimeout;
+  const slices = [];
+  global.setTimeout = function (fn, ms) { slices.push(ms); return realSetTimeout.apply(this, arguments); };
+  try {
+    const briefs = [
+      ['Review the deployment script for starnet-demo.io, write a unit test for it, and run it.', false, 'the reporter\'s review + write + run brief'],
+      ['Review the deployment script for starnet-demo.io, write a unit test that covers it, then run the test and report the result.', false, 'review, write a test, run it'],
+      ['Inspect the nginx config for example.com and fix the redirect.', false, 'inspect + fix'],
+      ['Check example.com and save the summary into notes.md', false, 'check + save'],
+      ['Review the auth flow for example.com and implement the missing token refresh.', false, 'review + implement'],
+      ['Check example.com and build a landing page like it.', false, 'check + build'],
+      ["Read example.com's pricing page", true, 'a pure one-host read'],
+      ['Check starnessos.com and read its docs.', true, 'a pure one-host docs read'],
+      ["Read example.com's pricing page and write a short summary of the plans.", true, 'a summary is the answer, not an artifact'],
+      ['check if example.com is up and running', true, '"up and running" is not a run step'],
+      ['check the latest build on ci.example.com', true, '"the latest build" is not a build step']
+    ];
+    for (const [prompt, capped, why] of briefs) {
+      slices.length = 0;
+      const ro = fakeRunOnce();
+      const roster = new Map([['eng', { system: 'E' }]]);
+      const { dispatchTool } = makeOrchestrationTools({ runOnce: ro, roster: () => roster, key: 'k', model: 'm', newId: counter(), workerMaxIters: 16 });
+      await dispatchTool.run({ workers: [{ agentId: 'eng', prompt }] }, { agentId: 'lead', runId: 'lead-run', emit: () => {} });
+      const c = ro.calls[0];
+      A.eq(c.maxIters, capped ? 3 : 16, '#5 dispatch turns: ' + why);
+      A.eq(c.maxToolCalls, capped ? 3 : undefined, '#5 dispatch tools: ' + why);
+      A.eq(slices.includes(45000), capped, '#5 dispatch 45s wall clock: ' + why);
+      if (!capped) A.ok(slices.includes(600000), '#5 an uncapped worker keeps its share of the dispatch wall clock: ' + why);
+    }
+  } finally {
+    global.setTimeout = realSetTimeout;
+  }
+  // team.spawn's clones ask the same question
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-spawn-pureread-'));
+  try {
+    const subagents = makeSubagentManager({ fs, pathMod: path, file: path.join(root, 'sub.json'), clock: { now: () => 1000 }, emit: () => {}, newId: counter() });
+    const ro = fakeRunOnce();
+    const { spawnTool } = makeOrchestrationTools({ runOnce: ro, roster: () => new Map(), key: 'k', model: 'm', selfSystem: 'S', newId: counter(), workerMaxIters: 9, subagents });
+    await spawnTool.run({ tasks: [{ prompt: 'Review the deployment script for starnet-demo.io, write a unit test for it, and run it.' }, { prompt: "Read example.com's pricing page" }] }, { agentId: 'lead', emit: () => {} });
+    const work = ro.calls.find(c => /starnet-demo\.io/.test(JSON.stringify(c.messages)));
+    const read = ro.calls.find(c => /example\.com/.test(JSON.stringify(c.messages)));
+    A.eq(work && work.maxIters, 9, '#5 spawn: a review + write + run clone keeps the ordinary turn cap');
+    A.eq(work && work.maxToolCalls, undefined, '#5 spawn: a review + write + run clone has no 3-tool cap');
+    A.eq(read && read.maxToolCalls, 3, '#5 spawn: a pure one-host read clone is still capped');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 /* ---- ONE BRIEF, ONE ANSWER (review 10-15): the dispatcher classifies a worker's brief with the SAME file probe the
    worker's own run uses (index.js runFileExists: that worker's workspace + the project it runs in). Before, a worker
    briefed "check about.me" with about.me in its workspace was capped at 3 turns / 3 tools / 45s by the dispatcher
