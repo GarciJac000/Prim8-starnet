@@ -1,10 +1,10 @@
 'use strict';
 /* node test/curved-dashboard.test.js — the curved dashboard (Andrew 10-25: "bring back the more curved edges … we can
    still keep our style, just with the more curved edges without the sharp pointiness … it looks really inconsistent
-   with everything else", then of six lit materials, "go with 2 (scanlines)").
+   with everything else"; a scanline raster was then picked and dropped 10-26 as hard to see on a monitor).
    SOURCE-LOCKED: one radius scale runs the dashboard (cards 10, keys 8, rows 6, chips 4) and is declared AFTER every
    older 2px rule it replaces, so the curve wins at equal specificity; tabs round only the corners that leave their rule;
-   the COMMS heading and dock rules lose their end ticks; the lit material is the scanline raster, not the checker; and
+   the COMMS heading and dock rules lose their end ticks; the lit material stays the checker, not a raster; and
    what stays square on purpose (the lamps, the speech rails) is not rounded by the layer. */
 const A = require('./_assert.js');
 const fs = require('fs');
@@ -46,13 +46,11 @@ A.ok(/#bottombar > \.bb-group:is\(\[data-group="crew"\], \[data-group="system"\]
 A.ok(!/dg-lamp|ny-lamp|ws-dot|cp-dot|crew-prog|ctx-cells/.test(layer), 'the lamps and meters keep their square pixel cells');
 A.ok(!/\.body\b/.test(layer.replace(/\/\*[\s\S]*?\*\//g, '')), 'the speech rails are not rounded (COMMS has no bubbles)');
 
-/* ---- 5. the lit material is the scanline raster ---- */
+/* ---- 5. the lit material stays the checker (a scanline raster was tried and dropped 10-26: hard to see on a monitor) ---- */
 const mesh = glass.slice(glass.indexOf('PIP-BOY MESH'), glass.indexOf('PIP-BOY TYPE SCALE'));
-A.ok(/SCANLINES \(Andrew 10-25/.test(mesh), 'the mesh section records the pick');
-A.ok(/--pg-dither: repeating-linear-gradient\(180deg, rgba\(var\(--ph-rgb\), \.3\) 0 var\(--scan-px\), transparent var\(--scan-px\) calc\(3 \* var\(--scan-px\)\)\);/.test(mesh), 'phosphor: one lit line in three at .30');
-A.ok(/--pg-dither-gold: repeating-linear-gradient\(180deg, rgba\(var\(--gold-rgb\), \.32\) 0 var\(--scan-px\)/.test(mesh), 'gold: the same raster at .32');
-A.ok(/\.ny-grp \{\s*background: repeating-linear-gradient\(180deg, rgba\(var\(--ny-k\), \.24\)/.test(mesh), 'a NEEDS YOU strip is a raster band in its kind\'s colour');
-A.ok(!/repeating-conic-gradient/.test(mesh), 'no checker left in the dashboard\'s material');
-A.ok(/#left \.ws-head \{\s*--scan-px: 1px;/.test(mesh), 'the counter-zoomed SESSIONS head re-declares the raster in plain pixels');
+A.ok(/Tried and dropped 10-26: a scanline raster/.test(mesh), 'the mesh section records why the raster went');
+A.ok(/--pg-dither: repeating-conic-gradient\(rgba\(var\(--ph-rgb\), \.3\) 0 25%, transparent 0 50%\) 0 0 \/ var\(--mesh-cell\) var\(--mesh-cell\);/.test(mesh), 'phosphor: the 2-screen-pixel checker at .30');
+A.ok(/--pg-dither-gold: repeating-conic-gradient\(rgba\(var\(--gold-rgb\), \.32\)/.test(mesh), 'gold: the same checker at .32');
+A.ok(!/repeating-linear-gradient\(180deg/.test(mesh) && !/--scan-px/.test(glass), 'no scanline raster anywhere in the dashboard\'s material');
 
 A.report('curved-dashboard.test');
