@@ -1723,25 +1723,29 @@ body.glass-demo:not(.hud-mode) #screen-game .widget-rail { border-radius: 2px; }
    the open SESSIONS tab, the dock's open group, each NEEDS YOU kind's strip. The cells are two SCREEN pixels at every
    TEXT SIZE and display scale (the 10-01 shots were taken at 150%, three pixels a cell: "finer" is two), so the checker
    stays crisp and never beats against the zoom. The windows keep their own material (Andrew 10-18: "keep UI menus as is").
+   SCANLINES (Andrew 10-25, of six materials rendered on the curved dashboard — checker, scanlines, hatch, halftone, glass
+   light, soft mesh — "go with 2 (scanlines)"): the lit material is now the CRT raster, one lit screen line in three
+   (phosphor .30, gold .32: the checker's strengths), still matte and still the only thing that says lit. A line is one
+   SCREEN pixel at 1x and two device pixels on a 1.5x / 2x display (one there would vanish), at every TEXT SIZE.
    ============================================================ */
 body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) {
-  --mesh-cell: calc(2px * var(--sn-unzoom, 1));
-  --pg-dither: repeating-conic-gradient(rgba(var(--ph-rgb), .3) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
-  --pg-dither-gold: repeating-conic-gradient(rgba(var(--gold-rgb), .32) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
+  --scan-px: calc(1px * var(--sn-unzoom, 1));
+  --pg-dither: repeating-linear-gradient(180deg, rgba(var(--ph-rgb), .3) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
+  --pg-dither-gold: repeating-linear-gradient(180deg, rgba(var(--gold-rgb), .32) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
   --pg-glow: none;
   --pg-glow-soft: none;
 }
-@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --mesh-cell: calc(1.3333px * var(--sn-unzoom, 1)); } }
-@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --mesh-cell: calc(1px * var(--sn-unzoom, 1)); } }
-/* the head of the SESSIONS view is counter-zoomed (it keeps its size at every TEXT SIZE): its cells are plain pixels. The
-   mesh is re-declared there, since a custom property resolves its var() where it is declared (the rail's zoomed cell
+@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --scan-px: calc(1.3333px * var(--sn-unzoom, 1)); } }
+@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --scan-px: calc(1px * var(--sn-unzoom, 1)); } }
+/* the head of the SESSIONS view is counter-zoomed (it keeps its size at every TEXT SIZE): its lines are plain pixels. The
+   raster is re-declared there, since a custom property resolves its var() where it is declared (the rail's zoomed line
    would ride in) */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head {
-  --mesh-cell: 2px;
-  --pg-dither: repeating-conic-gradient(rgba(var(--ph-rgb), .3) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
+  --scan-px: 1px;
+  --pg-dither: repeating-linear-gradient(180deg, rgba(var(--ph-rgb), .3) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
 }
-@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --mesh-cell: 1.3333px; } }
-@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --mesh-cell: 1px; } }
+@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --scan-px: 1.3333px; } }
+@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --scan-px: 1px; } }
 /* the selection (fill only, Andrew 10-18) is the mesh; a wait's selection keeps its gold */
 body.glass-demo:not(.hud-mode) #screen-game :is(#crew .crew-row, #left #workstreams .ws-row) { --pip-fill: var(--pg-dither), rgba(var(--ph-rgb), .06); }
 body.glass-demo:not(.hud-mode) #screen-game #left #workstreams .ws-row:not(.attn) { --pip-fill: var(--pg-dither), rgba(var(--ph-rgb), .05); }
@@ -1750,9 +1754,9 @@ body.glass-demo:not(.hud-mode) #screen-game :is(#crew .crew-row.asking, #left #w
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.asking { background: var(--pg-dither-gold), rgba(var(--gold-rgb), .06); box-shadow: none; }
 /* the open tab */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab.on { background: var(--pg-dither), rgba(var(--ph-rgb), .08); }
-/* NEEDS YOU: each kind's strip is a mesh band in its colour */
+/* NEEDS YOU: each kind's strip is a raster band in its colour */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-needs .ny-grp {
-  background: repeating-conic-gradient(rgba(var(--ny-k), .24) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell), rgba(var(--ny-k), .06);
+  background: repeating-linear-gradient(180deg, rgba(var(--ny-k), .24) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px))), rgba(var(--ny-k), .06);
 }
 /* no halo anywhere on the dashboard: a lit or selected row, the dock's open group (its open-window underline stays), the
    first-run starter cards, the UPLINK lamp (a housed lamp, like the crew's) */
