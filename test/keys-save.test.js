@@ -132,7 +132,7 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     A.eq(sent[0].opts.headers['x-api-key'], PASTE, 'chain: web_request sent the EXACT pasted value');
     A.ok(res.content.indexOf(PASTE) < 0, 'chain: the value never comes back in the result');
 
-    A.eq(KT.nameSavedKeys(message, keys), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS] — send the campaign', 'chain: the paste becomes the placeholder');
+    A.eq(KT.nameSavedKeys(message, keys), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in API KEYS] — send the campaign', 'chain: the paste becomes the placeholder');
     setKnownSecretSource(() => keys.map(k => k.key));
     A.eq(redact('echo ' + PASTE), 'echo [redacted-secret]', 'chain: once saved, the known-value redaction scrubs it everywhere');
     setKnownSecretSource(null);
@@ -149,7 +149,7 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
   // ---- E. nameSavedKeys ----
   {
     const ks = [{ key: 'abcd1234efgh5678ijkl', envVar: 'SHORT_API_KEY' }, { key: 'abcd1234efgh5678ijkl9999', envVar: 'LONG_API_KEY' }, { key: 'tiny123', envVar: 'TINY_API_KEY' }];
-    A.eq(KT.nameSavedKeys('a abcd1234efgh5678ijkl9999 b', ks), 'a [LONG_API_KEY saved in KEYS] b', 'longest key first: a key containing another is replaced whole');
+    A.eq(KT.nameSavedKeys('a abcd1234efgh5678ijkl9999 b', ks), 'a [LONG_API_KEY saved in API KEYS] b', 'longest key first: a key containing another is replaced whole');
     A.eq(KT.nameSavedKeys('tiny123 stays', ks), 'tiny123 stays', 'values shorter than KEY_MIN are never touched');
     A.eq(KT.nameSavedKeys('', ks), '', 'empty text');
   }
@@ -209,7 +209,7 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
       const keys = [{ key: PASTE, envVar: 'SALESHANDY_API_KEY' }];
       A.eq(await store.scrubText(t => KT.nameSavedKeys(t, keys)), true, 'scrub reports a change');
       const b = store.read().briefs[0];
-      A.eq([b.originalDirective, b.currentInput], ['here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]', 'here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]'], 'directive + input named');
+      A.eq([b.originalDirective, b.currentInput], ['here is my saleshandy api key [SALESHANDY_API_KEY saved in API KEYS]', 'here is my saleshandy api key [SALESHANDY_API_KEY saved in API KEYS]'], 'directive + input named');
       const file = path.join(dir, 'task-briefs.json');
       A.ok(fs.readFileSync(file, 'utf8').indexOf(PASTE) < 0, 'the store file no longer holds the key');
       A.ok(!fs.existsSync(file + '.bak') || fs.readFileSync(file + '.bak', 'utf8').indexOf(PASTE) < 0, 'nor does its .bak last-known-good copy');
@@ -226,11 +226,11 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     const raw = 'hey here is my saleshandy api key ' + PASTE + ' — send it';
     const scrubbed = KT.nameSavedKeys(raw, [{ key: PASTE, envVar: 'SALESHANDY_API_KEY' }]);
     const found = page.swappedKeys(raw, scrubbed);
-    A.eq(found, [{ value: PASTE, placeholder: '[SALESHANDY_API_KEY saved in KEYS]' }], 'the page recovers exactly the swapped value');
-    A.eq(page.swappedKeys('a ' + PASTE, KT.nameSavedKeys('a ' + PASTE, [{ key: PASTE, envVar: 'X_API_KEY' }])), [{ value: PASTE, placeholder: '[X_API_KEY saved in KEYS]' }], 'a key at the very end of the text');
-    A.eq(page.swappedKeys('unrelated', 'something [X_API_KEY saved in KEYS] else'), [], 'a pair that does not line up yields nothing');
-    A.eq(page.nameKeys('hey here is my saleshandy api key ' + PASTE.slice(0, 20) + '…', found), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS]…', 'a key cut short by a clipped label is named too');
-    A.eq(page.nameKeys('run title: ' + PASTE + ' · run 6ab9', found), 'run title: [SALESHANDY_API_KEY saved in KEYS] · run 6ab9', 'a whole key anywhere');
+    A.eq(found, [{ value: PASTE, placeholder: '[SALESHANDY_API_KEY saved in API KEYS]' }], 'the page recovers exactly the swapped value');
+    A.eq(page.swappedKeys('a ' + PASTE, KT.nameSavedKeys('a ' + PASTE, [{ key: PASTE, envVar: 'X_API_KEY' }])), [{ value: PASTE, placeholder: '[X_API_KEY saved in API KEYS]' }], 'a key at the very end of the text');
+    A.eq(page.swappedKeys('unrelated', 'something [X_API_KEY saved in API KEYS] else'), [], 'a pair that does not line up yields nothing');
+    A.eq(page.nameKeys('hey here is my saleshandy api key ' + PASTE.slice(0, 20) + '…', found), 'hey here is my saleshandy api key [SALESHANDY_API_KEY saved in API KEYS]…', 'a key cut short by a clipped label is named too');
+    A.eq(page.nameKeys('run title: ' + PASTE + ' · run 6ab9', found), 'run title: [SALESHANDY_API_KEY saved in API KEYS] · run 6ab9', 'a whole key anywhere');
     A.eq(page.nameKeys(PASTE.slice(0, 12) + 'zzzz', found), PASTE.slice(0, 12) + 'zzzz', 'a mere shared prefix is left alone');
   }
 
@@ -288,6 +288,37 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     A.ok(/ownerDirective: ownerWording/.test(index) && /let ownerWording = !recipeId && !\(body && body\.recipeId\)/.test(index), '/api/run still mints ownerDirective false for a recipe launch');
     const hub = read('sidecar/channels/hub.js');
     A.ok(/initialTaint: 'upstream agent output'[\s\S]{0,1600}lineId: lineId \|\| undefined/.test(hub), 'the hub hop still passes its lineId');
+  }
+
+  // ---- J. WHERE KEYS LIVE (readiness review R15) + a replaced key leaves no copy (R11) ----
+  {
+    const REAL = 'CONNECT › ABILITIES › CONNECTED › API KEYS';   // the manual's path (manual.js), the labels the app shows
+    const okSave = () => ({ ok: true, record: { name: 'Saleshandy', envVar: 'SALESHANDY_API_KEY', autonomous: false, unattendedSupported: true }, existed: false, sameValue: false, saved: true });
+    const saved = await KT.makeKeyTools({ ownerTexts: () => ['key ' + PASTE], save: okSave }).saveTool.run({ service: 'Saleshandy' }, { runId: 'r' });
+    A.ok(saved.content.indexOf('unattended switch in ' + REAL) >= 0, 'the unattended switch is named where it really is: ' + saved.content);
+    A.ok(/saved .*in API KEYS as SALESHANDY_API_KEY/i.test(saved.content.split('\n')[0]), 'the save line names API KEYS: ' + saved.content.split('\n')[0]);
+    const refused = await thrown(KT.makeKeyTools({ ownerTexts: () => null, save: okSave }).saveTool.run({ service: 'X' }, { runId: 'r' }));
+    A.ok(refused.indexOf('add it in ' + REAL) >= 0, 'the not-the-Commander refusal points at the real place: ' + refused);
+    A.eq(KT.keyPlaceholder('SALESHANDY_API_KEY'), '[SALESHANDY_API_KEY saved in API KEYS]', 'the chat placeholder names the block the key is in');
+    const web = makeWebTools({ fetchImpl: async () => ({ status: 200, headers: { get: () => '' }, text: async () => '' }), lookup: null, surface: 'interactive', redact: s => s, resolveServiceKey: () => ({ ok: false, reason: 'unknown' }) }).requestTool;
+    const missing = await thrown(web.run({ url: 'https://api.example.com/x', headers: { 'x-api-key': '${NOPE_API_KEY}' } }, { agentId: 'a', runId: 'r', callId: 'c', emit: () => {} }));
+    A.ok(missing.indexOf('add it in ' + REAL) >= 0, 'web_request\'s missing-key fix points at the real place: ' + missing);
+    const webU = makeWebTools({ fetchImpl: async () => ({ status: 200, headers: { get: () => '' }, text: async () => '' }), lookup: null, surface: 'autonomous', redact: s => s, resolveServiceKey: () => ({ ok: false, reason: 'unattended', name: 'Saleshandy' }) }).requestTool;
+    const unattended = await thrown(webU.run({ url: 'https://api.example.com/x', headers: { 'x-api-key': '${SALESHANDY_API_KEY}' } }, { agentId: 'a', runId: 'r', callId: 'c', emit: () => {} }));
+    A.ok(unattended.indexOf('approve it in ' + REAL) >= 0, 'web_request\'s unattended refusal points at the real place: ' + unattended);
+    // no shipped string (code, not comments) still sends anyone to a place the app does not show
+    const read = rel => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', rel), 'utf8');
+    const strings = src => src.split('\n').filter(l => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
+    for (const rel of ['sidecar/tools/builtin/keys.js', 'sidecar/tools/builtin/web.js', 'sidecar/index.js'])
+      A.ok(!/TOOLSETS & CONNECTORS/.test(strings(read(rel))), rel + ': no string names TOOLSETS & CONNECTORS');
+    // the page still reads back a placeholder written before R15
+    const src = read('frontend/app/chat.js');
+    const page = new Function(A.fnBody(src, 'function swappedKeys(') + '\nreturn swappedKeys;')();
+    A.eq(page('k ' + PASTE, 'k [X_API_KEY saved in KEYS]'), [{ value: PASTE, placeholder: '[X_API_KEY saved in KEYS]' }], 'an older "[X saved in KEYS]" placeholder still reads back');
+    // R11: the chat path replaces a key through the removal writer, and its revert does too (source lock; live in keys-save.http)
+    const index = read('sidecar/index.js');
+    A.ok(/const replacesKey = !!\(prev && prev\.key && prev\.key !== key\);\s*if \(!\(replacesKey \? saveServiceKeyRemoval\(serviceKeys\) : saveServiceKeys\(\)\)\)/.test(index), 'a replaced key is written with saveServiceKeyRemoval (main AND .bak), as the panel does');
+    A.ok(/serviceKeys = before;\s*applyServiceKeysEnv\(\);[\s\S]{0,200}if \(!saveServiceKeyRemoval\(serviceKeys\)\)/.test(index), 'the revert of a failed save is a removal write too');
   }
 
   A.report('keys-save');

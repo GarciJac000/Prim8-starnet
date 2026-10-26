@@ -21,6 +21,7 @@ const root = path.resolve(__dirname, '..');
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'starnet-keys-save-'));
 const PASTE = '9c2f41d7a8e04b6f93a1c5d27e8b0f4a6d3c19e2';
 const PASTE_TEMPLATE = '3a9f0c7e2b5d8a1f4c6e9b0d2a7f5c3e8b1d4f6a';   // a key in text the Commander did not type (F9)
+const PASTE_ROTATED = 'c7e0a3f6b9d2e5a8c1f4b7d0e3a6c9f2b5d8e1a4';   // the new key that replaces PASTE (R11)
 const PASTE_LOST = 'f1e2d3c4b5a6978877665544332211aabbccddee';   // the key whose save the disk refuses
 let child, base, headers;
 const seen = [];   // every chat request body the provider received
@@ -119,12 +120,12 @@ async function run(text, extra) {
     walk(workspace);
     A.eq(holders.filter(p => !/^connectors\/servicekeys\.json(\.bak)?$/.test(p)), [], 'no file but the KEYS store holds the pasted key: ' + JSON.stringify(holders));
     const transcriptRows = fs.readdirSync(path.join(workspace, 'transcript-history-v2')).filter(f => /\.jsonl$/.test(f)).map(f => fs.readFileSync(path.join(workspace, 'transcript-history-v2', f), 'utf8')).join('');
-    A.ok(transcriptRows.indexOf('[SALESHANDY_API_KEY saved in KEYS]') >= 0, 'the transcript\'s directive row names the key');
+    A.ok(transcriptRows.indexOf('[SALESHANDY_API_KEY saved in API KEYS]') >= 0, 'the transcript\'s directive row names the key');
 
     // 4. the page's scrub call
     const scrub = await api('/api/servicekeys/scrub', { texts: ['hey here is my saleshandy api key ' + PASTE + ' — send my email campaign', 'nothing here', 42] });
     A.eq(scrub.status, 200, 'scrub -> 200');
-    A.eq(scrub.body.texts, ['hey here is my saleshandy api key [SALESHANDY_API_KEY saved in KEYS] — send my email campaign', 'nothing here', 42], 'scrub swaps the paste for the placeholder and leaves the rest');
+    A.eq(scrub.body.texts, ['hey here is my saleshandy api key [SALESHANDY_API_KEY saved in API KEYS] — send my email campaign', 'nothing here', 42], 'scrub swaps the paste for the placeholder and leaves the rest');
     A.eq((await api('/api/servicekeys/scrub', { texts: 'nope' })).status, 400, 'scrub refuses a non-array');
 
     // 5. a run without a key never offers the tool
@@ -146,6 +147,20 @@ async function run(text, extra) {
     await stop(); await boot();
     const again = await api('/api/servicekeys');
     A.ok((again.body.keys || []).some(k => k.envVar === 'SALESHANDY_API_KEY'), 'the saved key survives a restart');
+
+    // 7. ROTATE (readiness review R11): a new key pasted for the same service REPLACES the old one, and the old value is
+    //    left in neither the store nor its .bak (the removal writer, as the panel's replace does)
+    const rot = await run('here is my NEW saleshandy api key ' + PASTE_ROTATED);
+    const rotRes = rot.events.find(e => e.name === 'agent.tool_result' && e.payload.callId === 'ks_1');
+    A.ok(rotRes && rotRes.payload.ok, 'the rotated key is saved: ' + JSON.stringify(rotRes && rotRes.payload));
+    const rotMsg = rot.requests[rot.requests.length - 1].messages.find(m => m && m.role === 'tool' && m.tool_call_id === 'ks_1');
+    A.ok(rotMsg && /Replaced the saved key for Saleshandy — it is now in API KEYS as SALESHANDY_API_KEY/.test(String(rotMsg.content)), 'the model is told it replaced the key, and where it lives: ' + String(rotMsg && rotMsg.content).slice(0, 160));
+    const storeFile = path.join(workspace, 'connectors', 'servicekeys.json');
+    for (const f of [storeFile, storeFile + '.bak']) {
+      const body = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+      A.ok(body.indexOf(PASTE_ROTATED) >= 0, path.basename(f) + ' holds the new key');
+      A.ok(body.indexOf(PASTE) < 0, path.basename(f) + ' no longer holds the rotated-out key');
+    }
   } catch (e) {
     A.ok(false, 'threw: ' + ((e && e.stack) || e));
   } finally {
