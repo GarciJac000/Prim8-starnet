@@ -17,9 +17,17 @@
      CommunityMaps.release()          -> forget every picture (revokes their object URLs)
      CommunityMaps.buildText(map)     -> the map's build file text
      CommunityMaps.picture(cleanDoc, dropped, drawPlan) -> { dataUrl, kind: 'station'|'plan', why }
-     CommunityMaps.share(fields)      -> { ok, outcome: 'ok'|'refused'|'unknown', status, linked, code?, submission?, error? } */
+     CommunityMaps.share(fields)      -> { ok, outcome: 'ok'|'refused'|'unknown', status, linked, code?, submission?, error? }
+     CommunityMaps.live               -> COMMUNITY_LIVE, below */
 'use strict';
 const CommunityMaps = (() => {
+  /* COMMUNITY_LIVE — is community sharing open in this app? THE ONE SWITCH for every in-app door to the community
+     cloud: build mode's COMMUNITY MAPS gallery and SHARE TO COMMUNITY (build.js, Presets › SHARED BUILDS) and the
+     skill card's Share to market (stationui.js, ABILITIES › AGENT SKILLS). While it is false those three are not in
+     the page at all (never a disabled key with a tip), and the page never asks for the gallery. The website holds its own side
+     back the same way (website/site.js COMMUNITY_LIVE); its maps page needs an app release that carries SHARE TO
+     COMMUNITY, so this one flips first, in a release, once the cloud's share endpoints answer. */
+  const COMMUNITY_LIVE = false;
   const api = (url, init) => (typeof Harness !== 'undefined' && Harness.apiFetch) ? Harness.apiFetch(url, init) : fetch(url, init);
   const STILL_PX = 1280, STILL_SMALL_PX = 960, MAX_DATA_URL = 2.8 * 1024 * 1024 * 4 / 3;
   const PICTURES_AT_ONCE = 3;
@@ -143,6 +151,6 @@ const CommunityMaps = (() => {
     } catch (_) { return { ok: false, outcome: 'unknown', status: 0, error: UNREACHABLE }; }
   }
 
-  return { load, stillUrl, release, buildText, picture, share };
+  return { live: COMMUNITY_LIVE, load, stillUrl, release, buildText, picture, share };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = CommunityMaps;

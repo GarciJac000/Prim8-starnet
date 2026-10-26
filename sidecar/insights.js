@@ -31,7 +31,7 @@
     const bucketMs = num(opts.bucketMs) > 0 ? num(opts.bucketMs) : HOUR;
     const nBuckets = num(opts.buckets) > 0 ? num(opts.buckets) : 24;
 
-    let totalUsd = 0, totalTokens = 0, meteredRuns = 0, unmeteredRuns = 0, unmeteredTokens = 0, spendUnknownRuns = 0, unpricedRuns = 0;
+    let totalUsd = 0, totalTokens = 0, meteredRuns = 0, unmeteredRuns = 0, unmeteredTokens = 0, spendUnknownRuns = 0, unpricedRuns = 0, usageMissingRuns = 0;
     const byReason = {};
     const modelMap = new Map();   // model -> { model, usd, tokens, runs }
     const agentMap = new Map();   // agentId -> { agentId, usd, tokens, runs }
@@ -49,16 +49,21 @@
       // counted and labelled, and a $0 one is not a metered run (it would drag avgUsdPerRun toward a fake zero).
       const unpriced = !spendUnknown && !unmetered && !!(r && r.unpriced === true);
       const metered = !spendUnknown && !unmetered && !(unpriced && usd === 0);
+      // USAGE MISSING (80de2a75): a Stop cut a call off mid-stream before its usage arrived. What WAS booked is known and
+      // counts in every total, as a floor — the run is neither unknown (that would drop real dollars) nor unpriced.
+      const usageMissing = !spendUnknown && !unmetered && !!(r && r.usageMissing === true);
       if (unpriced) unpricedRuns++;
+      if (usageMissing) usageMissingRuns++;
       totalUsd += meteredUsd; totalTokens += tok;
       if (spendUnknown) spendUnknownRuns++;
       else if (unmetered) { unmeteredRuns++; unmeteredTokens += tok; } else if (metered) { meteredRuns++; }
       const reason = str(r.reason) || 'done';
       byReason[reason] = (byReason[reason] || 0) + 1;
       const m = str(r.model) || '(unknown)';
-      const mm = modelMap.get(m) || { model: m, usd: 0, tokens: 0, runs: 0, meteredRuns: 0, unmeteredRuns: 0, unmeteredTokens: 0, spendUnknownRuns: 0, unpricedRuns: 0 };
+      const mm = modelMap.get(m) || { model: m, usd: 0, tokens: 0, runs: 0, meteredRuns: 0, unmeteredRuns: 0, unmeteredTokens: 0, spendUnknownRuns: 0, unpricedRuns: 0, usageMissingRuns: 0 };
       mm.usd += meteredUsd; mm.tokens += tok; mm.runs++;
       if (unpriced) mm.unpricedRuns++;
+      if (usageMissing) mm.usageMissingRuns++;
       if (spendUnknown) mm.spendUnknownRuns++;
       else if (unmetered) { mm.unmeteredRuns++; mm.unmeteredTokens += tok; } else if (metered) { mm.meteredRuns++; }
       modelMap.set(m, mm);
@@ -98,6 +103,7 @@
       unmeteredRuns: unmeteredRuns,
       spendUnknownRuns: spendUnknownRuns,   // interrupted runs whose spend was never settled — excluded from every $ figure
       unpricedRuns: unpricedRuns,           // runs with tokens no published rate priced — their $ is a floor, not a fact
+      usageMissingRuns: usageMissingRuns,   // runs stopped mid-answer before a call's usage arrived — counted, their $ is a floor
       totalUsd: round(totalUsd),
       totalTokens: totalTokens,
       unmeteredTokens: unmeteredTokens,
@@ -107,10 +113,11 @@
       byModel: Array.from(modelMap.values()).map(m => ({
         model: m.model, usd: round(m.usd), tokens: m.tokens, runs: m.runs,
         meteredRuns: m.meteredRuns, unmeteredRuns: m.unmeteredRuns, unmeteredTokens: m.unmeteredTokens, spendUnknownRuns: m.spendUnknownRuns,
-        unpricedRuns: m.unpricedRuns,
+        unpricedRuns: m.unpricedRuns, usageMissingRuns: m.usageMissingRuns,
         unmetered: m.unmeteredRuns > 0 && m.meteredRuns === 0,
         spendLabel: (m.unmeteredRuns > 0 && m.meteredRuns === 0) ? 'subscription / unmetered'
-          : m.unpricedRuns > 0 ? (m.usd > 0 ? 'partly unpriced (no published price for some tokens)' : 'no published price') : ''
+          : m.unpricedRuns > 0 ? (m.usd > 0 ? 'partly unpriced (no published price for some tokens)' : 'no published price')
+          : m.usageMissingRuns > 0 ? 'at least — ' + m.usageMissingRuns + ' stopped mid-answer before usage arrived' : ''
       })).sort(byUsdDesc),
       byAgent: Array.from(agentMap.values()).map(a => ({
         agentId: a.agentId, usd: round(a.usd), tokens: a.tokens, runs: a.runs,

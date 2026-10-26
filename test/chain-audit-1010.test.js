@@ -345,7 +345,11 @@ const belt = (x, y, dir) => ({ x, y, dir });
       A.eq(out.stopped, null, label + ': the second review pass runs through the COPY section (' + out.stopped + ')');
       A.eq(order, 'branch > branch > editor > drafter > branch > branch > editor', label + ': drafter, both branches, editor — twice');
       A.eq(out.agentId, 'editor', label + ': the editor has the last word');
-      A.ok(/^good/.test(String(out.text)) && !/VERDICT/.test(String(out.text)), label + ': the approved review leaves on DONE (' + JSON.stringify(String(out.text).slice(0, 60)) + ')');
+      // (2026-10-18) the editor approved without restating the work ("good"), so what leaves on DONE is the work it approved — the
+      // joined branches it was handed — never the bare approval, and never the VERDICT line (R1)
+      const shippedText = String(out.text);
+      A.ok(/^JOINED OUTPUT — 2 of 2 branches delivered/.test(shippedText) && /factcheck out/.test(shippedText) && /style out/.test(shippedText) && !/VERDICT/.test(shippedText),
+        label + ': the approved work leaves on DONE (' + JSON.stringify(shippedText.slice(0, 60)) + ')');
     }
   }
 

@@ -2039,13 +2039,22 @@ const App = (() => {
     syncModelPicks();   // keep the recommended-chip highlight in lockstep with whatever's in the field
     if (isOAuthProviderId(pickedProvider)) { hint.textContent = 'included in your ' + OAUTH_GENESIS[pickedProvider].sub.replace(/ subscription$/, '') + ' subscription'; return; }
     if (!id) { hint.textContent = 'pick or type a model slug'; return; }
-    const limit = Harness.contextLimitOf ? Harness.contextLimitOf(id) : 0;
+    // the PICKED card's own catalog row (genesisModels = Harness.listModels(pickedProvider)): the Harness lookups prefer
+    // the station's stored provider, which only WAKE sets, and two routes can list one id with different run windows
+    // (StarNet credits work in a 200k tier, OpenRouter in the whole window) — final-polish 10-23
+    const row = genesisModels.find(m => m && m.id === id) || null;
+    const limit = (row && +row.context_length) || (Harness.contextLimitOf ? Harness.contextLimitOf(id) : 0);
     const price = Harness.priceOf ? Harness.priceOf(id) : null;
     if (limit || price) {
       // the catalog knows this model — surface BOTH context window and $/M in/out (previously ctx only)
       const fmt = (typeof CtxGauge !== 'undefined' && CtxGauge.fmtTokens) ? CtxGauge.fmtTokens : (n => String(n || 0));
       const bits = [];
-      if (limit) bits.push('remembers up to ' + fmt(limit) + ' tokens of chat');
+      // a route that bills a dearer rate past a prompt size runs in a window stopped at it (the picked row's runWindow, the
+      // sidecar's runWindow): name THAT window and why, never the 1M a 200k-tier run folds inside (final-polish 10-23). The
+      // tier belongs to the ROUTE: an id the picked catalog does not list names none (only another route's catalog has it)
+      const run = row ? (Number(row.runWindow) || 0) : 0;
+      if (limit && run > 0 && run < limit) bits.push('remembers up to ' + fmt(run) + ' tokens of chat (the model can hold ' + fmt(limit) + ', but it bills a higher rate for a prompt over ' + fmt(run) + ')');
+      else if (limit) bits.push('remembers up to ' + fmt(limit) + ' tokens of chat');
       if (price) bits.push('costs ' + usdPerM(price.in) + ' in · ' + usdPerM(price.out) + ' out per million tokens (a token ≈ ¾ of a word)');
       hint.textContent = bits.join('  ·  ');
       return;
@@ -3383,7 +3392,7 @@ const App = (() => {
     if (!agent.reasoningEffort && saved.reasoningEffort) agent.reasoningEffort = saved.reasoningEffort;
     Harness.setModel(agent.model || Harness.getModel());
     Harness.setTotals(saved.usage || { tokens: 0, cost: 0, calls: 0 });
-    Workstreams.init({ workstreams: saved.workstreams, activeId: saved.activeId, generalId: saved.generalId, sessionUndo: saved.sessionUndo, deletedIds: saved.deletedIds });
+    Workstreams.init({ workstreams: saved.workstreams, activeId: saved.activeId, generalId: saved.generalId, sessionUndo: saved.sessionUndo, deletedIds: saved.deletedIds, forgetIds: saved.forgetIds });
     pendingStationDoc = saved.station || null;   // restore the built station (if any)
     pendingStationStats = saved.stationStats || null;   // restore the station-growth rollup (XP/level/confidence)
     pendingGrowthSyncAt = Math.max(0, Number((saved.stationStats && saved.stationStats.runSyncAt) || saved.updatedAt || 0));
@@ -4795,7 +4804,9 @@ const App = (() => {
       return false;
     }
     const wasActive = (id === Workstreams.activeId());
-    if (!Workstreams.del(id)) { SFX.bad(); return false; }
+    // the Commander's Delete of a conversation: the sidecar forgets it (forget: true — qa/bugs/3e926b6a). DELETE AGENT's
+    // removeByAgent and a task card's remove only hide rows.
+    if (!Workstreams.del(id, { forget: true })) { SFX.bad(); return false; }
     SFX.bad();
     if (wasActive) loadActiveStream();   // deleting the OPEN stream falls back to General
     renderRail(); persist();
@@ -6003,6 +6014,9 @@ const App = (() => {
         try { if (typeof CloudSave !== 'undefined' && CloudSave.ackRecovery) CloudSave.ackRecovery(); } catch (_) {}
       }, 1500);
     }
+    // THE BOOT OFFER (StationUI.offerPreservedSaves) IS HELD for 0.14.0: its final review left two cases where a closed
+    // window's copy could stop being offered (a transient read error settles it; "Not now" hides older copies never shown).
+    // A live conflict still offers "Restore this window's sessions" on the save banner. Re-enable with those two fixed.
     // restore the provider BEFORE the credential check so a codex agent (tokens server-side) jumps straight
     // in after a wipe/origin-reset instead of being misrouted to an OpenRouter key prompt.
     if (saved && saved.agent) migrateLegacyReasoning(saved);   // before any saved effort reaches the wire (0.12.5 reasoning migration)

@@ -130,7 +130,14 @@ function makeSlashActions(deps) {
       if (!schedule) return fail('That routine has no schedule — /routine add <schedule> | <task>.');
       if (!task) return fail('That routine has no task — say what it should do after the pipe.');
       if (typeof cron.create !== 'function') return fail('Creating routines is not wired on this station.');
-      const r = await cron.create({ name: task.slice(0, 60), prompt: task, schedule: schedule, agentId: me });
+      /* WHERE ITS RESULTS GO (bug 3b958e41). Typed in a messaging chat, the routine reports back to THAT chat — the
+         same default the routine.create tool takes from the run's deliveryOrigin, so the two doors make one kind of
+         routine. Typed on the desktop there is no origin and the spec is exactly what it always was. */
+      const dOrigin = (ctx && ctx.deliveryOrigin && ctx.deliveryOrigin.channel && ctx.deliveryOrigin.chatId) ? ctx.deliveryOrigin : null;
+      const spec = { name: task.slice(0, 60), prompt: task, schedule: schedule, agentId: me };
+      if (dOrigin) { spec.deliver = 'origin'; spec.origin = { channel: String(dOrigin.channel), chatId: String(dOrigin.chatId), threadId: dOrigin.threadId != null && dOrigin.threadId !== '' ? String(dOrigin.threadId) : null }; }
+      const toChat = dOrigin ? ' Results will come back to this chat.' : '';
+      const r = await cron.create(spec);
       if (!r || r.ok === false) {
         // The mint ledger's decline is STICKY and has no un-decline API, so "you deleted this before" is a dead
         // end unless we name the way out. Names normalize to lowercase-alphanumeric (mint-ledger normName), so a
@@ -156,7 +163,7 @@ function makeSlashActions(deps) {
       // ONE ARM RULE (org wire AUTO-P16-1): the host's save turned a never-set switch on — said as it happened
       const nowOn = !!(r.scheduler && r.scheduler.armedNow);
       return say('Routine created: "' + (j.name || task.slice(0, 60)) + '" — ' + (j.scheduleDisplay || schedule)
-        + first + '.' + (nowOn ? ' Scheduling is now on.' : '') + armedNote());
+        + first + '.' + (j.deliver === 'origin' ? toChat : '') + (nowOn ? ' Scheduling is now on.' : '') + armedNote());
     }
 
     // NOTE: no `run` verb. Firing a routine on demand streams NDJSON through handleCronRun, which is welded to
@@ -351,6 +358,9 @@ function makeSlashActions(deps) {
     const plural = n => n + ' run' + (n === 1 ? '' : 's');
     const outside = [unpriced ? plural(unpriced) + ' on models with no published price' : '', unmetered ? plural(unmetered) + ' on a subscription' : ''].filter(Boolean);
     if (outside.length) lines.push(outside.join(' and ') + ' — their cost is not in these dollars.');
+    // runs stopped mid-answer: the provider bills the call that was cut off, but its usage never arrived (80de2a75)
+    const cut = Number(s.usageMissingRuns) || 0;
+    if (cut) lines.push(plural(cut) + ' stopped mid-answer before the provider reported usage — the dollars above are at least what was spent.');
     // The point of moving this server-side: say WHOSE numbers these are, so the figure is not read as
     // "what I watched happen in this window".
     lines.push('From the station ledger — includes routines, away shifts and messaging runs, not just this window.');

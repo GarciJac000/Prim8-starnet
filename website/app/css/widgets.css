@@ -73,7 +73,7 @@
 .wg-src { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; letter-spacing: 1px;
   color: var(--ph-dim); opacity: 0.85; line-height: 1; white-space: nowrap; }
 .wg-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok);
-  box-shadow: 0 0 4px var(--ok); animation: wg-breathe 2.4s ease-in-out infinite; }
+  box-shadow: 0 0 4px var(--ok); animation: wg-breathe 2.4s steps(9, jump-none) infinite; }
 /* AGENT-FED provenance: gold dot + "who · when" — the station asserts the reporter, never the figure */
 .wg-dot-fed { background: var(--gold); box-shadow: 0 0 4px var(--gold); animation: none; }
 .wg-fed .wg-src { color: var(--ph-dim); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }

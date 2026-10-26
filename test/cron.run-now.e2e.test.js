@@ -215,6 +215,17 @@ async function readNdjson(res) {
     });
     A.eq(plan.chains['research-agent'].next, ['writer-agent'], 'the drawn floor chains the two docks');
     for (const b of plan.bays.concat(plan.dockBays)) b.objects = ['computer'];   // an unequipped bay grants no compute
+    /* the docks' ROOM is bounded by the saved station (a posted plan may narrow a bay's grant, never widen it —
+       qa/bugs/a9a4f53c): save both bays with a workstation each and no dish, so the bay room is computer-only */
+    const WM = require('../frontend/app/worldmodel.js');
+    const stDoc = WM.defaultDoc();
+    stDoc.props.push({ id: 'b1', t: 'bay', x: 2, y: 1, w: 1, h: 1, agentId: 'research-agent' }, { id: 'pc1', t: 'console', x: 4, y: 1, w: 2, h: 1, agentId: 'research-agent' },
+      { id: 'b2', t: 'bay', x: 8, y: 1, w: 1, h: 1, agentId: 'writer-agent' }, { id: 'pc2', t: 'console', x: 10, y: 1, w: 2, h: 1, agentId: 'writer-agent' });
+    stDoc._nid = 5;
+    const prior = ((await (await fetch(B + '/api/save?agent=agent', { headers })).json()) || {}).save;
+    const sv = await fetch(B + '/api/save', { method: 'POST', headers,
+      body: JSON.stringify({ schema: 'starnet.save', version: 5, _saveRevision: (prior && prior._saveRevision) || 0, updatedAt: Date.now(), agent: { id: 'agent' }, station: stDoc }) });
+    A.ok(sv.status === 200 && ((await sv.json()) || {}).ok === true, 'the station the line runs on (two computer-only bays) is saved');
     const posted = await fetch(B + '/api/routing', { method: 'POST', headers, body: JSON.stringify(plan) });
     A.eq(posted.status, 200, 'the two-stage floor deploys');
 

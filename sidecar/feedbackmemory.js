@@ -326,4 +326,29 @@ function renderTaste(records, renderRecall, opts) {
       + (ownNotShown ? ' (' + ownNotShown + ' of them are in your own notebook: notebook.read with a query finds them)' : '') });
 }
 
-module.exports = { ORIGIN, TASTE_HEADER, TASTE_REF_RULE, TASTE_LIMIT, TASTE_CHARS, content, apply, directiveFor, looksLikeFeedback, isTaste, selectTaste, stationTaste, stationStanding, adoptTaste, renderTaste, unkeep };
+/* forgetRatedWork(rec) — THE RATED RUN'S SESSION WAS DELETED (qa/bugs/3e926b6a). The verdict and the Commander's own
+   rating words stay: they are about the Commander, and every like and dislike keeps steering later work. What quoted
+   the deleted session goes: the "(on: …)" directive (its request) and the reference read from its work (feedbackRef).
+   A record the Commander edited in the Memory Core (or an older one this module cannot rebuild) keeps its stored
+   wording, minus that directive clause.
+   -> the record to keep (unchanged when there is nothing to strip), or null when nothing of the Commander's own is
+   left: a bare rating with no words taught only through the deleted work (content() writes no record for it either). */
+function forgetRatedWork(rec) {
+  if (!rec || rec.origin !== ORIGIN) return rec;
+  const stored = String(rec.content != null ? rec.content : rec.body || '');
+  const directive = clean(rec.feedbackDirective, DIRECTIVE_CHARS);
+  const edited = !!(rec.feedbackEdited || (rec.feedbackGenerated && stored !== rec.feedbackGenerated));
+  const rebuildable = Array.isArray(rec.feedbackWords) && !!(rec.feedbackVerdict || rec.feedbackKept);
+  const words = rebuildable ? rec.feedbackWords.filter(w => typeof w === 'string' && w) : [];
+  const text = (edited || !rebuildable
+    ? (directive ? stored.split(' (on: ' + directive + ')').join('') : stored)
+    : content(rec.feedbackVerdict || 'great', newestWords(words), '')).trim();
+  if (!text) return null;
+  if (text === stored && !rec.feedbackDirective && rec.feedbackRef === undefined) return rec;
+  const out = Object.assign({}, rec, { body: text, content: text, feedbackGenerated: text, feedbackDirective: '' });
+  if (edited) out.feedbackEdited = true;   // their wording: never regenerated over by a later correction
+  delete out.feedbackRef;
+  return out;
+}
+
+module.exports = { ORIGIN, TASTE_HEADER, TASTE_REF_RULE, TASTE_LIMIT, TASTE_CHARS, content, apply, directiveFor, looksLikeFeedback, isTaste, selectTaste, stationTaste, stationStanding, adoptTaste, renderTaste, unkeep, forgetRatedWork };

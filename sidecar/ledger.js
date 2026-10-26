@@ -111,6 +111,7 @@
         model: modelName(e.model),
         unmetered: !!e.unmetered,
         ...(e.unpriced === true ? { unpriced: true } : {}),   // (additive) some usage had no price: usd is a floor, never a proven $0
+        ...(e.usageMissing === true ? { usageMissing: true } : {}),   // (additive) a Stop cut a call off before its usage arrived: usd is a floor
         ts: num(e.ts) || clock.now()
       };
       // settleUnsettled, not a meter: the Commander settled this run. attestedAs says HOW — 'entered' (they typed the

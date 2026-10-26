@@ -74,6 +74,8 @@ const result = (extra) => Object.assign({ type: 'result', subtype: 'success', is
     A.eq([usage.prompt_tokens, usage.completion_tokens, usage.prompt_tokens_details.cached_tokens], [35, 7, 20], 'real token counts');
     A.eq(usage.cost, 0, 'subscription login books $0');
     A.eq(evs.filter(e => e.type === 'done'), [{ type: 'done', finishReason: 'stop', truncated: false }], 'exactly one done');
+    A.eq(evs[0], { type: 'billing', perCall: false }, 'a subscription turn says first that it bills nothing per call (a Stop that cuts it cost $0)');
+    A.eq(evs.filter(e => e.type === 'billing').length, 1, 'the billing fact comes once per turn');
   }
 
   // C. API-key login books the CLI's own reported cost.
@@ -82,6 +84,7 @@ const result = (extra) => Object.assign({ type: 'result', subtype: 'success', is
     const evs = await collect(p, { model: 'haiku', messages: [{ role: 'user', content: 'x' }] });
     A.eq(evs.find(e => e.type === 'usage').usage.cost, 0.25, 'API-key login books total_cost_usd');
     A.eq(evs.filter(e => e.type === 'text').map(e => e.delta).join(''), 'ok', 'result text is used when no delta streamed');
+    A.ok(!evs.some(e => e.type === 'billing'), 'an API-key turn carries no billing fact (a cut call IS billed)');
   }
 
   // D. tool calls: blocks become harness tool events, split across deltas, prose around them preserved.
@@ -132,7 +135,7 @@ const result = (extra) => Object.assign({ type: 'result', subtype: 'success', is
     const tools = [{ type: 'function', function: { name: 'fs_write', description: 'write', parameters: { type: 'object' } } }];
     const req = { model: 'opus', tools, messages: [{ role: 'user', content: 'make a game' }] };
     const ordered = await collect(make({ lines: [init('none'), delta('Building it. <tool_call>{"name":"fs_write","arguments":{"path":"a.html","content":"x"}}</tool_call>'), delta('\n<tool_call>{"name":"fs_write","arguments":{"path":"b.html","content":"y"}}</tool_call>'), result()] }).p, req);
-    A.eq(ordered.filter(e => e.type !== 'usage' && e.type !== 'done').map(e => e.type), ['text', 'tool_start', 'tool_args', 'tool_done', 'tool_start', 'tool_args', 'tool_done'], 'prose then back-to-back calls keep their order');
+    A.eq(ordered.filter(e => e.type !== 'usage' && e.type !== 'done' && e.type !== 'billing').map(e => e.type), ['text', 'tool_start', 'tool_args', 'tool_done', 'tool_start', 'tool_args', 'tool_done'], 'prose then back-to-back calls keep their order');
 
     // a raw newline inside a string (the commonest slip in a big write) is repaired into a real call
     const raw = await collect(make({ lines: [init('none'), delta('<tool_call>{"name":"fs_write","arguments":{"path":"a.html","content":"<p>\n</p>"}}</tool_call>'), result()] }).p, req);
@@ -387,8 +390,8 @@ const result = (extra) => Object.assign({ type: 'result', subtype: 'success', is
     A.eq(typeof p.supportsImages === 'function' ? p.supportsImages() : 'missing', true, 'the Claude Code provider reports an image channel');
     const idx = fs.readFileSync(require('path').join(__dirname, '..', 'sidecar', 'index.js'), 'utf8');
     const aux = idx.slice(idx.indexOf('const auxVisionCall = async (req) => {'), idx.indexOf('const imageTools = makeImageTools('));
-    A.ok(/!auxVisionProvider\.supportsImages\(\)\) throw new Error\('no vision route/.test(aux) && aux.indexOf('supportsImages') < aux.indexOf('.stream('),
-      'the aux vision route refuses a provider that cannot see images BEFORE asking it to describe one');
+    A.ok(/auxVisionProvider\.supportsImages\(model\) === false\) throw new Error\('no vision route/.test(aux) && aux.indexOf('supportsImages') < aux.indexOf('.stream('),
+      'the aux vision route refuses a provider that cannot see images BEFORE asking it to describe one (unknown = null still tries)');
     A.ok(aux.includes('AbortSignal.any([ac.signal, signal])') && aux.includes('signal: callSignal'), 'QA 10-02: the aux vision call ends when its run is stopped');
     A.ok(aux.includes("ev.type === 'usage') usage = ev.usage") && aux.includes('recordMediaUsage(usage, model)') && !aux.includes("ev.type === 'done') break"), 'QA 10-02: its usage is booked like media spend (read to the end of the stream)');
   }

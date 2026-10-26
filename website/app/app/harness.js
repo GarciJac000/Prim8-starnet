@@ -406,8 +406,13 @@ const Harness = (() => {
       try { if (isReq) again = u.clone(); } catch (_) { again = null; }
       const body = init && init.body;
       const replayable = again != null && !(body && typeof body.getReader === 'function');
-      return ensureApiToken().then(t => rawFetch(u, withApiToken(init, t)).then(res =>
-        staleToken.settle(res, t, replayable ? fresh => rawFetch(again, withApiToken(init, fresh)) : null)));
+      return ensureApiToken().then(t => rawFetch(u, withApiToken(init, t)).then(res => {
+        noteStationReply(true);   // #137: the first answer after a silence re-syncs the desktop endpoints
+        return staleToken.settle(res, t, replayable ? fresh => rawFetch(again, withApiToken(init, fresh)) : null);
+      }, e => {
+        if (!(e && e.name === 'AbortError')) noteStationReply(false);   // no answer at all (a caller's abort is not one)
+        throw e;
+      }));
     };
     window.__STARNET_FETCH_HARDENED__ = true;
   }
@@ -421,6 +426,7 @@ const Harness = (() => {
     // leave configured('starnet') false forever anywhere that isn't Tauri — including every dev session.
     await refreshCreditsConfigured();
     if (!DESKTOP) { syncEngineKeysOnBoot(); return; }   // #89: never awaited — boot must not wait on it
+    pushDesktopEndpoints();   // #137: never awaited — the station's copy of each endpoint matches this window's
     let loaded = false;
     try {
       const status = await invoke('harness_provider_key_status');
@@ -711,6 +717,54 @@ const Harness = (() => {
     }
     return Promise.all(jobs);
   }
+  /* #137 DESKTOP ENDPOINT HAND-OVER. On the desktop app the OS keychain holds provider KEYS only; a provider's endpoint
+     (a CUSTOM base URL, an Ollama that is not on this machine) lives in this window's storage, and the station keeps
+     the CUSTOM / Ollama copy it was last handed (sidecar/index.js DESKTOP_ENDPOINTS_FILE — before 0.14.0 that copy was
+     memory, so every app restart or respawn left routines, Run Now, line hops, channels and phone runs failing "no
+     CUSTOM base URL is saved on this station" while chat kept working; a cloud provider's override is still held for
+     the session only). The window is the source: once per page boot (init), after ENGINE
+     RESTART, and on the first answer after this page saw the station stop answering, the page hands the station every
+     endpoint slot it holds — a cleared slot as a clear — so the station's copy matches this window. With NO key, so the
+     keychain is never touched (harness_store_provider_key writes the keychain only when a key is given). Never rejects
+     and never awaited by boot; a failed hand-over is logged and tried again at the next come-back. */
+  function desktopEndpointsHeld() {
+    const held = new Map();
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = String(localStorage.key(i) || '');
+        const p = k === LS.baseUrl ? 'openrouter' : (k.indexOf(LS.baseUrl + '.') === 0 ? normalizeProviderId(k.slice(LS.baseUrl.length + 1)) : '');
+        // starnet's endpoint is the linked account's (the sidecar resolves it); the shell would file it under openrouter
+        if (!p || p === 'starnet' || held.has(p)) continue;
+        held.set(p, String(readScoped(LS.baseUrl, p) || '').trim());   // '' = this window cleared it: the station forgets its copy
+      }
+    } catch (_) { /* storage unavailable: no endpoint saved here to hand over */ }
+    return held;
+  }
+  let endpointHandOver = null;
+  function pushDesktopEndpoints() {
+    if (!DESKTOP) return Promise.resolve([]);
+    if (endpointHandOver) return endpointHandOver;   // one hand-over in flight at a time
+    const jobs = [];
+    desktopEndpointsHeld().forEach((baseUrl, provider) => {
+      jobs.push(Promise.resolve().then(() => invoke('harness_store_provider_key', { provider, baseUrl }))
+        .then(() => ({ provider, ok: true }), e => {
+          console.warn('[harness] ' + provider + ': could not hand the station its endpoint: ' + ((e && e.message) || e));
+          return { provider, ok: false };
+        }));
+    });
+    endpointHandOver = Promise.all(jobs).then(out => { endpointHandOver = null; return out; });
+    return endpointHandOver;
+  }
+  // the /api fetch wrapper reports each call: false = the station did not answer at all (a refused connection while it
+  // respawns), true = it answered. The first answer after a silence re-syncs the endpoints (a change made in the gap).
+  let stationSilent = false;
+  function noteStationReply(answered) {
+    if (!DESKTOP) return;
+    if (!answered) { stationSilent = true; return; }
+    if (!stationSilent) return;
+    stationSilent = false;
+    pushDesktopEndpoints();
+  }
   // #62: no provider key contains whitespace — a key pasted out of a narrow SSH terminal can carry a line wrap (or a
   // zero-width char from a web page) in its MIDDLE, which .trim() never removed. Strip them all (the sidecar does too).
   const cleanKey = k => String(k == null ? '' : k).replace(/[\s\u200b-\u200d\u2060\ufeff]+/g, '');
@@ -851,6 +905,12 @@ const Harness = (() => {
     const m = catalogModel(id);
     return (m && m.context_length) || 0;
   }
+  // the window a RUN on this route works in (the sidecar's /api/models runWindow: the model's own, stopped at a
+  // long-context price tier the spend caps do not price); 0 = the catalog did not say
+  function runWindowOf(id) {
+    const m = catalogModel(id);
+    return (m && m.runWindow) || 0;
+  }
 
   /* Context-window occupancy for ONE conversation — the question the bottom-bar gauge actually asks
      ("MEMORY OF THIS CHAT"), so it is answered per (agentId, streamId), never per agent alone.
@@ -881,7 +941,11 @@ const Harness = (() => {
     const hasRec = !!(rec && rec.used > 0 && rec.model);
     const model = (hasRec && rec.model) || getModel() || '';
     const limit = contextLimitOf(model);
-    const base = { agentId: aid, streamId: String(streamId || ''), model, limit };
+    // runWindow: the window a RUN on this route works in, so the place it folds (runWindowOf: the model's window stopped
+    // at a long-context price tier, final-polish 10-23). The gauge measures against it; `limit` stays the model's own
+    // window, which composer fit checks keep using (the sidecar folds a run inside the smaller one)
+    const run = runWindowOf(model);
+    const base = { agentId: aid, streamId: String(streamId || ''), model, limit, runWindow: (run > 0 && limit > 0 && run < limit) ? run : limit };
 
     // 1. in flight — report what the provider says the model is holding this second
     if (hasRec && rec.live) return Object.assign(base, { used: rec.used, measured: true, projected: false });
@@ -921,7 +985,8 @@ const Harness = (() => {
       supported_parameters: params,
       reasoningEfforts: Array.isArray(m && m.reasoningEfforts) ? m.reasoningEfforts.slice() : [],
       defaultReasoningLevel: (m && m.defaultReasoningLevel) || null,
-      reasoningNote: (m && typeof m.reasoningNote === 'string' && m.reasoningNote) || null
+      reasoningNote: (m && typeof m.reasoningNote === 'string' && m.reasoningNote) || null,
+      runWindow: (m && +m.runWindow) || 0
     };
   }
 
@@ -958,6 +1023,9 @@ const Harness = (() => {
         if (p === 'openrouter') list = await fetchModelCatalog(OR + '/models', 'data');
         else list = [];
       }
+      // OpenRouter's catalog (and the managed one, which passes it through) lists batch-only '<id>:batch' rows that
+      // chat/completions refuses with a 404: never offer one (the sidecar route drops them too; the direct fallback above does not)
+      if (p === 'openrouter' || p === 'starnet') list = list.filter(m => !/:batch$/i.test(m.id));
       list.sort((a, b) => a.id.localeCompare(b.id));
       // scope the catalog to the provider it was fetched FOR — never to a shared map another
       // provider's warm can overwrite (see modelsByProv above).
@@ -1398,6 +1466,7 @@ const Harness = (() => {
     let buf = '', full = '', lastUsage = null, runId = null, errMsg = null, endReason = null, finishReason = null, completionVerdict = 'not_assessed', effectVerdict = 'no_observed_effects';
     let budgetScope = null, budgetCapUsd = null;   // additive: WHICH spend cap ended a 'budget' run (+ its $ cap)
     let budgetCapIsBalance = false;   // additive: that per-run ceiling was the StarNet balance (sidecar admission clamp)
+    let budgetProjected = false;   // additive: the run stopped BEFORE that cap (its family's calls in flight took what was left)
     // additive: a 'budget' stop at the per-run TOKEN ceiling for a model with no known price (loop.js maxUnpricedTokens).
     // The $ cap never governed it, so COMMS must name the real limit instead of "raise your spend cap".
     let unpricedModel = null, unpricedCapTokens = 0;
@@ -1486,6 +1555,7 @@ const Harness = (() => {
               budgetScope = payload.budgetScope || null;
               budgetCapUsd = (typeof payload.budgetCapUsd === 'number' && isFinite(payload.budgetCapUsd)) ? payload.budgetCapUsd : null;
               budgetCapIsBalance = payload.budgetCapIsBalance === true;
+              budgetProjected = payload.budgetProjected === true;
               unpricedModel = payload.unpricedModel ? String(payload.unpricedModel) : null;
               unpricedCapTokens = Number(payload.unpricedCapTokens) || 0;
               subscriptionModel = payload.subscriptionModel ? String(payload.subscriptionModel) : null;
@@ -1508,8 +1578,8 @@ const Harness = (() => {
     if (!sawLeadEnd && !errMsg) throw transportLoss(new Error('Reply stream disconnected before completion was confirmed.'), 'eof');
     // surface the error to the caller (do NOT swallow it just because some text streamed first) —
     // a network/fetch failure still throws below; this is for in-band run errors / capdenied.
-    if (errMsg) return { text: full, usage: lastUsage, runId, error: errMsg, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens };
-    return { text: full, usage: lastUsage, runId, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens };
+    if (errMsg) return { text: full, usage: lastUsage, runId, error: errMsg, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected };
+    return { text: full, usage: lastUsage, runId, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected };
   }
 
   /* Read-only fetch of an agent's notebook (its memory.md) from the sidecar. The agent writes these notes
@@ -1931,6 +2001,7 @@ const Harness = (() => {
     if (!core) return Promise.resolve(false);
     if (restartInflight) return restartInflight;
     restartInflight = Promise.resolve().then(() => core.invoke('starnet_restart_sidecar')).then(up => up === true, () => false)
+      .then(up => { if (up) pushDesktopEndpoints(); return up; })   // #137: re-sync the endpoints with the restarted station
       .finally(() => { restartInflight = null; });
     return restartInflight;
   }
@@ -2005,7 +2076,7 @@ const Harness = (() => {
     canRestartEngine: () => !!tauriCoreNow(),
     isDesktop: () => DESKTOP,   // lets the UI tell a desktop keychain-store failure (token saved locally) from a browser no-op
     getSelectionRevision, getKey, setKey, setKeyPool, validateAndSetKeyPool, keyPoolSize, storeChannelToken, getModel, setModel, getProv, setProv, getBaseUrl, setBaseUrl, getReasoningEffort, setReasoningEffort, clearLegacyReasoningOff, normalizeReasoningEffort, init, configured, refreshCreditsConfigured, creditsEpoch: () => creditsEpoch, hasStoredCredential, setDesktopConfigured,
-    listModels, probeProvider, validateAndSetKey, priceOf, contextLimitOf, contextState, contextRevision: () => contextRev, chat, cancel, haltAll, consent, consentAck, consentArgs, consentAnswer, summonAck, notebook,
+    listModels, probeProvider, validateAndSetKey, priceOf, contextLimitOf, runWindowOf, contextState, contextRevision: () => contextRev, chat, cancel, haltAll, consent, consentAck, consentArgs, consentAnswer, summonAck, notebook,
     runStreamState: () => runStream.state(),   // the page's ONE run stream: { open, id, runs, unsupported, heldBack }
     streamPost,   // a run a button starts (Run now / Retry / an app refresh / a workshop build), on the page's ONE run stream
     runRecoveries, prepareAutomaticRecovery, resolveRunRecovery, prepareReviewedRecovery,

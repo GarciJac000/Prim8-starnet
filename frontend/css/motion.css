@@ -8,6 +8,11 @@
    - Animate only transform / opacity / colour / border / box-shadow — NEVER layout
      (width/height/top/left) on hot paths; the canvas game loop runs at 60fps behind.
    - A single prefers-reduced-motion block at the bottom collapses everything.
+   - A loop that runs forever (`infinite`) is STEPPED: steps(N, jump-none) for a
+     pulse/glow (N 6-9 per keyframe leg), steps(N, jump-end) for a seamless scroll.
+     A smooth loop recomposites the whole glass window every vsync (240 Hz) all day
+     (0.14.0: pausing five smooth pulses took the app from 165% to 55% of a core). Locked by
+     test/no-smooth-infinite-animation.test.js across every frontend file.
 
    Motion tokens are static (no var() refs) so they live safely on :root. Any
    COMPOSITE var that references another var still MUST be declared on `body`
@@ -429,7 +434,7 @@ button:active {
   animation: load-blink 1s steps(1) infinite;
   text-shadow: 0 0 6px var(--ph-glow);
 }
-.loading.pulse { animation: load-pulse 1.4s ease-in-out infinite; }
+.loading.pulse { animation: load-pulse 1.4s steps(8, jump-none) infinite; }
 @keyframes load-blink { 50% { opacity: 0; } }
 @keyframes load-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 .empty-state {
@@ -473,7 +478,7 @@ button:active {
 .bar-active::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 46px;
   background: linear-gradient(90deg, transparent, var(--ph-glow), transparent);
-  animation: bar-shim 1.9s linear infinite;
+  animation: bar-shim 1.9s steps(20, jump-none) infinite;
   pointer-events: none;
 }
 @keyframes bar-shim {
@@ -496,7 +501,7 @@ button:active {
 .term-led {
   width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
   background: var(--ok); box-shadow: 0 0 8px var(--ok);
-  animation: term-led-pulse 2.4s ease-in-out infinite;
+  animation: term-led-pulse 2.4s steps(9, jump-none) infinite;
 }
 @keyframes term-led-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 /* keep the LED + title grouped at the left; the close button stays hard-right.
@@ -895,7 +900,7 @@ button:active {
 .term-chip-led {
   width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
   background: var(--ok); box-shadow: 0 0 6px var(--ok);
-  animation: term-led-pulse 2.4s ease-in-out infinite;
+  animation: term-led-pulse 2.4s steps(9, jump-none) infinite;
 }
 .term-chip-t { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
@@ -992,7 +997,7 @@ button:active {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50%      { box-shadow: 0 0 10px 1px var(--bad); }
 }
-.bb.danger.armed { animation: rm-arm-pulse 1.1s ease-in-out infinite; }
+.bb.danger.armed { animation: rm-arm-pulse 1.1s steps(8, jump-none) infinite; }
 @media (prefers-reduced-motion: reduce) {
   .bb.danger.armed { animation: none !important; }
 }

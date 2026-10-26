@@ -107,6 +107,17 @@ const SECRET = 'rk-live-verySECRET-9876';
     A.eq((await j('POST', '/api/config/reset', { section: 'servicekeys' })).status, 200, 'servicekeys reset -> 200');
     const resetCopies = fs.readFileSync(serviceKeysFile, 'utf8') + fs.readFileSync(serviceKeysFile + '.bak', 'utf8');
     A.ok(resetCopies.indexOf(SECRET) < 0, 'servicekeys reset scrubs the key from both main and resilient backup');
+
+    // A REPLACED key goes the same way: rotating a pasted key leaves the old value in neither copy on disk.
+    const OLD_KEY = 're_rotate_OLD_1111', NEW_KEY = 're_rotate_NEW_2222';
+    A.eq((await j('POST', '/api/servicekeys', { name: 'Resend', key: OLD_KEY })).status, 200, 'save a key to rotate');
+    A.eq((await j('POST', '/api/servicekeys', { name: 'Resend', key: '', docsUrl: 'https://resend.com/docs' })).status, 200, 'an edit that keeps the key');
+    const rotated = await j('POST', '/api/servicekeys', { name: 'Resend', key: NEW_KEY });
+    A.eq([rotated.status, rotated.body.saved], [200, true], 'the rotation is saved and verified');
+    const rotationCopies = fs.readFileSync(serviceKeysFile, 'utf8') + fs.readFileSync(serviceKeysFile + '.bak', 'utf8');
+    A.ok(rotationCopies.indexOf(OLD_KEY) < 0, 'a rotated key is in neither the main file nor its recovery copy');
+    A.ok(fs.readFileSync(serviceKeysFile, 'utf8').indexOf(NEW_KEY) >= 0 && fs.readFileSync(serviceKeysFile + '.bak', 'utf8').indexOf(NEW_KEY) >= 0, 'both copies hold the new key');
+    A.eq((await j('GET', '/api/servicekeys')).body.keys[0].last4, '····2222', 'the row serves the new key');
   } finally {
     await fixture.dispose();
   }

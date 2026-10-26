@@ -576,7 +576,14 @@
         return { ok: true, action: 'restore', skill: projectSkill(entry, true), edited: true };
       }
       if (action === 'pin' || action === 'unpin') {
-        entry = clone(existing); entry.pinned = action === 'pin' ? true : (e.pinned != null ? !!e.pinned : false); entry.updatedAt = now();
+        const pinNext = action === 'pin' ? true : (e.pinned != null ? !!e.pinned : false);
+        /* ONLY THE COMMANDER TAKES A PIN OFF (bug 97743dff). The pin is the lock pinnedGuard holds against every model
+           write; while a run could unpin (pin/unpin are never staged), the lock lasted one tool call and the next patch
+           went through. Pinning stays open to any writer: it only adds the lock. */
+        if (existing.pinned && !pinNext && str(e.createdBy) !== 'user') {
+          return { ok: false, error: '"' + existing.name + '" is pinned by the Commander - only the Commander can unpin it, in ABILITIES > SKILLS' };
+        }
+        entry = clone(existing); entry.pinned = pinNext; entry.updatedAt = now();
         entry = persist(entry);
         return { ok: true, action, skill: projectSkill(entry, true), edited: true };
       }

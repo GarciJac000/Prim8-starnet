@@ -613,12 +613,14 @@
     // spentUsd crosses the cap). Resolved off the dated list-rate table, independent of catalog warm state so
     // the cap works from the first turn; an unrecognized model still returns null and stays 'unpriced'.
     function priceOf(id) { return prices.priceOf('gemini', routedToNative(id)); }
+    // the catalog's max output for this model (provider.js outputLimit: outputTokenLimit); 0 = not known yet
+    function outputLimit(id) { const m = findModel(id); return (m && Number(m.max_completion_tokens)) || 0; }
     function supportsTools(id) { const m = findModel(id); return m ? m.supportsTools : true; }
     // Resolved from the model NAME: /v1beta/models publishes no capability data, and the dock asks before a
     // catalog fetch has necessarily landed.
     function reasoningEfforts(id) { return geminiEffortsFor(id); }
 
-    return { stream, listModels, warmCatalog, contextLimit, priceOf, supportsTools, reasoningEfforts };
+    return { stream, listModels, warmCatalog, contextLimit, outputLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
   return { makeGeminiProvider, _internals: { messagesToGemini, toGeminiTools, normalizeUsage, normalizeModel, modelPath, cleanBaseUrl, finishFor } };

@@ -13,7 +13,8 @@
        store refuses to compact: a partial view must never be written back as the whole library;
      • append() is a durable JSONL append, never a rotation;
      • needsCompaction() asks for a rewrite while a legacy .1 archive exists, or once the live file passes
-       compactBytes AND twice its size right after the last rewrite (a large library is not rewritten per append);
+       compactBytes AND twice its size right after the last rewrite (a large library is not rewritten per append),
+       capped at 12 MiB while the library fits v0.13.5's 16 MiB read window, so a downgrade still reads the whole file;
      • rewrite(entries) atomically replaces the live file, then removes the legacy .1 (its records were loaded
        and are part of the rewrite).
 
@@ -24,6 +25,17 @@ const { appendJsonlDurable, tailLines } = require('./logbound.js');
 
 const DEFAULT_COMPACT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_READ_MAX_BYTES = 256 * 1024 * 1024;
+/* ROLLBACK SAFETY: v0.13.5 reads only the last 16 MiB (its LOG_MAX_BYTES) of skills.jsonl and then boot-compacts that
+   partial view, so a live file past 16 MiB loses the skills at its head for good if the Commander downgrades. The
+   hysteresis (2x the last compacted size) alone let an 8 MiB library grow to 16 MiB and a 10 MiB one to 20 MiB, so
+   the threshold is capped at DOWNGRADE_SAFE_BYTES. A library over the cap is compacted once per growth step: at least
+   GROWTH_STEP_BYTES and four of its largest records (a step of 1 MiB under 1.1 MiB records was a full rewrite of the
+   library on every write). The cap holds only while the compacted library plus that step still fits the old window;
+   past it nothing keeps the file readable by v0.13.5, so rewriting buys nothing and the plain hysteresis applies. */
+const DOWNGRADE_SAFE_BYTES = 12 * 1024 * 1024;
+const DOWNGRADE_WINDOW_BYTES = 16 * 1024 * 1024;
+const GROWTH_STEP_BYTES = 1024 * 1024;
+const GROWTH_STEP_RECORDS = 4;
 
 function makeSkillsIo(deps) {
   const fs = deps.fs, file = deps.file, archive = deps.file + '.1';
@@ -33,6 +45,8 @@ function makeSkillsIo(deps) {
   const readMaxBytes = deps.readMaxBytes > 0 ? deps.readMaxBytes : DEFAULT_READ_MAX_BYTES;
   let complete = true;
   let compactedSize = 0;   // live size right after this process's last rewrite (hysteresis)
+  let largestRecord = 0;   // the longest row this process has read, appended or rewritten (the growth step)
+  function noteRecord(n) { if (n > largestRecord) largestRecord = n; }
 
   // -1 = no such file; null = it exists but cannot be measured
   function sizeOf(f) {
@@ -90,6 +104,7 @@ function makeSkillsIo(deps) {
     const out = [];
     let torn = 0, peeled = 0;
     for (const l of lines) {
+      noteRecord(l.length);
       let row = null, ok = false;
       try { row = JSON.parse(l); ok = true; } catch (e) { ok = false; }
       if (ok) { out.push(row); continue; }
@@ -109,15 +124,27 @@ function makeSkillsIo(deps) {
       return parse(linesOf(archive), archive).concat(parse(linesOf(file), file));
     },
     loadComplete() { return complete; },
-    append(entry) { appendJsonlDurable({ fs, note }, file, entry); },
+    append(entry) {
+      const before = sizeOf(file);
+      appendJsonlDurable({ fs, note }, file, entry);
+      const after = sizeOf(file);
+      if (after !== null && after > 0 && before !== null) noteRecord(after - Math.max(before, 0));
+    },
     needsCompaction() {
       if (sizeOf(archive) >= 0) return true;
       const size = sizeOf(file);
-      return size !== null && size > Math.max(compactBytes, compactedSize * 2);
+      let limit = Math.max(compactBytes, compactedSize * 2);
+      if (limit > DOWNGRADE_SAFE_BYTES) {
+        const capped = Math.max(DOWNGRADE_SAFE_BYTES, compactedSize + Math.max(GROWTH_STEP_BYTES, GROWTH_STEP_RECORDS * largestRecord));
+        if (capped <= DOWNGRADE_WINDOW_BYTES) limit = capped;
+      }
+      return size !== null && size > limit;
     },
     rewrite(entries) {
       const list = Array.isArray(entries) ? entries : [];
-      const body = list.map(e => JSON.stringify(e)).join('\n') + (list.length ? '\n' : '');
+      const rows = list.map(e => JSON.stringify(e));
+      for (const r of rows) noteRecord(r.length);
+      const body = rows.join('\n') + (list.length ? '\n' : '');
       // unreadable rows are saved aside first; if that fails, nothing is replaced
       if (damaged.length) {
         const fd = fs.openSync(file + '.damaged', 'a');

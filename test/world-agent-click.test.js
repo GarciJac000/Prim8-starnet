@@ -59,6 +59,9 @@ const sandbox = {
   document: { body: { classList: { contains: () => false } } },
   cv: { width: 1600, height: 900, getBoundingClientRect: () => ({ left: 37, top: 83, width: 800, height: 450 }) },
   panX: 125, panY: -63, scale: .8,
+  // toCanvas reads the rect through U.pointerRect (js/util.js; WebKit TEXT SIZE correction, locked by
+  // webkit-zoom-pointer.test) — an engine whose rects carry the zoom gets the plain rect, which is this canvas
+  U: { pointerRect: el => el.getBoundingClientRect() },
 };
 vm.createContext(sandbox); vm.runInContext(mapping, sandbox);
 for (const [curve, over] of [[.09,1.2],[.04,1.08],[0,1.2]]) {

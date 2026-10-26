@@ -204,7 +204,7 @@ function mkHub(store, sendImpl, events) {
     store.pushOutbox({ channel: 'telegram', chatId: 'old', text: 'older delayed answer', runId: 'old-run' });
     let sendOk = false;
     const sends = [];
-    const hub = mkHub(store, async (chatId, text) => { sends.push({ chatId, text }); return sendOk ? { ok: true } : { ok: false, error: 'down' }; }, events);
+    const hub = mkHub(store, async (chatId, text) => { sends.push({ chatId, text, ok: sendOk }); return sendOk ? { ok: true } : { ok: false, error: 'down' }; }, events);
     let rejected = false;
     try { await hub.onInbound({ chatId: 'new', chatType: 'dm', userId: 'u1', text: 'new work', messageId: 'm5', ts: 5 }); }
     catch (_) { rejected = true; }
@@ -218,6 +218,50 @@ function mkHub(store, sendImpl, events) {
     A.eq(store.loadOutbox('telegram'), [], 'old queued reply drains after recovery');
     A.eq(store.loadInbox('telegram'), [], 'capacity recovery replays and completes the pending intake');
     A.ok(sends.some(x => x.chatId === 'new' && /the result/.test(x.text)), 'the backpressured message ultimately receives its answer');
+    // a same-process replay is no restart (e5ecd6b8 review): the chat gets that answer once, and no "restarted" notice
+    A.eq(sends.filter(x => x.chatId === 'new' && x.ok).map(x => x.text), ['the result'], 'the chat is sent the answer once and is never told StarNet restarted');
+    hub.close();
+  }
+
+  // ---- H-tool. the same backpressure replay when the run had begun a TOOL step (e5ecd6b8 review, 2026-10-21) ----
+  // The replay is no restart and the run had FINISHED: it must deliver that answer, never re-run the step, and never
+  // say "StarNet restarted". The receipt's crash marker once read this as a post-crash re-delivery: the chat got
+  // "⚠ StarNet restarted … NOT run again" and the finished answer was never delivered.
+  {
+    const events = [];
+    const store = mkStore(memFs(), { maxOutbox: 1 });
+    store.pushOutbox({ channel: 'telegram', chatId: 'old', text: 'older delayed answer', runId: 'old-run' });
+    let sendOk = false, runs = 0;
+    const sends = [], sideEffects = [];
+    const hub = makeChannelHub({
+      channel: 'telegram',
+      runOnce: async (o) => {
+        runs++;
+        o.emit('agent.run.start', { runId: o.runId });
+        o.emit('agent.tool_call', { runId: o.runId, callId: 'c' + runs, name: 'fs_append' }); sideEffects.push(runs);
+        o.emit('agent.token', { delta: 'the result' }); o.emit('agent.run.end', { reason: 'done' });
+      },
+      store,
+      send: async (chatId, text) => { sends.push({ chatId, text, ok: sendOk }); return sendOk ? { ok: true } : { ok: false, error: 'down' }; },
+      secrets: () => ({ key: 'k', model: 'm', configured: true }),
+      emit: (name, payload) => events.push([name, payload]),
+      newId: (() => { let n = 0; return () => 'trun-' + (++n); })(),
+      sleep: () => Promise.resolve(), outboxRetryMs: 5
+    });
+    let rejected = false;
+    try { await hub.onInbound({ chatId: 'new', chatType: 'dm', userId: 'u1', text: 'new work', messageId: 'm6', ts: 6 }); }
+    catch (_) { rejected = true; }
+    A.ok(rejected, 'fixture: the finished reply could not enter the full outbox');
+    A.ok(/the result/.test(((store.loadInbox('telegram')[0] || {}).held || {}).text || ''), 'the pending receipt keeps the finished answer');
+    sendOk = true;
+    await hub._internals.flushOutbox();
+    for (let i = 0; i < 40 && store.loadInbox('telegram').length; i++) await new Promise(r => setTimeout(r, 0));
+    const toNew = sends.filter(x => x.chatId === 'new' && x.ok);
+    A.eq(store.loadInbox('telegram'), [], 'capacity recovery completes the pending intake');
+    A.eq(runs, 1, 'the run that finished is not run again');
+    A.eq(sideEffects.length, 1, 'its tool step happened exactly once');
+    A.eq(toNew.map(x => x.text), ['the result'], 'the backpressured message receives its answer — and no "restarted" notice, since nothing restarted');
+    A.ok(!((store.getChatRecord('new') || {}).interruptedAttempt), 'and no "earlier request was interrupted" host note is queued for the next run');
     hub.close();
   }
 
@@ -235,7 +279,7 @@ function mkHub(store, sendImpl, events) {
       channel: 'telegram',
       runOnce: async (o) => { o.emit('agent.run.start', { runId: o.runId }); o.emit('agent.token', { delta: 'the result' }); o.emit('agent.run.end', { reason: 'done' }); },
       store,
-      send: async (chatId, text) => { sends.push({ chatId, text }); return sendOk ? { ok: true } : { ok: false, error: 'down' }; },
+      send: async (chatId, text) => { sends.push({ chatId, text, ok: sendOk }); return sendOk ? { ok: true } : { ok: false, error: 'down' }; },
       secrets: () => ({ key: 'k', model: 'm', configured: true }),
       emit: (name, payload) => events.push([name, payload]),
       newId: (() => { let n = 0; return () => 'grun-' + (++n); })(),
@@ -250,6 +294,9 @@ function mkHub(store, sendImpl, events) {
     await hub._internals.flushOutbox();
     for (let i = 0; i < 40 && store.loadInbox('telegram').length; i++) await new Promise(r => setTimeout(r, 0));
     A.eq(store.loadInbox('telegram'), [], 'capacity recovery replays and completes every pending bubble');
+    // the merged run had finished: its one answer is delivered once, not re-earned bubble by bubble
+    A.eq(sends.filter(x => x.chatId === '91' && x.ok && /the result/.test(x.text)).length, 1, 'the merged batch\'s finished answer reaches the chat once after recovery');
+    A.eq(events.filter(e => e[0] === 'channel.delivery' && e[1].chatId === '91' && e[1].ok).length, 1, 'one successful delivery for the one merged run');
     hub.close();
   }
 

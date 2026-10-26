@@ -19,7 +19,10 @@ const GOLDEN = {
   'belt@1280x720': '89b300f9cd07bacfe8c8e834a318768927cf8f71472f7ff8eb9d48d37de7c924',
   'nursery@1280x720': 'dbe66140ddfc3ff2d4bf1609166d898b6bca7afcd6be0f812e0de0b87ab4a4a4',
   'ocean@1280x720': 'c55bc0d5735f0d0883b58e2cd46c2ebc111730e1e522e6ad055adbfb24c6c79a',
-  'city@1280x720': 'ac5776c618f091cdb1d43a3eb9558bcf19e4907839fac0a71a26f1ef6915dc93',
+  // re-recorded 2026-10-21 (still tier): a CITY car advanced 16 ms per DRAW, so its speed was the draw rate's. It now
+  // follows the wall clock (16 per 60 Hz frame), and this harness draws 16.7 ms frames: each car is 0.2% further along.
+  // render-still.test.js proves the cars hold their place at any draw rate.
+  'city@1280x720': '065c20a211696f8bd23b8a320ee327baf8d48d09ce223e8f0920af3e6f94cbdf',
 };
 
 function load() {

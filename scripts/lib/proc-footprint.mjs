@@ -176,11 +176,14 @@ export function preflight({ systemCpuPct = null, treeCpuPctOneCore = 0, cores = 
                             false → INVALID
      want.focus 'unfocused' hasFocus false → 'unfocused'; true → INVALID
      want.visibility        the document's visibilityState must match ('hidden' when minimized, 'visible' otherwise)
-     want.hz                1000/renderPace().vsyncMs within VSYNC_TOLERANCE of the monitor the window is on
+     want.hz                1000/renderPace().vsyncMs within VSYNC_TOLERANCE of the monitor the window is on — except an
+                            observation that says why it cannot be read (o.hzExempt: the STILL pace, 2026-10-21, books rAF
+                            from a timer ~30x a second, so the probe sees the timer's gaps, not the panel's); the skip is
+                            reported in `skipped`, never silent
      want.camera            cameraDbg().mode: 'manual' (pinned) or 'auto' (the cinecam P6 engages)
    obs may be one observation or a list (window start AND end); every one must pass. */
 export function phaseValidity(want = {}, obs = {}) {
-  const list = [].concat(obs), reasons = [];
+  const list = [].concat(obs), reasons = [], skipped = [];
   let label = want.focus || want.name || 'phase';
   for (const o of list) {
     if (want.focus === 'focused') {
@@ -188,14 +191,37 @@ export function phaseValidity(want = {}, obs = {}) {
       else if (o.focusEmulated) label = 'focused(emulated)';
     } else if (want.focus === 'unfocused' && o.hasFocus !== false) reasons.push('labelled unfocused but document.hasFocus() is ' + o.hasFocus);
     if (want.visibility && o.visibilityState !== want.visibility) reasons.push('visibilityState is ' + o.visibilityState + ', want ' + want.visibility);
-    if (want.hz) {
+    if (want.hz && o.hzExempt) skipped.push('hz not checked: ' + o.hzExempt);
+    else if (want.hz) {
       const hz = o.vsyncMs > 0 ? 1000 / o.vsyncMs : null;
       if (hz == null) reasons.push('no vsync reading (renderPace().vsyncMs is 0)');
       else if (Math.abs(hz - want.hz) / want.hz > VSYNC_TOLERANCE) reasons.push('vsync ' + hz.toFixed(1) + ' Hz is more than ' + (VSYNC_TOLERANCE * 100) + '% off the intended ' + want.hz + ' Hz');
     }
     if (want.camera && o.cameraMode !== want.camera) reasons.push('camera mode is ' + o.cameraMode + ', want ' + want.camera);
   }
-  return { label, valid: reasons.length === 0, reasons: [...new Set(reasons)] };
+  return { label, valid: reasons.length === 0, reasons: [...new Set(reasons)], skipped: [...new Set(skipped)] };
+}
+
+// the pacer's own rule (world.js frame()): a pace under the timer line draws on the first vsync at or past pace - half a vsync.
+// The STILL pace (mode 'still', 2026-10-21) waits in a timer that fires 2 ms early and books rAF: the draw lands on the first
+// vsync at or past pace - 2 (on 60 Hz 30/s, on 144 Hz 28.8/s, on 239.76 Hz 30.0/s). Pass the WORLD's vsync for a still row:
+// the probe's own rAF timestamps are the timer's, ~33 ms apart, and say nothing about the panel.
+export function expectedDraws(paceMs, vsyncMs, mode) {
+  if (!(paceMs > 0)) return null;
+  if (paceMs >= 100 || !(vsyncMs > 0)) return +(1000 / paceMs).toFixed(1);
+  const k = mode === 'still' ? Math.max(1, Math.ceil((paceMs - 2) / vsyncMs - 1e-9))
+    : Math.max(1, Math.ceil((paceMs - Math.max(1, Math.min(vsyncMs, 17) / 2)) / vsyncMs));
+  return +(1000 / (k * vsyncMs)).toFixed(1);
+}
+// what a window's STILL verdicts were (world.js renderPace counters): the share of its draws judged still, and what kept the
+// rest moving — so a phase that never went still (a live belt in frame, a breathing body, a meteor) is labelled, not measured
+// at 60 as if it were the tier
+export function stillWindow(a, b) {
+  const d = (b && b.draws) - (a && a.draws);
+  if (!(d > 0) || !b || b.stillFrames == null || !a || a.stillFrames == null) return null;
+  const why = {};
+  for (const [k, n] of Object.entries(b.stillWhyCounts || {})) { const x = n - ((a.stillWhyCounts || {})[k] || 0); if (x > 0) why[k] = x; }
+  return { share: +((b.stillFrames - a.stillFrames) / d).toFixed(3), draws: d, why };
 }
 
 export function stats(values) {

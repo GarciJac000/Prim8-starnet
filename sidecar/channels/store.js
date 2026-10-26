@@ -17,6 +17,8 @@
        loadInbox(channel?)             -> [{id,channel,message,ts}] // admitted work not yet completed/queued
        pushInbox(entry)                -> item                   // idempotent durable intake receipt
        removeInbox(id)                 -> bool                   // completed (or durably queued)
+       markInbox(id, {runId?,tools?,held?}) -> item | undefined  // how far its run got (the attempt a recovery reads)
+       bootId                          -> string                 // this process's boot, stamped on every attempt
        liveInbox(id)                   -> promise | null         // the run processing this receipt in THIS process
        holdInbox(id, promise)          -> promise                // claim a receipt live until the promise settles
      }
@@ -46,6 +48,7 @@
   // Oldest drops first past maxOutbox; a single reply's stored text is capped so the file can't balloon.
   const OUTBOX_DEFAULTS = { maxOutbox: 50, maxOutboxChars: 16000 };
   const INBOX_DEFAULTS = { maxInbox: 200 };
+  let storeSeq = 0;   // per-module instance counter: part of each store's bootId (makeChannelStore)
 
   // A Set, not an object literal: `({user:1})['constructor']` is truthy, so an object-literal allowlist
   // silently admits every Object.prototype key. A hand-corrupted history claiming role:'constructor' or
@@ -128,6 +131,13 @@
        reply. In memory on purpose: a receipt with no live claim after a crash is exactly what recovery replays. */
     const liveClaims = new Map();   // inbox id -> the one processing promise in this process, whichever hub owns it
     let outboxSeq = 0;   // deterministic per-process id tail (clock.now() alone can collide within one ms)
+    /* THIS STORE'S BOOT (e5ecd6b8 review, 2026-10-21). markInbox stamps it on every attempt, so a re-delivered receipt
+       tells a run that died with an earlier process (a crash: recovery may not re-run its tool steps) from one this
+       very process left pending (a reply the full outbox refused, a throw): the latter is no restart. One store per
+       save dir per sidecar (index.js), so this is the process's boot. Built from the injected clock, the pid and a
+       per-module counter: no rng, and two instances in one process (tests) never share one. Injectable for tests. */
+    const bootId = (d.bootId != null && String(d.bootId)) ? String(d.bootId).slice(0, 200)
+      : String(clock.now()) + '-' + String((typeof process !== 'undefined' && process && process.pid) || 0) + '-' + (++storeSeq);
 
     /* PARSED-FILE CACHE (perf review 10-19: ~10 fsyncs + 14 whole-file parses per inbound DM). This store is its files'
        only writer (one sidecar per WORKSPACES dir; channels/ sits outside every agent's fs jail), so what it last wrote
@@ -387,6 +397,37 @@
         writeJsonAtomic(inboxFile(), { version: 1, items: next });
         return true;
       },
+
+      /* THE ATTEMPT MARKER (e5ecd6b8, 2026-10-21). A receipt only said "not finished", so a crash after the run had
+         already appended a line to a file replayed the whole message from scratch: the line was appended twice and the
+         chat was told it was done once. The hub stamps the receipt when its run starts (runId) and as each tool step
+         begins (tools, a running count), so a recovery can tell "never started" from "already did things". Known fields
+         only, clamped; the tool count never goes down. An unknown id is a no-op (the receipt already completed).
+         Every mark also stamps `boot` (this process: see bootId), and `held` keeps a FINISHED run's reply that the full
+         outbox refused ({text, runId, reason, agentId, ids}: ids = every receipt that one run answers), so the
+         replay delivers that answer instead of running the message again. */
+      markInbox(id, patch) {
+        const items = this.loadInbox();
+        const it = items.find(x => x.id === String(id));
+        if (!it) return undefined;
+        const p = patch || {};
+        const prev = (it.attempt && typeof it.attempt === 'object') ? it.attempt : {};
+        const next = { runId: String(prev.runId || '').slice(0, 200), tools: Math.max(0, Math.floor(Number(prev.tools) || 0)), boot: bootId };
+        if (p.runId != null && String(p.runId)) next.runId = String(p.runId).slice(0, 200);
+        if (p.tools != null) next.tools = Math.max(next.tools, Math.min(1000000, Math.max(0, Math.floor(Number(p.tools) || 0))));
+        it.attempt = next;
+        if (p.held && typeof p.held === 'object' && typeof p.held.text === 'string') {
+          let text = p.held.text;
+          if (text.length > outboxLimits.maxOutboxChars) text = text.slice(0, outboxLimits.maxOutboxChars) + '\n… (reply truncated for redelivery)';
+          const ids = Array.isArray(p.held.ids) ? p.held.ids.filter(x => typeof x === 'string' && x).slice(0, 50).map(x => x.slice(0, 300)) : [];
+          it.held = { text: text, runId: String(p.held.runId || '').slice(0, 200), reason: String(p.held.reason || '').slice(0, 40),
+            agentId: String(p.held.agentId || '').slice(0, 80), ids: ids };
+        }
+        writeJsonAtomic(inboxFile(), { version: 1, items: items });
+        return it;
+      },
+
+      bootId: bootId,
 
       liveInbox(id) { return liveClaims.get(String(id)) || null; },
 

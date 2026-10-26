@@ -285,6 +285,26 @@ const settle = async (R, id) => { for (let i = 0; i < 50; i++) { await R.st.sett
     A.eq(s.hops.map(h => h.agentId + ':' + h.pass), ['drafter:1', 'reviewer:1', 'drafter:2', 'reviewer:2', 'publisher:1']);
   }
 
+  /* ---- A TERSE APPROVAL (2026-10-18) — the executor's own decision (chain.js loopDecision): the next dock is handed the work the
+          reviewer approved, with the approval as its review; a gate that ships straight out ships the work, never "Looks good." ---- */
+  {
+    const DRAFT = 'Rooftop installs grew 34% in 2025; battery attach passed half; permits are the top soft cost.';
+    const script = { drafter: { text: DRAFT, usd: 0.01 }, reviewer: { text: 'Looks good.\nVERDICT: approved', usd: 0.01 } };
+    const R = rig(loopFloor({ maxIter: 3, when: 'approved' }), script);
+    let s = await settle(R, R.st.start({ line: R.lineId, text: 'write a post' }).session.id);
+    R.st.continue(s.id, {}); s = await settle(R, s.id);
+    A.eq(s.paused.next, { kind: 'agent', agentId: 'publisher', back: false }, 'terse approval: the crate takes the done lane');
+    A.ok(s.paused.text.indexOf(DRAFT) >= 0 && /\nREVIEW:\nLooks good\.$/.test(s.paused.text) && !/VERDICT/.test(s.paused.text),
+      'terse approval: the handoff the owner sees carries the approved work, then the approval (' + JSON.stringify(s.paused.text.slice(0, 80)) + ')');
+    const f = loopFloor({ maxIter: 3, when: 'approved' });
+    f.props = f.props.filter(p => p.id !== 'p7').map(p => p.id === 'p6' ? { id: 'p6', t: 'outbox', x: 15, y: 3, w: 2, h: 2 } : p);
+    f.belts = f.belts.filter(b => b.x < 17);
+    const R2 = rig(f, script);
+    const s2 = await settle(R2, R2.st.start({ line: R2.lineId, text: 'write a post', pause: 'none' }).session.id);
+    A.eq(s2.state, 'done', 'terse approval to the OUTBOX: the test finishes (' + s2.error + ')');
+    A.eq(s2.final, DRAFT, 'terse approval to the OUTBOX: the step test ships the approved work');
+  }
+
   /* ---- LINE BUDGET over the WHOLE session: re-runs count; the refusal ends in 'stopped' with an honest error ---- */
   {
     const R = rig(twoDock(), { research: { text: 'r', usd: 0.4 }, writer: { text: 'w', usd: 0.4 } }, { limits: { maxUsdPerMessage: 1 } });

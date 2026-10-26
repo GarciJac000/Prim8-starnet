@@ -257,7 +257,9 @@ const Backup = (() => {
         if (raw) {
           const d = JSON.parse(raw); d.updatedAt = Date.now();
           localStorage.setItem(SAVE_KEY, JSON.stringify(d));
-          if (typeof CloudSave !== 'undefined' && CloudSave.push) CloudSave.push(d);
+          // { restore: true }: the Commander chose this backup, so a reset generation's empty station file takes it (a stale
+          // browser copy from before the reset never does: savestore explicitRestore, review 10-23 #2)
+          if (typeof CloudSave !== 'undefined' && CloudSave.push) CloudSave.push(d, { restore: true });
         }
       } catch (_) {}
     }

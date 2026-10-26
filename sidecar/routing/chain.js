@@ -98,27 +98,136 @@ function effectiveLimits(raw, fallback, poolCap) {
    round this gate; `text` = the output about to be handed on (returned annotated). Pure: mutates nothing.
    `reviewed` (token-burn audit 2026-10-17) = what the reviewing stage was HANDED. The writer used to see its own draft on a
    loop-back only because the resume seed replayed the line's whole transcript into every hop; hops no longer take that
-   seed, so a loop-back turn carries the work under review itself, clipped, ahead of the review. */
+   seed, so a loop-back turn carries the work under review itself, clipped, ahead of the review.
+   THE APPROVED WORK (2026-10-18): the same missing replay left a TERSE approval ("Looks good.") handing on nothing but itself — a
+   designer after researcher ▸ reviewer ▸ LOOP got no research, and a gate shipping straight out delivered the approval as the
+   result. A BARE approval (bareApproval: only the VERDICT line, or nothing but approval words) now hands on the work it approved:
+   to a dock, framed with the approval as its review; out of the line, the work alone. Any other reply stays the work (R1): a
+   restatement, the reviewer's own version, a change it asks for, a review in its own words. */
 const REVIEWED_HEAD = 12000, REVIEWED_TAIL = 4000;
 function clipReviewed(s) {
   if (s.length <= REVIEWED_HEAD + REVIEWED_TAIL) return s;
   return s.slice(0, REVIEWED_HEAD) + '\n[… ' + (s.length - REVIEWED_HEAD - REVIEWED_TAIL) + ' characters of the work omitted …]\n' + s.slice(-REVIEWED_TAIL);
 }
+const WORK_HEAD = 'THE WORK UNDER REVIEW (what the reviewer was handed):\n', REVIEW_HEAD = '\n\nREVIEW:\n';
+const PASSED_ON = ' — the reviewer passed the work on without restating it]';
+const PASSED_FRAME = /^\[LOOP — [^\n]* — the reviewer passed the work on without restating it\]\nTHE WORK UNDER REVIEW \(what the reviewer was handed\):\n/;
+const LOOP_HEAD = /^\[LOOP — /m;   // a LOOP frame's first line, at the start of ANY line of a crate
+// a JOINER's merged crate (Pipeline.joinPayload): each branch's text follows its header and runs to the next header, a PARTIAL mark or the end
+const BRANCH_HEAD = /^\n\n=== BRANCH \d+ of \d+ — [^\n]* ===\n$/;
+const NEXT_SEAM = /\n\n=== (?:BRANCH \d+ of \d+ — [^\n]* ===\n|PARTIAL: )/;
+/* reviewedWork(handed) -> { work, swap }: what a stage was handed, read for the gate after it. `swap` = may a bare approval there
+   hand this work on in its place? A crate an earlier gate PASSED ON for a bare approval (loopDecision's frame, PASSED_ON) carries
+   the approved work inside: a later gate reviews that work, so those frames never nest and never ship. Every OTHER LOOP frame (a
+   loop-back, an exhausted or escalated gate's) holds the earlier reviewer's last word in its REVIEW part — perhaps its own redacted
+   version — so it is the work under review whole, as on trunk, and a bare approval of it never swaps anything in (2026-10-21
+   review: unwrapping an exhausted frame shipped the draft that reviewer had redacted).
+   FRAMES ANYWHERE (2026-10-22 review): a gate's done lane that meets a JOINER parks its frame as one BRANCH of the merged crate, so
+   a frame need not start the crate. Reading only the crate's first line missed it: a bare approval past the joiner swapped in the
+   whole merged crate, shipping a passed-on frame's wrapper, or an exhausted frame's draft (the personal data the earlier reviewer
+   had redacted). Now every line that opens a LOOP frame is read: a passed-on frame that is the whole crate, or the whole of one
+   branch, is unwrapped IN PLACE to the work it carries (the other branches, the joiner's header and PARTIAL marks kept as they are);
+   any other frame, a frame anywhere else, or one that cannot be read back exactly, keeps the crate whole with no swap. */
+function passedAt(s, start) {
+  const head = PASSED_FRAME.exec(s.slice(start));
+  if (!head) return null;
+  const body = start + head[0].length;
+  // the frame's own REVIEW part holds only the bare approval it was passed on for, running to the next seam or the end
+  for (let cut = s.indexOf(REVIEW_HEAD, body); cut >= 0; cut = s.indexOf(REVIEW_HEAD, cut + 1)) {
+    const from = cut + REVIEW_HEAD.length, seam = NEXT_SEAM.exec(s.slice(from));
+    const end = seam ? from + seam.index : s.length, notes = s.slice(from, end);
+    if (!notes.trim() || !bareApproval(notes)) continue;
+    const work = s.slice(body, cut);
+    return LOOP_HEAD.test(work) ? null : { work, end };
+  }
+  return null;
+}
+function reviewedWork(s) {
+  if (!LOOP_HEAD.test(s)) return { work: s, swap: true };
+  const heads = /^\[LOOP — /gm;
+  let work = '', at = 0, m;
+  while ((m = heads.exec(s))) {
+    const start = m.index;
+    const branch = s.lastIndexOf('\n\n=== BRANCH ', start);
+    const p = (start === 0 || (branch >= 0 && BRANCH_HEAD.test(s.slice(branch, start)))) ? passedAt(s, start) : null;
+    if (!p) return { work: s, swap: false };
+    work += s.slice(at, start) + p.work;
+    at = p.end; heads.lastIndex = p.end;
+  }
+  return { work: work + s.slice(at), swap: true };
+}
+/* bareApproval(reply) -> is an APPROVING reply (its VERDICT line stripped) POSITIVELY a bare approval, so the work it approved moves
+   on in its place? Only two shapes are: nothing at all (only the VERDICT line, which the verdict brief offers for passing the work
+   on unchanged, or an emoji), or nothing but approval words with at least one that approves ("Looks good.", "LGTM", "Approved, ship
+   it!", "Great work.", "No changes needed.", "看起来不错，可以发布。", "いいと思います。"). Every other reply stays the work, as on trunk:
+   the reviewer's own version at any length (a reworded tagline, headline or subject line, a translation of one sentence or many, a
+   correction, a redaction, a cut), a change it asks for ("remove his phone number"), a withholding ("not safe to share") and a
+   review in its own words. One word outside the two lists ("but", "not", "don't", a noun of the work's), or a redaction mark,
+   keeps the reply; neither list holds a verb that asks for a change. (2026-10-21 reviews: rules that guessed "a short note" from
+   overlap, length and shape swapped short versions and caveats back for the draft, shipping the version the reviewer replaced and
+   the personal data it flagged.) Pure; a reply past 2k characters is never bare.
+   NO CLAIM OF A CHANGE (2026-10-22 review): a reply that says the reviewer CHANGED something is never bare, whatever else it says —
+   "Done.", "All done, ship it.", "Changes done.", "Edits done, looks good.", "Polished and ready.", "好了。", "可以了。". The change
+   may sit in a file the reviewer edited, or the reply may simply be wrong, but the draft it was handed is not what it approved, so
+   swapping that draft in shipped the old version. Neither list holds a word that reports a change (done, changes, edits, polished, the
+   Chinese change-of-state 了); "no changes / edits (needed)" is read as one phrase, which reports none. When in doubt the reply is the work. */
+const APPROVE_WORDS = new Set(('accepted approve approved excellent fine go good great happy lgtm love nice no ok okay perfect '
+  + 'post publish ready send ship solid works yes yep').split(' '));
+const APPROVAL_FILLER = new Set(('a accurate all also and are as be by clearly concise crisp engaging everything flow '
+  + 'for further here hook i is issues it job let look looking looks m me needed nicely notes on overall readable really '
+  + 'relevant s sharp sounds sourced specific spot strong thanks that the think this thorough tight to tone too upbeat very warm '
+  + 'well work written').split(' '));
+const NO_CHANGE = /(?<![\p{L}\p{N}])no (?:further |more |other )?(?:changes|edits)(?: (?:are |were )?(?:needed|required|necessary))?(?![\p{L}\p{N}])/gu;
+// Chinese, Japanese and Korean put no spaces between words: their approval phrases are matched (longest first), then their grammar
+const CJK_APPROVE = /非常好|太棒了|没有问题|没问题|不错|很好|挺好|好的|很棒|完美|可以|发布|通过|批准|同意|好|問題ありません|問題なし|大丈夫|素晴らしい|完璧|承認|いい|良い|よい|좋습니다|좋아요|좋네요|괜찮습니다|괜찮아요|승인합니다|승인|완벽합니다|완벽해요/gu;
+const CJK_FILLER = /看起来|看上去|我觉得|写得|非常|很|也|都|的|吧|啊|と思います|思います|とても|します|です|ます|ね|よ|아주|정말|네/gu;
+const REDACTION_MARK = /\[[^\]\n]{0,40}\]|【[^】\n]{0,40}】|\*{3,}|_{3,}|[█▇■▓▒░]/u;
+function bareApproval(reply) {
+  const s = String(reply == null ? '' : reply).trim();
+  if (!s) return true;
+  if (s.length > 2000 || REDACTION_MARK.test(s)) return false;
+  let approves = false, filler = false;
+  const rest = s.toLowerCase().replace(NO_CHANGE, () => { approves = true; return ' '; })
+    .replace(CJK_APPROVE, () => { approves = true; return ' '; }).replace(CJK_FILLER, () => { filler = true; return ' '; });
+  for (const w of rest.match(/[\p{L}\p{N}]+/gu) || []) {
+    if (APPROVE_WORDS.has(w)) approves = true;
+    else if (APPROVAL_FILLER.has(w)) filler = true;
+    else return false;
+  }
+  return approves || !filler;   // approval words, or no words at all (an emoji); filler alone ("This is it.") approves nothing
+}
 function loopDecision(step, ctx, n, visited, text, reviewed) {
   const byVerdict = Verdict.isVerdictWord(step.when);
   const wants = !step.when ? true : byVerdict ? (ctx.verdict !== String(step.when).toLowerCase()) : (ctx.tag === step.when);
   const again = step.backTo && n < step.max && wants;
-  const draft = (typeof reviewed === 'string' && reviewed.trim()) ? reviewed : '';
-  const workBlock = draft ? 'THE WORK UNDER REVIEW (what the reviewer was handed):\n' + clipReviewed(draft) + '\n\nREVIEW:\n' : '';
+  const handed = (typeof reviewed === 'string' && reviewed.trim()) ? reviewedWork(reviewed) : null;
+  const draft = handed ? handed.work : '';
+  const workBlock = draft ? WORK_HEAD + clipReviewed(draft) + REVIEW_HEAD : '';
   if (again) {
     return { again: true, target: step.backTo, exhausted: false,
       text: '[LOOP — pass ' + (n + 1) + ' of ' + step.max + ' round the gate at ' + step.loop + ']\n' + workBlock + text };
   }
   // spent (or the verdict passed): leave on the done lane — an APPROVED crate leaves without its VERDICT line (R1: the line is the
   // gate's control signal; it never ships as part of the work). An exhausted crate keeps it: the reviewer's last word is evidence.
-  // (a reply that is ONLY the verdict line keeps it: stripping it would hand on an empty crate, which the next hop refuses)
+  // (a reply that is ONLY the verdict line keeps it when no reviewed work rides with it: stripping it would hand on an empty crate,
+  // which the next hop refuses)
   const stripped = (byVerdict && !wants) ? Verdict.stripVerdict(text) : text;
   let target = step.next, out = (typeof stripped === 'string' && stripped.trim()) ? stripped : text, exhausted = false, why = '';
+  // the done-lane crate reaches a dock (directly, or past a JOINER: next = null, the dock in afterJoin.next) — else it ships out
+  const toDock = !!(step.next || (step.afterJoin && step.afterJoin.next));
+  if (byVerdict && !wants) {
+    // THE APPROVED WORK (above): a bare approval hands on the work itself, unclipped — it is the product.
+    // (the frame never spells the verdict line out: that word is the gate's control signal, never part of what moves on — R1)
+    // Only work a bare approval may stand for (reviewedWork: never a crate an exhausted, escalated or looping gate framed).
+    const work = (handed && handed.swap) ? Verdict.stripVerdict(draft) : '';
+    const notes = String(stripped == null ? '' : stripped).trim();
+    if (work.trim() && bareApproval(notes)) {
+      out = (toDock && notes)
+        ? '[LOOP — ' + String(step.when).toLowerCase() + ' round the gate at ' + step.loop + PASSED_ON + '\n'
+          + WORK_HEAD + work + REVIEW_HEAD + notes
+        : work;
+    }
+  }
   if (step.when && wants && n >= step.max) {
     exhausted = true;
     /* WHY, IN WORDS (GitHub #122): the job carries this as out.unapproved past the line — the OUTBOX product, SEND TO, SHIPPED and
@@ -143,7 +252,7 @@ function loopDecision(step, ctx, n, visited, text, reviewed) {
         + (byVerdict ? ' without VERDICT: ' + String(step.when).toLowerCase() : ' while the output still read as ' + step.when)
         + ' — leaving on DONE unapproved]\n'
         // a done lane that meets a JOINER compiles with next = null and the dock past it in afterJoin.next: that dock needs the work too
-        + ((step.next || (step.afterJoin && step.afterJoin.next)) ? workBlock : '') + text;
+        + (toDock ? workBlock : '') + text;
     }
   }
   return why ? { again: false, target, text: out, exhausted, why } : { again: false, target, text: out, exhausted };
@@ -181,11 +290,28 @@ function hopTurn(t) {
   const td = t.targetDock != null && String(t.targetDock) ? String(t.targetDock) : undefined;
   let brief = null;
   if (typeof t.stageBrief === 'function') { try { brief = td ? t.stageBrief(t.target, td) : t.stageBrief(t.target); } catch (_) { brief = null; } }
-  let verdictWhen = null, last = false;
-  if (typeof t.loopGateAfter === 'function') { try { const g = td ? t.loopGateAfter(t.target, t.lineId, td) : t.loopGateAfter(t.target, t.lineId); verdictWhen = (g && Verdict.isVerdictWord(g.when)) ? g.when : null; } catch (_) { verdictWhen = null; } }
+  let verdictWhen = null, handsOn = false, last = false;
+  if (typeof t.loopGateAfter === 'function') {
+    try {
+      const g = td ? t.loopGateAfter(t.target, t.lineId, td) : t.loopGateAfter(t.target, t.lineId);
+      verdictWhen = (g && Verdict.isVerdictWord(g.when)) ? g.when : null;
+      if (verdictWhen) handsOn = bareApprovalHandsOn(g, t.target, td, t.upstream);
+    } catch (_) { verdictWhen = null; handsOn = false; }
+  }
   // the stage whose reply LEAVES the line (its lane ships to the OUTBOX, no review loop ahead) is told its reply is the result
   if (!verdictWhen && typeof t.lastStage === 'function') { try { last = !!(td ? t.lastStage(t.target, td) : t.lastStage(t.target)); } catch (_) { last = false; } }
-  return compose(t.originalText, t.from, t.upstream, t.hop, brief, verdictWhen ? Verdict.verdictBrief(verdictWhen) : '', last);
+  return compose(t.originalText, t.from, t.upstream, t.hop, brief, verdictWhen ? Verdict.verdictBrief(verdictWhen, handsOn) : '', last);
+}
+/* bareApprovalHandsOn(gate, target, targetDock, handed) -> will a bare approval from `target` at the verdict gate after it hand on
+   the work it was handed (loopDecision)? The verdict brief offers that only when it is true (2026-10-21 review): never at a
+   SELF-LOOP gate, whose back lane re-enters the reviewing dock itself (the runner hands that gate no reviewed work, so the bare
+   reply would be the product), never for a crate another gate framed (reviewedWork: an exhausted, escalated or looping frame keeps
+   the reply), and never when the gate does not say where its back lane goes (`backTo` absent). Same self-loop test as advance(). */
+function bareApprovalHandsOn(g, target, targetDock, handed) {
+  if (!g || !('backTo' in g) || !String(handed == null ? '' : handed).trim()) return false;
+  const self = (g.backDock != null && targetDock != null) ? String(g.backDock) === String(targetDock)
+    : (g.backTo != null && String(g.backTo) === String(target));
+  return !self && reviewedWork(String(handed)).swap;
 }
 
 /* lineRefusalNote(lineOfAgent, dock, lineId) -> the honest note when the line GATE refused to advance this work

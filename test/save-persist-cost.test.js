@@ -35,10 +35,10 @@ try {
   let T = 1000;
   const store = makeSaveStore({ fs: cfs, pathMod: path, root, clock: { now: () => ++T } });
   const workstreams = Array.from({ length: 120 }, (_, i) => ({ id: 'ws' + i, title: 'session ' + i, history: [{ role: 'user', content: 'y'.repeat(1500) }] }));
-  const envelope = (updatedAt, rev, tag) => ({ schema: 'skynet.save', version: 9, updatedAt, _saveRevision: rev, _saveClient: 'tab1', agent: { id: 'agent', name: tag }, workstreams });
+  const envelope = (updatedAt, rev, tag, client) => ({ schema: 'skynet.save', version: 9, updatedAt, _saveRevision: rev, _saveClient: client || 'tab1', agent: { id: 'agent', name: tag }, workstreams });
 
   let r = store.save('agent', envelope(100, 0, 'v0'), { compareRevision: true });
-  A.ok(r.ok && r.revision === 1, 'first persist accepted (revision 1)');
+  A.ok(r.ok && r.revision >= 1000, 'first persist accepted (at the clock revision on an empty file, review 10-23 #2)');
 
   // ---- (1) + (2) ----
   let rev = r.revision;
@@ -63,7 +63,7 @@ try {
   A.eq(fs.readFileSync(file, 'utf8'), before, 'and writes nothing');
 
   // ---- (4) ----
-  r = store.save('agent', envelope(999, rev - 2, 'stale-tab'), { compareRevision: true });
+  r = store.save('agent', envelope(999, rev - 2, 'stale-tab', 'tab2'), { compareRevision: true });   // another tab: every page mints its own id
   A.ok(!r.ok && r.conflict && r.stale, 'a stale revision still conflicts');
   A.ok(fs.existsSync(path.join(root, r.recovery)), 'and the rejected snapshot is kept durably');
   A.eq(store.load('agent').agent.name, 'v5', 'the station is untouched by the stale tab');

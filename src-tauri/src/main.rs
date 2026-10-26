@@ -18,6 +18,7 @@ mod fresh_start;
 mod hud_mode;
 mod lifecycle_preferences;
 mod sidecar_startup;
+mod terminal_session;
 mod webview_recovery;
 mod window_visibility;
 
@@ -85,6 +86,14 @@ struct AppState {
     // Set once setup has built the main window. Before that a second launch must not treat the
     // missing window as a dead instance (see webview_recovery::second_launch_action).
     main_window_built: AtomicBool,
+    // This instance was started by `starnet` (the terminal) with `--background`: its window starts parked and
+    // it runs while the terminal sessions do; their end decides whether it keeps running (terminal_sessions_over,
+    // which leaves an open window alone). Cleared once that decision is made, or by a window close with no
+    // session left alive.
+    launched_for_terminal: AtomicBool,
+    // The `starnet` processes it runs for (the one that started it and any that joined), checked by
+    // watch_terminal_sessions. Read and changed together with launched_for_terminal, under this lock.
+    terminal_pids: Mutex<Vec<u32>>,
 }
 
 /// What the guardian knows about the sidecar's exit history. Serialized verbatim to the frontend
@@ -2824,6 +2833,144 @@ fn stay_resident_or_quit(app: &AppHandle, st: &AppState, why: &str) {
     app.exit(0);
 }
 
+/// What a window close decides once the window is hidden (Lane 4D), as one function so the end of the terminal
+/// sessions a StarNet ran for (terminal_sessions_over) decides exactly the same way: the close-to-tray preference
+/// or REAL armed work keeps the supervised station resident in the tray; nothing armed (or no sidecar listening)
+/// is a full quit; a live but unreadable sidecar fails OPEN (killing it could destroy armed work). No hidden
+/// daemon, no claim the harness can't prove.
+fn decide_close(app: &AppHandle, st: &AppState) {
+    let close_to_tray = lifecycle_preferences_snapshot(st).close_to_tray;
+    log_startup(
+        &st.startup_log,
+        format!("close-request: close_to_tray={close_to_tray}"),
+    );
+    if close_to_tray {
+        // Explicit authority to keep the supervised process alive even when no scheduled
+        // work is armed. Tray Quit remains the only full-stop action in this mode.
+        stay_resident_or_quit(app, st, "close-to-tray preference");
+        return;
+    }
+    let mut probe = probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
+    if matches!(probe, LifecycleProbe::Ambiguous) {
+        // One retry before deciding — a single slow poll must not park the app in the
+        // tray forever when the sidecar is actually healthy and idle.
+        probe = probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
+    }
+    match probe {
+        LifecycleProbe::Armed(l) if l.armed => {
+            stay_resident_or_quit(app, st, "armed background work");
+        }
+        LifecycleProbe::Ambiguous => {
+            // Alive but unwell — fail OPEN (killing could destroy armed work).
+            stay_resident_or_quit(app, st, "armed state ambiguous");
+        }
+        _ => {
+            // Armed{armed:false} or NotRunning: window-close is a full quit.
+            drain_and_kill_sidecar(st);
+            app.exit(0);
+        }
+    }
+}
+
+/// Started for the terminal (terminal_session.rs): every 2 s, drop the `starnet` sessions that have exited. When none
+/// is left, decide once (terminal_sessions_over). A crashed or closed terminal counts as ended — the app watches the
+/// process and never waits for a goodbye. Stops once that decision is made, or a window close found no session left.
+fn watch_terminal_sessions(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let st = state.inner();
+        if st.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let over = {
+            let mut pids = st
+                .terminal_pids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !st.launched_for_terminal.load(Ordering::SeqCst) {
+                return;
+            }
+            pids.retain(|pid| terminal_session::terminal_running(*pid));
+            // one decision: from here this StarNet is no longer the terminal's (a later session simply attaches)
+            pids.is_empty() && st.launched_for_terminal.swap(false, Ordering::SeqCst)
+        };
+        if over {
+            terminal_sessions_over(&app, st);
+            return;
+        }
+    });
+}
+
+/// Is a `starnet` session this StarNet runs for still alive? (The ones that have exited are dropped.)
+fn terminal_sessions_live(st: &AppState) -> bool {
+    let mut pids = st
+        .terminal_pids
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !st.launched_for_terminal.load(Ordering::SeqCst) {
+        return false;
+    }
+    pids.retain(|pid| terminal_session::terminal_running(*pid));
+    !pids.is_empty()
+}
+
+/// Every `starnet` session this StarNet ran for has ended. If nobody has opened the window meanwhile, decide exactly
+/// as a window close does — a station with routines armed (or the close-to-tray preference) stays in the tray and an
+/// idle one quits, leaving nothing running unseen. A window that is open is a person's: the terminal never closes it.
+fn terminal_sessions_over(app: &AppHandle, st: &AppState) {
+    let visible = app
+        .get_webview_window("main")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if visible {
+        log_startup(
+            &st.startup_log,
+            "terminal-done: the starnet sessions ended, but StarNet was opened meanwhile; it stays as it is",
+        );
+        return;
+    }
+    st.startup_reveal.cancel();
+    log_startup(
+        &st.startup_log,
+        "terminal-done: every starnet session it ran for has ended; deciding as a window close",
+    );
+    decide_close(app, st);
+}
+
+/// A second launch with the terminal's flags: another `starnet` session attaching to the running station. A StarNet
+/// the terminal started runs for this session too, so the first one ending never closes the station under it; a
+/// StarNet a person started is theirs and only notes it. Never a window, either way.
+fn join_terminal_session(app: &AppHandle, pid: u32) {
+    let joined = app
+        .try_state::<AppState>()
+        .map(|state| {
+            let st = state.inner();
+            let mut pids = st
+                .terminal_pids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pid == 0 || !st.launched_for_terminal.load(Ordering::SeqCst) {
+                return false;
+            }
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+            true
+        })
+        .unwrap_or(false);
+    log_startup(
+        &startup_log_path(app),
+        if joined {
+            format!("second-launch --background: starnet session pid {pid} joins the station the terminal started")
+        } else {
+            "second-launch --background: the station is already running; the window is left as it is".to_string()
+        },
+    );
+}
+
 /// The init script every main-window document runs first.
 fn webview_init_script(port: u16, api_token: &str) -> String {
     // The frontend is served LOCALLY (bundled via frontendDist), NOT from the sidecar's
@@ -2989,42 +3136,15 @@ fn build_main_window(
                         return;
                     };
                     let st = state.inner();
-                    let close_to_tray = lifecycle_preferences_snapshot(st).close_to_tray;
-                    log_startup(
-                        &st.startup_log,
-                        format!("close-request: close_to_tray={close_to_tray}"),
-                    );
-                    if close_to_tray {
-                        // Explicit authority to keep the supervised process alive even when no scheduled
-                        // work is armed. Tray Quit remains the only full-stop action in this mode.
-                        stay_resident_or_quit(&app2, st, "close-to-tray preference");
+                    // closed while a `starnet` session it runs for is still alive: it keeps running for that
+                    // session, and the session's end decides exactly as this close would have — never a
+                    // station closed under a terminal that is still using it
+                    if terminal_sessions_live(st) {
+                        stay_resident_or_quit(&app2, st, "a starnet session still uses this station");
                         return;
                     }
-                    let mut probe =
-                        probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
-                    if matches!(probe, LifecycleProbe::Ambiguous) {
-                        // One retry before deciding — a single slow poll must not park the app in the
-                        // tray forever when the sidecar is actually healthy and idle.
-                        probe = probe_lifecycle_armed(
-                            st.port,
-                            &st.api_token,
-                            Duration::from_millis(1500),
-                        );
-                    }
-                    match probe {
-                        LifecycleProbe::Armed(l) if l.armed => {
-                            stay_resident_or_quit(&app2, st, "armed background work");
-                        }
-                        LifecycleProbe::Ambiguous => {
-                            // Alive but unwell — fail OPEN (killing could destroy armed work).
-                            stay_resident_or_quit(&app2, st, "armed state ambiguous");
-                        }
-                        _ => {
-                            // Armed{armed:false} or NotRunning: window-close is a full quit.
-                            drain_and_kill_sidecar(st);
-                            app2.exit(0);
-                        }
-                    }
+                    st.launched_for_terminal.store(false, Ordering::SeqCst);
+                    decide_close(&app2, st);
                 });
             }
         });
@@ -4931,7 +5051,15 @@ fn main() {
     tauri::Builder::default()
         // A second launch should focus the running window, not spin up a 2nd sidecar. Registered FIRST per
         // Tauri guidance (n1): single-instance must run before other plugins so a second process bails early.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // The terminal's own launch never reveals the window: `--background` is a `starnet` session attaching to
+            // the station that is already running (terminal_session.rs).
+            if let terminal_session::TerminalLaunch::Background { pid } = terminal_session::parse(argv.iter()) {
+                join_terminal_session(app, pid);
+                return;
+            }
+            // a person opening StarNet: revealed as always. The terminal sessions it runs for stay tracked — their end
+            // never closes a window that is open, and a close while one is alive waits for it (terminal_sessions_live)
             let win = app.get_webview_window("main");
             // No managed state yet = setup is still booting the sidecar: this instance is starting.
             let (built, rebuilding) = app
@@ -5022,6 +5150,13 @@ fn main() {
             hud_mode::starnet_hud_fold
         ])
         .setup(move |app| {
+            // Started by `starnet` (bin/starnet.js) with the app closed: the window stays parked and this StarNet runs
+            // for that terminal session (terminal_session.rs, watch_terminal_sessions).
+            let terminal_pid = match terminal_session::parse(std::env::args()) {
+                terminal_session::TerminalLaunch::Background { pid } => Some(pid),
+                terminal_session::TerminalLaunch::Person => None,
+            };
+            let launched_for_terminal = terminal_pid.is_some();
             let root = project_root(app.handle());
             let port = sidecar_port; // the port the CSP was pinned to in main()
             let ipc_token = uuid::Uuid::new_v4().to_string();
@@ -5032,7 +5167,8 @@ fn main() {
             let workspaces = workspace_path(app.handle());
             let lifecycle_preferences_path = lifecycle_preferences_path(app.handle());
             let lifecycle_preferences = load_lifecycle_preferences(&lifecycle_preferences_path);
-            let start_minimized = lifecycle_preferences.start_minimized;
+            // started for the terminal: parked like start-minimized, for this launch only (the stored choice is untouched)
+            let start_minimized = lifecycle_preferences.start_minimized || launched_for_terminal;
             let migrated_workspaces = migrate_workspace_data(
                 &workspaces,
                 &legacy_workspace_paths(&root, &workspaces),
@@ -5052,6 +5188,12 @@ fn main() {
                     lifecycle_preferences.close_to_tray
                 ),
             );
+            if let Some(pid) = terminal_pid {
+                log_startup(
+                    &startup_log,
+                    format!("startup: started by starnet (--background, terminal pid {pid}) — the station runs with the app's keys; the window stays parked until someone opens StarNet"),
+                );
+            }
             // One-time: lift any plaintext channel bot tokens into the keychain and strip them from the file,
             // BEFORE spawning the sidecar so the injected SKYNET_<ID>_TOKEN env reflects the migrated tokens.
             migrate_channel_tokens_from_plaintext(&workspaces);
@@ -5078,6 +5220,8 @@ fn main() {
                 webview_rebuilding: AtomicBool::new(false),
                 webview_recovery: webview_recovery::RecoveryBudget::default(),
                 main_window_built: AtomicBool::new(false),
+                launched_for_terminal: AtomicBool::new(launched_for_terminal),
+                terminal_pids: Mutex::new(terminal_pid.filter(|pid| *pid > 0).into_iter().collect()),
             };
             // Before spawning OUR sidecar: terminate any orphan sidecars left behind by a
             // hard-killed previous shell (Drop/ExitRequested never ran there). Multiple live
@@ -5102,6 +5246,11 @@ fn main() {
 
             // Respawn the sidecar if it crashes while the window is open (see spawn_guardian).
             spawn_guardian(app.handle().clone());
+            // Started for a terminal session: StarNet runs while it does (a launch that named no pid stays parked
+            // until someone opens it or quits it from the tray).
+            if terminal_pid.is_some_and(|pid| pid > 0) {
+                watch_terminal_sessions(app.handle().clone());
+            }
 
             // ---- Lane 4D: tray supervisor ----
             // The tray is the visible owner of the background-lifecycle contract. Open reveals the window; the

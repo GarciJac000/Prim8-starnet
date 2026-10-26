@@ -310,6 +310,17 @@ const MANUAL_POINTER = OPEN + 'The Commander is messaging you from outside the s
   + MANUAL_SECTIONS_IDS().join(', ') + '). Call it before explaining any StarNet window, setting or feature; never answer that '
   + 'from memory. Name places in the UI\'s words — station.show cannot open them from here.\n' + CLOSE;
 function starnetManualPointer() { return MANUAL_POINTER; }
+/* THE TERMINAL (2026-10-18): a run from the `starnet` CLI (handleRun `client:'terminal'`) has no station on the Commander's
+   screen, so the desktop manual's "open X", "click Y", "place Z" would send them hunting for buttons that do not exist. This
+   pointer replaces the manual for those runs: the manual stays one manual.read away for how StarNet works, and the answer is
+   given in TERMINAL terms. A constant, so it rides the cached prefix. */
+const MANUAL_TERMINAL = OPEN + 'The Commander is using StarNet from its TERMINAL CLI (`starnet`), not the desktop app: there is no '
+  + 'station on their screen — no panels, windows, buttons, cards, dock, BUILD MODE or settings screens. StarNet\'s operator manual '
+  + 'describes the DESKTOP app (sections: ' + MANUAL_SECTIONS_IDS().join(', ') + '; one manual.read call away) — read it for how a '
+  + 'StarNet thing works, then answer in terminal terms: never tell them to click, tap, open a window or place a prop. If the '
+  + 'thing can only be done in the desktop app, say so plainly and name the place in the app\'s words. station.show cannot open '
+  + 'anything from here.\n' + CLOSE;
+function starnetManualTerminal() { return MANUAL_TERMINAL; }
 // one section, verbatim ('all' = the whole manual); null for an unknown id.
 function manualSection(id) {
   const key = String(id == null ? '' : id).trim().toLowerCase();
@@ -319,4 +330,4 @@ function manualSection(id) {
 }
 const MANUAL_SECTIONS = Object.freeze(SECTIONS.map(s => Object.freeze({ id: s.id, kind: s.kind, title: s.title, summary: s.summary || '' })));
 
-module.exports = { starnetManual, starnetManualIndex, starnetManualPointer, manualSection, MANUAL_SECTIONS, INLINE_RULE_EXCERPTS: Object.freeze([NAV_SESSIONS, NAV_AUTOMATION]) };
+module.exports = { starnetManual, starnetManualIndex, starnetManualPointer, starnetManualTerminal, manualSection, MANUAL_SECTIONS, INLINE_RULE_EXCERPTS: Object.freeze([NAV_SESSIONS, NAV_AUTOMATION]) };

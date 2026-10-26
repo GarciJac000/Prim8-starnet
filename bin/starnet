@@ -1,0 +1,25 @@
+#!/bin/sh
+# starnet — the StarNet command line. Installed with the desktop app it runs on the app's own node, wherever that
+# platform's bundle keeps it beside this folder; from a checkout it runs on node from PATH. Every argument passes
+# through; the exit code is the CLI's own.
+#   one folder up                   a portable layout (and Windows, via starnet.cmd)
+#   ../../MacOS/node                macOS: StarNet.app/Contents/Resources/bin → Contents/MacOS/node
+#   ../../../bin/node               Linux deb/AppImage: usr/lib/StarNet/bin → usr/bin/node
+# A terminal usually reaches this file through a LINK (macOS: ~/.local/bin/starnet, made by sidecar/cli-link.js), and
+# then $0 is the link's path. Follow it — absolute, relative, or a link to a link — to the real file first, or the
+# bundle's node and starnet.js are looked for beside the link. (readlink without -f: the BSD one on macOS has no -f.)
+SELF=$0
+n=0
+while [ -h "$SELF" ] && [ "$n" -lt 40 ]; do
+  L=$(readlink -- "$SELF") || break
+  case $L in
+    /*) SELF=$L ;;
+    *) SELF=$(dirname -- "$SELF")/$L ;;
+  esac
+  n=$((n + 1))
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd -P)
+for NODE in "$DIR/../node" "$DIR/../../MacOS/node" "$DIR/../../../bin/node"; do
+  if [ -f "$NODE" ] && [ -x "$NODE" ]; then exec "$NODE" "$DIR/starnet.js" "$@"; fi
+done
+exec node "$DIR/starnet.js" "$@"

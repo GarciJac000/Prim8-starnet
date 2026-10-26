@@ -187,6 +187,8 @@
         if (!store || typeof store.manage !== 'function') return { content: 'The skill manager is unavailable.', summary: 'unavailable' };
         const aid = (ctx && ctx.agentId) || 'agent';
         const action = String((args && args.action) || 'create').toLowerCase();
+        // The pin is the Commander's lock against model writes (bug 97743dff): a run may add it, never take it off.
+        if (action === 'unpin') return { content: 'Refused: only the Commander can unpin a skill, in ABILITIES > SKILLS. Leave it pinned and tell the Commander what you would change.', summary: 'not saved' };
         if (readBeforeWrite && action !== 'create') {
           const prior = peek(aid, (args && (args.target != null ? args.target : (args.id != null ? args.id : args.name))));
           const unread = unreadRefusal(prior, action);

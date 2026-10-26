@@ -50,6 +50,19 @@ is the level the station has *earned*; it operates at the **lower of the two and
 binding** ("you set me free, but I'm still learning you — here's a question instead of a guess").
 `WAIT` means nothing ever, regardless of confidence.
 
+**Implementation note (2026-10-21, bug 41b2d015 — the decisions above are unchanged; the bug stays open for
+Andrew's ruling):** the deterministic floor's numbers moved from "goals + 4 dossier areas, or 4 recent runs" to
+one fresh *grounded* aim or one recent user run (`frontend/app/autopilot.js` `HOT_MIN` / `ACTIVITY_HOT_MIN` = 1).
+The trust line below still holds: a goals belief only counts when its weight is stated / synth / observed — a
+`seed` (the quick-setup chip's canned purpose, a thin run's synthesis and its BELIEF lines, a dig reply written
+before the Commander typed anything, any doc copy; `dossier.js` WEIGHTS; `onboarding.js` labels each write by what
+the Commander gave; a mission they TYPE at the fallback question — quick setup, a keyless wake, a synthesis that
+could not land — is `stated`) is known breadth, never acting grounds. So a Commander whose awakening gave nothing of their
+own still sees "earn context, then act" until they say what they want or run one task. Whether a chosen away posture may lift even
+that hold (the DECISIONS "no usage walls" conflict the bug names) is the owner's call, not this note's. The
+per-candidate half is unchanged: every job must cite a real belief or run, clear `MIN_ACT_SCORE`, and survive
+the self-critique.
+
 **Two-tier grounding maps onto the ask→propose→act ladder:**
 - **Confirmed beliefs (dossier)** may ground **acting**.
 - **Observed affinity (profile)** may only ground **proposing** — and, crucially, it **targets the

@@ -62,6 +62,45 @@ const lineage = require('../sidecar/workspace-lineage.js');
   A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: false }], noSpawn: true }).mode, 'refuse', '--no-spawn refuses');
   A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: true }], forceSpawn: true }).mode, 'spawn', '--spawn boots even when a station answers');
   A.eq(c({ forceSpawn: true, noSpawn: true }).mode, 'refuse', '--spawn + --no-spawn refuses');
+  /* The desktop app's station while the app is CLOSED: its keys, bot tokens and credits token live in the OS keychain,
+     which only the app hands its sidecar. A station the terminal boots there would be a keyless second copy of the real
+     one (routines firing and failing, bots offline) — so `starnet` STARTS THE APP in the background (no window) and
+     attaches to the station it brings up. The terminal never needs the app open. */
+  const dead = [{ source: 'default', port: 8787, reachable: false }];
+  const EXE = 'C:\\Users\\x\\AppData\\Local\\StarNet\\skynet-desktop.exe';
+  const closedApp = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true, appExe: EXE } });
+  A.eq(closedApp.mode, 'launch-app', 'the desktop app\'s station with the app closed: start the app in the background, never refuse');
+  A.eq(closedApp.exe, EXE, '…the app it found');
+  const noApp = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true, appExe: '' } });
+  A.eq(noApp.mode, 'refuse', 'no app on this computer to start: refused, never booted keyless');
+  A.ok(/app was not found/.test(noApp.reason) && /STARNET_APP_EXE/.test(noApp.reason) && /--workspace <dir>/.test(noApp.reason), '…and the reason says so, and the two ways on: ' + noApp.reason);
+  const closedAsk = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true, appExe: EXE }, noSpawn: true });
+  A.eq(closedAsk.mode, 'refuse', '--no-spawn (a question: status, ls) never starts the app');
+  A.ok(/isn't running/.test(closedAsk.reason) && /run `starnet` to start it/.test(closedAsk.reason) && !/open the StarNet app/i.test(closedAsk.reason), '…and says `starnet` starts it, never "open the app": ' + closedAsk.reason);
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true, appExe: EXE }, workspaceOverride: true }).mode, 'spawn', '…a workspace the operator named still boots (headless use)');
+  /* --spawn alone still targets that same workspace (defaultWorkspace picks the desktop station whenever it holds one), so
+     it is the same keyless copy: refused, and the reason names both ways that work */
+  const closedSpawn = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true, appExe: EXE }, forceSpawn: true });
+  A.eq(closedSpawn.mode, 'refuse', '…an explicit --spawn never boots the closed app\'s station keyless');
+  A.ok(/plain `starnet`/.test(closedSpawn.reason) && /--workspace <dir>/.test(closedSpawn.reason) && !/open the StarNet app/i.test(closedSpawn.reason), '…and says plain starnet starts it with its keys, or name a --workspace: ' + closedSpawn.reason);
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true }, forceSpawn: true, workspaceOverride: true }).mode, 'spawn', '--spawn --workspace <dir> still boots (headless use)');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: false }, forceSpawn: true }).mode, 'spawn', '--spawn on a terminal-only station still boots');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: false, appExe: EXE } }).mode, 'spawn', 'a station in that folder that no desktop app ever ran (a terminal-only one) still boots');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: false, appRan: true, appExe: EXE } }).mode, 'spawn', 'no station there yet → the terminal may set one up (the awakening)');
+  A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: true }], desktop: { ownerAlive: false, station: true, appRan: true, appExe: EXE } }).mode, 'attach', 'a reachable station still wins');
+  A.eq(c({ candidates: [...dead, { source: 'desktop', port: 64769, reachable: true }], desktop: { ownerAlive: true, ownerPid: 10436, port: 64769, station: true, appRan: true, appExe: EXE } }).mode, 'attach', 'the app open: attach to it, nothing started');
+}
+
+// ---- the app's own path, from its startup.log -------------------------------------------------------------------
+{
+  const P = core.parseStartupExe;
+  const win = 'startup exe=Ok("C:\\\\Users\\\\andro\\\\AppData\\\\Local\\\\StarNet\\\\skynet-desktop.exe") resource_dir=Ok("\\\\\\\\?\\\\C:\\\\Users\\\\andro\\\\AppData\\\\Local\\\\StarNet") root=C:\\Users\\andro\\AppData\\Local\\StarNet port=1';
+  A.eq(P(win), 'C:\\Users\\andro\\AppData\\Local\\StarNet\\skynet-desktop.exe', 'Rust\'s Debug escaping is undone (\\\\ → \\), and resource_dir is not mistaken for it');
+  A.eq(P('startup exe=Ok("/old/StarNet")\nspawn_sidecar pid=1 port=2 listening=true\nstartup exe=Ok("/Applications/StarNet.app/Contents/MacOS/skynet-desktop") port=3\n'), '/Applications/StarNet.app/Contents/MacOS/skynet-desktop', 'the LAST start wins');
+  A.eq(P('startup exe=Ok("C:\\\\Users\\\\O\\\'Brien \\"x\\"\\\\caf\\u{e9}\\\\a.exe")'), 'C:\\Users\\O\'Brien "x"\\café\\a.exe', 'quotes, apostrophes and \\u{…} come back as written');
+  A.eq(P('startup exe=Err(Os { code: 2 })'), '', 'a start that could not tell its own path gives none');
+  A.eq(P(''), '', 'no log, no app');
+  A.eq(P(null), '', 'null-safe');
 }
 
 // ---- discovery parsers --------------------------------------------------------------------------
