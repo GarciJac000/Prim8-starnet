@@ -1885,10 +1885,18 @@ const World = (() => {
   // still wait is a timer to just past the vsync before the still frame (THE STILL TICK'S TIMER) or a DUE LEAD before stillDue,
   // then rAF (see DUE LEAD). A timer-booked callback is not a vsync sample: lastRafAt is cleared so a 33 ms gap can never be
   // learned as the display's frame interval.
+  // UI FIRST (2026-10-26): a window opening holds the floor's draws for a moment — see the note in frame()
+  const YIELD_MAX_MS = 250;
+  let yieldUntil = 0;
+  function yieldToUi(ms) {
+    const until = performance.now() + Math.max(0, Math.min(YIELD_MAX_MS, ms > 0 ? ms : YIELD_MAX_MS));
+    if (until > yieldUntil) yieldUntil = until;
+  }
+  function yieldWait(now, force) { return force === true || !(now < yieldUntil) ? 0 : yieldUntil - now; }
   function scheduleFrame(pace) {
     if (!running) return;
     const now = performance.now(), still = pace < PACE_TIMER_MIN_MS && stillPaced(now), lead = dueLeadMs();
-    const wait = pace >= PACE_TIMER_MIN_MS ? lastDrawnAt + pace - now - 2
+    const wait = now < yieldUntil ? yieldUntil - now : pace >= PACE_TIMER_MIN_MS ? lastDrawnAt + pace - now - 2
       : still && stillDue - now > lead ? Math.min(stillTickTimerAt(pace), stillDue - lead) - now : 0;
     if (wait > 0) { lastRafAt = 0; paceTimerAt = still ? now + wait : 0; paceTimer = setTimeout(() => { paceTimer = 0; if (running && !raf) raf = requestAnimationFrame(frame); }, wait); }
     else raf = requestAnimationFrame(frame);
@@ -1928,7 +1936,7 @@ const World = (() => {
       // cumulative: the due changes a still floor waited on, how many drew later than a vsync (+1 ms), and how late (DUE LEAD)
       dueDraws, dueLate, dueLatMaxMs: +dueLatMax.toFixed(1), dueLatAvgMs: dueDraws ? +(dueLatSum / dueDraws).toFixed(1) : null,
       drawCostMs: +drawCostMs.toFixed(2), budgetMs: +budgetMs().toFixed(1), strained, strainProbeMs: +strainProbeMs.toFixed(1),
-      draws: pacedDraws, simMs: Math.round(simMs), timerWait: !!paceTimer };
+      draws: pacedDraws, simMs: Math.round(simMs), timerWait: !!paceTimer, yieldMs: Math.max(0, Math.round(yieldUntil - now)) };
   }
   /* STILL VERDICT (the tier Andrew approved 2026-10-21 — see RENDER PACING). Runs once at the end of every drawn frame
      (frameBody), on state that frame already computed — no extra scene pass, no allocation. A frame is STILL only when
@@ -6888,6 +6896,14 @@ const World = (() => {
     if (paceTimer) { clearTimeout(paceTimer); paceTimer = 0; }   // exactly one booking alive (redrawNow / start call in directly)
     const pace = paceMs(now);
     { const d = now - lastRafAt; if (lastRafAt && d > 2 && d < 50) vsyncMs = !vsyncMs || d < vsyncMs ? d : vsyncMs + (d - vsyncMs) * 0.02; lastRafAt = now; }
+    /* UI FIRST (2026-10-26, Andrew: "laggy … especially when opening windows … it should never lag"). Opening a window is
+       the heaviest thing the page does in one go — build its content, style and lay it out, seat it on the dock — and on a big
+       station a floor draw is ~30 ms, so a draw landing in the same frames pushed the window's first paint out by a frame or
+       more (measured on a copy of his station, 11 windows: click → window on screen, median 168 ms → 102 ms with the floor held
+       while the window opens; the worst, SETTINGS, 631 → 431). A window opening asks the floor to stand aside for a moment:
+       no draw until the hold ends (at most YIELD_MAX_MS — the sheet's rise is ~220 ms), then the normal pace. The simulation
+       reads the real clock, so nothing is lost but those frames; a forced draw (a resize blanked the bitmap) still draws. */
+    if (yieldWait(now, force) > 0) { scheduleFrame(pace); return; }   // scheduleFrame books the first vsync after the hold
     paceLowRate = pace >= PACE_TIMER_MIN_MS;
     // RENDER PACING: not this vsync. Half a vsync of slack draws on the vsync NEAREST the pace (never a whole one late)
     if (force !== true && now - lastDrawnAt < pace - Math.max(1, Math.min(vsyncMs || 2, 17) / 2)) { scheduleFrame(pace); return; }
@@ -12310,7 +12326,7 @@ const World = (() => {
        floor to the router. `station: false` = no floor loaded (nothing is known). */
     planStatus: () => Object.assign({ station: !!station, pending: !!(station && (geoDirty || !geo)),
       errors: (routingPlan && routingPlan.errors ? routingPlan.errors : []).filter(e => !e.warn), hash: routingPlan ? routingPlan.hash : null }, planPoster.state()),
-    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, cameraState, restoreCamera, setFrameCap, setOverlays, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, awakeningHeld, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnPluginTerminal, setOnDesk, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgSendTo, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgDeskClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
+    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, cameraState, restoreCamera, setFrameCap, yieldToUi, setOverlays, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, awakeningHeld, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnPluginTerminal, setOnDesk, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgSendTo, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgDeskClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
     // AGENT GROWTH: XpStore pushes pre-computed Xp.compute() snapshots here; pulseLevelUp fires
     // the addressed body's gold ring. The colony headline is the top-bar STATION chip.
     setXp: (agentId, a) => {
