@@ -1,7 +1,8 @@
 /* sidecar/tools/builtin/keys.js — `keys.save`: a key the Commander pastes into chat becomes a KEYS entry.
 
    WHY THIS EXISTS (user report 2026-10-25, Saleshandy + Etsy). Every other harness lets an agent spend an API key the
-   user pastes into the conversation. StarNet's only route was TOOLSETS & CONNECTORS → KEYS, and three of its own rules
+   user pastes into the conversation. StarNet's only route was the KEYS panel (now CONNECT › ABILITIES › CONNECTED ›
+   API KEYS), and three of its own rules
    stacked against a paste: web_request told the model a key is never to be taken from the user, redact() scrubbed a
    vendor-SHAPED key out of the saved chat (so the next turn read `[redacted-secret]`), and a SHAPELESS key (a 40-char
    Saleshandy key) was not scrubbed at all, so it sat in plaintext in the desk save while the agent refused to use it.
@@ -99,7 +100,8 @@
   }
 
   // What the Commander's bubble (and the saved chat) shows where the pasted key was. One ASCII form everywhere.
-  function keyPlaceholder(envVar) { return '[' + str(envVar) + ' saved in KEYS]'; }
+  // "API KEYS" is the block's own label in CONNECT › ABILITIES › CONNECTED (readiness review R15: never a path the app does not show)
+  function keyPlaceholder(envVar) { return '[' + str(envVar) + ' saved in API KEYS]'; }
 
   // Replace every saved key value in `text` with its placeholder. keys = [{ key, envVar }]; longest value first, so a
   // key that contains another is replaced whole. Values shorter than KEY_MIN are ignored (never chew ordinary words).
@@ -136,7 +138,7 @@
 
     const saveTool = {
       name: 'keys.save', capability: 'web', scope: 'write', requiresConsent: false, network: false, timeoutMs: 15000,
-      description: 'The Commander pasted an API key into this chat: save it to KEYS so you can use it. Name the service; '
+      description: 'The Commander pasted an API key into this chat: save it to API KEYS so you can use it. Name the service; '
         + 'the station finds the key in the Commander\'s own recent message, stores it, and replaces it in the chat with '
         + 'a placeholder. Then call the API with web_request using the key\'s NAME in a header, e.g. '
         + '{"x-api-key": "${SALESHANDY_API_KEY}"}. Never write the raw key in a tool call.',
@@ -157,7 +159,7 @@
         try { texts = typeof d.ownerTexts === 'function' ? d.ownerTexts() : null; } catch (_) { texts = null; }
         if (!Array.isArray(texts)) {
           throw new Error('keys.save only takes a key the Commander typed into this conversation, and this run was not started by them '
-            + '(a routine, a group member, a forwarded message or a delegated worker). Ask the Commander to paste it in their own chat with you, or add it in TOOLSETS & CONNECTORS → KEYS.');
+            + '(a routine, a group member, a forwarded message or a delegated worker). Ask the Commander to paste it in their own chat with you, or add it in CONNECT › ABILITIES › CONNECTED › API KEYS.');
         }
         const hint = str(args.starts_with);
         if (hint && hint.length < HINT_MIN) throw new Error('starts_with needs at least ' + HINT_MIN + ' characters.');
@@ -172,12 +174,12 @@
         const envVar = String(rec.envVar);
         if (typeof d.onSaved === 'function') d.onSaved(envVar);   // the run's transcript hold lets go (the host flips a flag)
         const lines = [
-          (r.sameValue ? 'This key was already saved in KEYS as ' : (r.existed ? 'Replaced the saved key for ' + rec.name + ' — it is now in KEYS as ' : 'Saved ' + rec.name + '\'s key in KEYS as ')) + envVar + '.'
+          (r.sameValue ? 'This key was already saved in API KEYS as ' : (r.existed ? 'Replaced the saved key for ' + rec.name + ' — it is now in API KEYS as ' : 'Saved ' + rec.name + '\'s key in API KEYS as ')) + envVar + '.'
             + (r.saved === false ? ' WARNING: it works for this session but could not be verified on disk — tell the Commander it may not survive a restart.' : ''),
           'Use it with web_request by its NAME in a header, never the value: e.g. {"Authorization": "Bearer ${' + envVar + '}"} or {"x-api-key": "${' + envVar + '}"} — check the service\'s API docs for the header it wants. In the shell it is the env var ' + envVar + '.',
           rec.unattendedSupported === false
             ? 'It works only while the Commander is watching or messaging you directly; this service does not support unattended use.'
-            : (rec.autonomous === true ? '' : 'It works while the Commander is watching or messaging you directly. For routines and Night Shift, the Commander turns on its unattended switch in TOOLSETS & CONNECTORS → KEYS.'),
+            : (rec.autonomous === true ? '' : 'It works while the Commander is watching or messaging you directly. For routines and Night Shift, the Commander turns on its unattended switch in CONNECT › ABILITIES › CONNECTED › API KEYS.'),
           'Do not repeat the key.'
         ].filter(Boolean);
         return { content: lines.join('\n'), summary: 'saved ' + envVar };

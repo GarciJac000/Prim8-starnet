@@ -9143,7 +9143,7 @@ const Chat = (() => {
   // each saved key replaced by its placeholder, so the raw text between the literal pieces IS the key. The page
   // already held these values (the Commander typed them); nothing secret comes back from the sidecar. [] on any doubt.
   function swappedKeys(raw, scrubbed) {
-    const re = /\[[A-Z][A-Z0-9_]* saved in KEYS\]/g;
+    const re = /\[[A-Z][A-Z0-9_]* saved in (?:API )?KEYS\]/g;   // "API KEYS" since R15; the older "KEYS" still reads back
     const names = scrubbed.match(re) || [], parts = scrubbed.split(re), out = [];
     let at = 0;
     for (let i = 0; i < names.length; i++) {

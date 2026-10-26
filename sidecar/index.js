@@ -15358,7 +15358,7 @@ function saveServiceKeyFromChat(input) {
   if (prevLive && prevLive.key === key) return { ok: true, record: brief(prev), existed: true, sameValue: true, saved: true };
   if (prev && input && input.refuseReplace) {
     return { ok: false, error: name + ' already has a saved key, and this run has read content the Commander did not write, so it cannot replace it. '
-      + 'Ask the Commander to paste the new key in a fresh message, or replace it in TOOLSETS & CONNECTORS → KEYS.' };
+      + 'Ask the Commander to paste the new key in a fresh message, or replace it in CONNECT › ABILITIES › CONNECTED › API KEYS.' };
   }
   const r = serviceKeysMod.upsert(serviceKeys, {
     name, key, docsUrl: (input && input.docsUrl) || (catalog && catalog.docsUrl) || undefined,
@@ -15373,11 +15373,17 @@ function saveServiceKeyFromChat(input) {
   // ALL OR NOTHING (never destroy the last copy): a saved key is scrubbed out of the chat, the task brief and the
   // transcript, so a key that is live but NOT proven on disk would leave no copy anywhere after a restart. Unlike the
   // panel (where the Commander sees "not durable" and still holds the key), the chat path reverts and says so.
-  if (!saveServiceKeys()) {
+  // A REPLACED key goes through the removal writer, as the panel's replace does (readiness review R11): saveResilient
+  // would snapshot the rotated-out key into .bak, where it outlives the replace and comes back if main is ever torn.
+  // The removal writer puts the new list in main AND .bak and reads both back, so the old key is gone only once both
+  // copies prove the new one; until then the revert below still holds it.
+  const replacesKey = !!(prev && prev.key && prev.key !== key);
+  if (!(replacesKey ? saveServiceKeyRemoval(serviceKeys) : saveServiceKeys())) {
     serviceKeys = before;
     applyServiceKeysEnv();
-    if (!saveServiceKeys()) console.warn('[servicekeys] chat save reverted in memory; the store on disk could not be re-verified');
-    return { ok: false, error: 'the key could not be saved to disk, so nothing was changed — the key is still in the Commander\'s message. Ask them to add it in TOOLSETS & CONNECTORS → KEYS.' };
+    // the revert is a removal write too: an unproven new key must not survive in .bak while the tool says nothing changed
+    if (!saveServiceKeyRemoval(serviceKeys)) console.warn('[servicekeys] chat save reverted in memory; the store on disk could not be re-verified');
+    return { ok: false, error: 'the key could not be saved to disk, so nothing was changed — the key is still in the Commander\'s message. Ask them to add it in CONNECT › ABILITIES › CONNECTED › API KEYS.' };
   }
   serviceKeyRefs.drop(record.id);   // a pasted key replaced a 1Password reference: forget the value read for it
   // the task brief captured the message, key and all, before the save: name it there too (async, failure noted)

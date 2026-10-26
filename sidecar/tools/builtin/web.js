@@ -1110,16 +1110,16 @@
 
     // One refusal per resolver verdict, shared by ${KEY} headers and the auth descriptor.
     function keyRefusal(r, name) {
-      if (r.reason === 'unattended') return 'this run is unattended and "' + r.name + '" is not approved for unattended use — approve it in TOOLSETS & CONNECTORS → KEYS, or run this while watching';
+      if (r.reason === 'unattended') return 'this run is unattended and "' + r.name + '" is not approved for unattended use — approve it in CONNECT › ABILITIES › CONNECTED › API KEYS, or run this while watching';
       if (r.reason === 'unresolved') return '"' + r.name + '" is kept in 1Password and could not be read (' + String(r.detail || 'not read yet') + ') — ask the Commander to unlock 1Password, then try again. Do not ask for the key itself';
       // A MODEL-PROVIDER key is never handed to a tool and KEYS refuses to store one, so pointing at KEYS here sent
       // agents to ask the Commander for "access" nobody can grant (2026-09-28: OpenRouter was already connected;
       // the agent wanted the raw key to chase a transparent background image_generate could not make yet).
-      if (r.reason === 'reserved') return name + ' is a model-provider key: StarNet never hands provider keys to tools and KEYS cannot store one, so do not ask the Commander for it. Use the built-in tools that already ride the station\'s connection instead: image_generate for images (transparent:true for a transparent background) and image_analyze to look at one.';
+      if (r.reason === 'reserved') return name + ' is a model-provider key: StarNet never hands provider keys to tools and API KEYS cannot store one, so do not ask the Commander for it. Use the built-in tools that already ride the station\'s connection instead: image_generate for images (transparent:true for a transparent background) and image_analyze to look at one.';
       // A key pasted into chat is saved with keys.save (advertised only on a run whose Commander's messages hold one),
       // so the fix names that route too — "add it in KEYS" alone sent agents asking for "a new key" (2026-10-25).
       return 'no enabled service key provides ' + name + ' — if the Commander pasted the key into this chat, save it with keys.save first; '
-        + 'otherwise ask them to paste it here, or add it in TOOLSETS & CONNECTORS → KEYS';
+        + 'otherwise ask them to paste it here, or add it in CONNECT › ABILITIES › CONNECTED › API KEYS';
     }
 
     function resolveSecretRefs(value, surface, used) {
