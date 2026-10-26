@@ -756,7 +756,11 @@
         // A background call that chose no effort of its own must not inherit the run's default (a CUSTOM endpoint on
         // Ollama carries CUSTOM's 'medium', which maps to think:true). An explicit aux effort still rides.
         if (background && !req.reasoningEffort && facts && facts.supportsReasoning === true) delete body.reasoning_effort;
-        const think =(background && facts && facts.supportsReasoning === true) ? false : undefined;
+        /* REASONING OFF IS SAID OUT LOUD (#116). wireEffort folds 'none' to "send nothing" (the /v1 wire's off), so with
+           Reasoning OFF — Ollama's own default — the native body carried no `think` and qwen3 thought on every Commander
+           turn and task (slow on a CPU). Native Ollama's off is think:false, told only to a model that can think. */
+        const reasoningOff = canonicalEffort(requestedEffort) === 'none';
+        const think =((background || reasoningOff) && facts && facts.supportsReasoning === true) ? false : undefined;
         wire = { native: true, modelMax, think, openCall: openCalls.get(req) || null, numCtx: ollamaNative.pickNumCtx(need, { pinned: pinnedCtx, ceiling: ctxCeiling, modelMax, floor: ollamaWindow(nativeBase, req.model) }) };
       }
       // WAIT TRUTH (#99): while the native request is unanswered, its probe's notes are yielded as { type:'waiting' }
