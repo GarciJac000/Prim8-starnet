@@ -569,6 +569,8 @@
       // Ollama loads the model (and a potentially large context allocation) before response headers.
       // A first local run can therefore be healthy but silent for well beyond the hosted 30s ceiling.
       connectTimeoutMs: 300000,
+      // A slow CPU reading a long task prompt can need longer still; SKYNET_OLLAMA_CONNECT_TIMEOUT_MS raises (or lowers) it.
+      connectTimeoutMsEnv: 'SKYNET_OLLAMA_CONNECT_TIMEOUT_MS',
       // ...so a request still unanswered after 20 s tells the wait line where /api/ps says the model sits (#99: a 6 GB
       // card running an 8B model at a 32k window, 45% on the GPU, sat silent on Working until the user cancelled).
       waitNoteMs: 20000,
