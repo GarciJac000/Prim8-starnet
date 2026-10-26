@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "5f0967fae7003b866e0f6216efeae923f3cc2e42",
+    "sourceCommit": "fa8e737e5a743dfeefeb53daebfba3c54f55bccb",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -1058,8 +1058,8 @@
       },
       {
         "path": "frontend/app/remote-devices.js",
-        "bytes": 10419,
-        "sha256": "86793fccc5790fb563dc86589fbfa0125e607d3a2d10242e87850ccb2bcad8c3"
+        "bytes": 10425,
+        "sha256": "0cb000657f3ccb1fb9e0925cf8a06dcfe0e8627120e98ec35f4f2414fe0fa852"
       },
       {
         "path": "frontend/app/remotesessions.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 956346,
-        "sha256": "a6c87e0a399e1b6cf091ba75d8ce80baa213e7d1c11b9731a38f953acc2031a8"
+        "bytes": 956403,
+        "sha256": "d74fe873fd125f44bc1ee0902df9448d988304d09dfccef0c4b68eb00935c0b6"
       },
       {
         "path": "frontend/app/stepin.js",
@@ -1373,8 +1373,8 @@
       },
       {
         "path": "frontend/app/windows/connectors.js",
-        "bytes": 156530,
-        "sha256": "75dcf342445ab754ac03a1ade7ba88c2e8e81459fd41fa031562acc7e8fb9b07"
+        "bytes": 156526,
+        "sha256": "35ebb7407bca16631da29c6dfdbc024cc2014c2f92b5af3f8da8e059cf9298e6"
       },
       {
         "path": "frontend/app/windows/logbook.js",
@@ -1388,8 +1388,8 @@
       },
       {
         "path": "frontend/app/windows/messaging.js",
-        "bytes": 63832,
-        "sha256": "68fb84b5bc3431c4e43ea32834ba9d7c94d132b19808d94363fdc3369f3fb50e"
+        "bytes": 63838,
+        "sha256": "0222efbb37a07f3dc2b450e5627d12faf66270ce5f872dc29b228c91e4efedbc"
       },
       {
         "path": "frontend/app/windows/outbox.js",
@@ -1408,8 +1408,8 @@
       },
       {
         "path": "frontend/app/windows/trophies.js",
-        "bytes": 4512,
-        "sha256": "eb29ab7fd72beefeab3a8465879bed49e5be4370d25878e7bef27ddb1872c940"
+        "bytes": 4530,
+        "sha256": "36a4e813bb48db69603c6b51d02c6a38f03fbaab6be5296c482b8f0f9cc6482e"
       },
       {
         "path": "frontend/app/windows/workflows.js",
@@ -1543,13 +1543,13 @@
       },
       {
         "path": "frontend/css/agent-dossier.css",
-        "bytes": 19404,
-        "sha256": "06120ae2fb328b72c2bdc1e9269dfe898e322100b27b00af8e95f347a8a70618"
+        "bytes": 20039,
+        "sha256": "8bfa727cec5064262f4bbb204a0b411010fc313948e239096b9b66b8abfc30b2"
       },
       {
         "path": "frontend/css/app.css",
-        "bytes": 431998,
-        "sha256": "a68b321dc74940c29a25988a67c1f2b76f9138e457fa879797cd10cb47dcd3e9"
+        "bytes": 432275,
+        "sha256": "9c913d70a0e1f56c3591365c53d601d9d8b1658d712b3bf713434b39145fc7a4"
       },
       {
         "path": "frontend/css/asciifx.css",
@@ -1583,8 +1583,8 @@
       },
       {
         "path": "frontend/css/comms-layout.css",
-        "bytes": 4375,
-        "sha256": "4086a904610637d81ff9e6e6e21e6dae8f2f0fe1ca9d0a487ba3084fcaa411b6"
+        "bytes": 4667,
+        "sha256": "f5449510affdff647d07bff085b1104759e5d950cbdbc536f7471f754e219da5"
       },
       {
         "path": "frontend/css/comms.css",
@@ -1668,8 +1668,8 @@
       },
       {
         "path": "frontend/css/pipglass.css",
-        "bytes": 186090,
-        "sha256": "c9b11a97a9a852a855d3994dbaff43f4b6dd01b24ca15bff4fa3d55c6e6b7373"
+        "bytes": 188353,
+        "sha256": "23fca841f5f2f1c3c971ee6aa523eacb07f28701c0b78053da6850e84a314e1e"
       },
       {
         "path": "frontend/css/plugins.css",
@@ -1753,8 +1753,8 @@
       },
       {
         "path": "frontend/css/utility-menus.css",
-        "bytes": 16328,
-        "sha256": "12ea99f1d919651f154f3872d14e6f528239b001d35b09ced615cb5b153d9f11"
+        "bytes": 17317,
+        "sha256": "8ac5f3e2f9e7831353a2c5789eb369254b6825ddab0ddafd5246934905a18bbb"
       },
       {
         "path": "frontend/css/warroom.css",
