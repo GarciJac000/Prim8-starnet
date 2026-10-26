@@ -1198,7 +1198,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     // the opener did not name its window: find the menu window that just appeared and seat it where the old one was
     if (!toKey) {
       const k = Object.keys(open).find(x => !before.has(x) && familyOf(x) === fam);
-      if (k && open[k] && termPos[fromKey]) { carry(k); placeTerm(open[k], k); }
+      // the sheet was already seated from ITS OWN dock state when it mounted: re-seat it from the carried one
+      if (k && open[k] && termPos[fromKey]) { carry(k); placeTerm(open[k], k); if (typeof open[k]._reseatDock === 'function') open[k]._reseatDock(); }
     }
   }
   // the dock button of a menu: open its last-used tab — or, like every dock button, raise / close what is showing.
@@ -12291,7 +12292,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     // CHANNELS, a schedule draft while WORKFLOWS is up) switches that window's tab in place — never a second window
     const fam = familyOf(key);
     const sib = fam && Object.keys(open).find(k => k !== key && open[k] && !minimized[k] && !open[k]._closing && familyOf(k) === fam);
-    if (sib && !windowDirty(open[sib])) { swapInPlace(sib, () => toggleTerm(key, def[0], def[1], def[2])); return; }
+    // name the window (toKey): the sheet is seated the moment its frame mounts (SEAT BEFORE BUILD), so the source's spot,
+    // size and docked height must be carried BEFORE it opens — carried after, a deep link (TASKS' ▸ DELIVERABLES) opened
+    // at the sibling's own dock height and the tab switch snapped (0.14.1 review)
+    if (sib && !windowDirty(open[sib])) { swapInPlace(sib, () => toggleTerm(key, def[0], def[1], def[2]), key); return; }
     toggleTerm(key, def[0], def[1], def[2]);
   }
   /* org P03 — an error door lands ON the provider's card, not at the top of a long AI & MODELS page. Opens the
