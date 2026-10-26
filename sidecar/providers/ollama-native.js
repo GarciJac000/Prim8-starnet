@@ -301,12 +301,21 @@
     return prompt + who + where + (ctx ? ' at a ' + Math.round(ctx / 1024) + 'k window' : '');
   }
 
+  // Whether /api/ps lists this model with part (or all) of it off the GPU. false when it is not listed or unreadable:
+  // no row is no evidence of a spill.
+  function spillsToCpu(psJson, model) {
+    const row = psRow(psJson, model);
+    if (!row) return false;
+    const size = Number(row.size) || 0, vram = Number(row.size_vram) || 0;
+    return !vram || (size > 0 && vram < size);
+  }
+
   // The window a model is CURRENTLY loaded at according to /api/ps, or 0 (not loaded / unreadable).
   function loadedWindow(psJson, model) {
     const row = psRow(psJson, model);
     return row ? (Math.floor(Number(row.context_length)) || 0) : 0;
   }
 
-  return { CTX_LADDER, DEFAULT_MAX_CTX, placementNote, placementFacts, loadedWindow, nativeRoot, leadingSystemMessages, toNativeMessages, toNativeRequest, estimateTokens, pickNumCtx,
+  return { CTX_LADDER, DEFAULT_MAX_CTX, placementNote, placementFacts, spillsToCpu, loadedWindow, nativeRoot, leadingSystemMessages, toNativeMessages, toNativeRequest, estimateTokens, pickNumCtx,
     exceedFrom, makeChunkTranslator, showFacts };
 });

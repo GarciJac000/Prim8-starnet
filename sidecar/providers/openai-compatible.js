@@ -128,6 +128,13 @@
     const id = String(model || '');
     if (numCtx > (m.get(id) || 0)) m.set(id, numCtx);
   }
+  // ...except when holding that window is what is hurting: a model /api/ps shows spilling to the CPU is let back down
+  // to a smaller window (a 4B model kept at 64k for 16 h sat 50% on the CPU and timed out on a 17k prompt, 10-25).
+  function lowerOllamaWindow(endpoint, model, numCtx) {
+    const m = ollamaWindows.get(endpoint);
+    const id = String(model || '');
+    if (m && numCtx < (m.get(id) || 0)) m.set(id, numCtx);
+  }
   /* The native Ollama calls this PROCESS has open, per server (native root -> Set of { background }): open from the moment
      a stream starts until it ends. A local Ollama often serves one request at a time, and the host's own background calls
      (quest refresh at boot, post-task reflection) run with no Commander watching; a Commander turn's wait note says how
@@ -729,9 +736,22 @@
         const need = ollamaNative.estimateTokens(body) + (Number(body.max_tokens) || 0);
         // First use of this model in this process: if Ollama already holds it loaded at a usable window (StarNet was
         // restarted inside the keep-alive, or the Commander loaded it larger), keep that window rather than reload.
-        if (!pinnedCtx && !ollamaWindow(nativeBase, req.model)) {
-          const loaded = ollamaNative.loadedWindow(await ollamaStatus(), req.model);
-          if (loaded > 0 && loaded <= (usableWindow(modelMax) || ctxCeiling)) noteOllamaWindow(nativeBase, req.model, loaded);
+        // A TASK (it carries tools: the long prompt that times out) keeps a window bigger than it needs only while the model
+        // fits the GPU: one /api/ps shows spilling to the CPU is not adopted, and a held one steps back down to the
+        // smallest rung that holds the prompt. A greeting or background call rides what is held (its prompt is short, so a
+        // spill costs it little, and stepping down for it would reload the model twice: down now, up for the next task).
+        if (!pinnedCtx) {
+          const held = ollamaWindow(nativeBase, req.model);
+          const task = !!(req.tools && req.tools.length);
+          const fits = task ? ollamaNative.pickNumCtx(need, { ceiling: ctxCeiling, modelMax }) : Infinity;
+          if (!held) {
+            const ps = await ollamaStatus();
+            const loaded = ollamaNative.loadedWindow(ps, req.model);
+            if (loaded > 0 && loaded <= (usableWindow(modelMax) || ctxCeiling)
+              && !(loaded > fits && ollamaNative.spillsToCpu(ps, req.model))) noteOllamaWindow(nativeBase, req.model, loaded);
+          } else if (held > fits && ollamaNative.spillsToCpu(await ollamaStatus(), req.model)) {
+            lowerOllamaWindow(nativeBase, req.model, fits);
+          }
         }
         /* BACKGROUND CALLS DO NOT THINK (measured on qwen3:8b, 2026-09-30). After a task the host fires its own
            housekeeping calls (reflection, profile update): no tools, and not a Commander turn (isTask is unset; a

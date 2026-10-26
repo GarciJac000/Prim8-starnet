@@ -239,6 +239,65 @@ module.exports = (async () => {
     A.eq(sizes, [32768], 'an already-loaded window is kept (no reload to a smaller one)');
     A.eq(N.loadedWindow({ models: [{ name: 'q', context_length: 8192 }] }, 'other'), 0, 'a model that is not loaded has no window to adopt');
   }
+  // THE 64k LOCK (user report 10-25): qwen3:4b ran at 64k after one big request and never came down; /api/ps showed it
+  // 50% on the CPU and a ~17k task prompt timed out at the 300 s ceiling. A held window bigger than the request needs
+  // steps back down once Ollama shows the model spilling; while it fits the GPU it is kept (no needless reload).
+  {
+    const M = 'qwen3:4b-instruct-2507-q4_K_M';
+    const half = { models: [{ name: M, size: 12e9, size_vram: 6e9, context_length: 65536 }] };
+    const full = { models: [{ name: M, size: 12e9, size_vram: 12e9, context_length: 65536 }] };
+    A.eq(N.spillsToCpu(half, M), true, 'half on the GPU is a spill');
+    A.eq(N.spillsToCpu({ models: [{ name: M, size: 3e9, size_vram: 0 }] }, M), true, 'all on the CPU is a spill');
+    A.eq(N.spillsToCpu(full, M), false, 'fully on the GPU is not');
+    A.eq(N.spillsToCpu({ models: [] }, M) || N.spillsToCpu(null, M), false, 'a model not listed (or no status) is no evidence of a spill');
+    // /api/ps lists nothing until the first request loads the model, then shows it at `loaded`
+    const run = async (base, loaded) => {
+      const sizes = [];
+      const fetch = async (url, init) => {
+        if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+        if (url.endsWith('/api/ps')) return new Response(JSON.stringify(sizes.length ? loaded : { models: [] }), { status: 200 });
+        if (url.endsWith('/api/chat')) { sizes.push(JSON.parse(init.body).options.num_ctx); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+        return new Response('{}', { status: 200 });
+      };
+      const mk = () => makeOpenAICompatibleProvider({ fetch, baseUrl: base, nativeOllama: true, maxTokens: 4096 });
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(200000) }] });   // ~50k: locks 64k
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });    // ~17k task
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'hello' }], isTask: false });   // a greeting
+      return sizes;
+    };
+    const after = await run('http://lock.test:11434/v1', half);
+    A.eq(after, [65536, 32768, 32768, 32768], 'spilling at 64k: the ~17k task steps down to 32k and stays there, and a greeting rides it (no reload down to 8k)');
+    const kept = await run('http://fits.test:11434/v1', full);
+    A.eq(kept, [65536, 65536, 65536, 65536], 'fully on the GPU: the 64k window is kept (no reload)');
+    // StarNet restarted while Ollama holds a spilling 64k load: it is not adopted for a request that fits 32k.
+    const sizes = [];
+    const fetch = async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+      if (url.endsWith('/api/ps')) return new Response(JSON.stringify(half), { status: 200 });
+      if (url.endsWith('/api/chat')) { sizes.push(JSON.parse(init.body).options.num_ctx); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+      return new Response('{}', { status: 200 });
+    };
+    await collect(makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://adopt.test:11434/v1', nativeOllama: true, maxTokens: 4096 }), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });
+    A.eq(sizes, [32768], 'a spilling loaded window is not adopted when a smaller one holds the request');
+  }
+  // The connect ceiling (300 s for Ollama) has an env override; the default is unchanged.
+  {
+    A.eq(require('../sidecar/providers/registry.js').getProviderProfile('ollama').connectTimeoutMs, 300000, 'the Ollama default stays 300 s');
+    const prev = process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS;
+    process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS = '40';
+    try {
+      const fetch = async (url, init) => {
+        if (url.endsWith('/api/chat')) return new Promise((_, reject) => { init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }); });
+        return new Response('{"models":[]}', { status: 200 });
+      };
+      const t0 = Date.now();
+      let err = null;
+      try { await collect(factory.selectProvider({ provider: 'ollama', baseUrl: 'http://envtimeout.test:11434/v1', fetch }), { model: 'm', messages: [{ role: 'user', content: 'hi' }], preStreamRetries: 0 }); } catch (e) { err = e; }
+      A.ok(err && /timed out after 40ms/.test(err.message), 'SKYNET_OLLAMA_CONNECT_TIMEOUT_MS sets the connect ceiling (' + (err && err.message.slice(0, 60)) + ')');
+      A.ok(Date.now() - t0 < 20000, 'and the request gives up at that ceiling, not 300 s');
+    } finally { if (prev == null) delete process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS; else process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS = prev; }
+  }
   // A screenshot is megabytes of base64 but a fixed handful of tokens: it must not size the window to the ceiling.
   {
     const img = { role: 'user', content: [{ type: 'text', text: 'what is this' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(2000000) } }] };
