@@ -213,6 +213,9 @@
     seat(w,s,true);
   }
   const host=document.querySelector('#terms'); if(!host)return;
+  // stationui seats a new window through this the moment its empty frame mounts, before the builder fills it (one full layout
+  // of the content, at the docked width); the observer below still catches any window added some other way
+  host._seatSheet = w => { if (!states.has(w)) attach(w); };
   const update=()=>{
     states.forEach((s,w)=>{if(!w.isConnected){cancelMotion(w,s);states.delete(w);}});
     host.querySelectorAll('.term').forEach(w=>{if(!states.has(w))attach(w);});
