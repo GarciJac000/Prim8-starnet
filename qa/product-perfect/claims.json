@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "80cce3c09e6111eff12839aa5b2f091510adb499",
+    "sourceCommit": "b706f077cfabb84ff1f45a8d921dd3fa17c7cfbf",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -548,8 +548,8 @@
       },
       {
         "path": "frontend/app/glass-demo.js",
-        "bytes": 14201,
-        "sha256": "53d9e53f58e0295acb543ba38dbd4b59be928a9de1625cf49d5e23df11df75ba"
+        "bytes": 14553,
+        "sha256": "15e39663590648e9a861af2a7329da3f52c7ec14c810899f2e8456a99a743d6a"
       },
       {
         "path": "frontend/app/glossary.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 967671,
-        "sha256": "59d1af9af076623ae00f028961cb8d0e21061c1871b85f9b016d982ff2d3c359"
+        "bytes": 968189,
+        "sha256": "d63ad694bbf0e38e2a0b10239c9b127140ea85cbdb9b9bbbfe14f95b77584154"
       },
       {
         "path": "frontend/app/stepin.js",
