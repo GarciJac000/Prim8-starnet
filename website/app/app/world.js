@@ -8557,7 +8557,9 @@ const World = (() => {
       if (t0 == null || !b || b.unplaced || crewIsAwaiting(b)) continue;
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
-      if (!k.task && aid !== 'agent' && now - (k.taskTry || 0) > 1000) { k.taskTry = now; k.task = workerTaskFor(aid, k.wallStart || 0); }
+      // only a DELEGATED worker's run reads its dispatch thread's title — any other run of a crew agent (its own chat, a
+      // routine) has no such thread, and a recent worker thread of that agent must never be passed off as this run's task
+      if (!k.task && aid !== 'agent' && k.runId && typeof Harness !== 'undefined' && Harness.isDelegatedRun && Harness.isDelegatedRun(k.runId) && now - (k.taskTry || 0) > 1000) { k.taskTry = now; k.task = workerTaskFor(aid, k.wallStart || 0); }
       live.push({ aid, k, b, t0, full: b === hoverAgent || (chatFocusId != null && aid === chatFocusId) });
     }
     if (!live.length) return;
@@ -8615,7 +8617,9 @@ const World = (() => {
         continue;
       }
       const clock = plateClock(aid, t0, now);
-      const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
+      // a cost only when it is REAL: priced and above zero. An unpriced, subscription or local-model run shows no $ at all —
+      // never a bare "$0.000" (truthful telemetry: an unreported cost is unknown, never $0)
+      const usd = (k.usd == null || k.unpriced || !(k.usd > 0)) ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
       const right = clock + (usd ? ' · ' + usd : '');
       ctx.globalAlpha = a0 * 0.3; ctx.fillStyle = ink.ph; ctx.fillRect(x + PAD, y + LH + 0.25, w - PAD * 2, 0.4); ctx.globalAlpha = a0;
       ctx.shadowColor = ink.glow; ctx.fillStyle = ink.dim; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
@@ -9531,6 +9535,25 @@ const World = (() => {
     if (!s.size && agent && aid === agent.id && awaitPrompt) clearAwait();
     return s.size;
   }
+  // the floor just forgot aid's run (a sweep, a reconcile, a STOP, the last run.end): its activity tag goes, and every summon
+  // link to or from it ends (fades home) — so neither can outlive the run it stood for
+  function releaseActivity(aid, now) {
+    if (!aid) return;
+    plateByAgent.delete(aid);
+    const t = now || ((typeof performance !== 'undefined') ? performance.now() : fnow);
+    for (const L of summonLinks) if (!L.tEnd && (L.toId === aid || (L.fromId || (agent && agent.id)) === aid)) L.tEnd = t;
+  }
+  // chat.js retires a run whose stream ENDED here (a finished turn, or a STOP whose run.end was lost with the stream)
+  function dropRunFromPage(aid, rid) {
+    const left = noteRunEnd(aid, rid);
+    const leading = summonLinks.some(L => !L.tEnd && (L.fromId || (agent && agent.id)) === aid);
+    if (!left && aid) {
+      if (leading) for (const L of summonLinks) if (!L.tEnd && (L.fromId || (agent && agent.id)) === aid) L.tEnd = (typeof performance !== 'undefined') ? performance.now() : fnow;
+      // the workers it led: the SERVER says whether they still run — ask now (and once more as the cancel cascade lands)
+      if (leading && typeof setTimeout === 'function') { setTimeout(fetchSnapshot, 1500); setTimeout(fetchSnapshot, 5000); }
+    }
+    return left;
+  }
   function agentRunsLive(aid) { const s = aid ? liveRunsByAgent.get(aid) : null; return s ? s.size : 0; }
   /* the once-per-second TTL sweep (E2). Degrades paired states whose reinforcing event was lost:
        • a run clock with no token/tool/start event for RUN_TTL_MS ⇒ clear runStartByAgent (+ its work pose,
@@ -9543,7 +9566,7 @@ const World = (() => {
       for (const aid of Array.from(runStartByAgent.keys())) {
         const seen = runLastSeenByAgent.get(aid) || runStartByAgent.get(aid) || 0;
         if (now - seen > RUN_TTL_MS) {
-          runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid);
+          runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid); releaseActivity(aid, now);
           liveRunsByAgent.delete(aid);                    // a leaked refcount (lost run.end) degrades with the clock
           glyphByAgent.delete(aid);                       // the in-flight tool glyph is just as stale
           if (serverLit.has(aid)) { serverLit.delete(aid); setActivityFor(aid, 'idle'); }   // drop an autonomous body out of the working pose
@@ -9559,7 +9582,7 @@ const World = (() => {
       for (const [rid, seen] of Array.from(s)) if (now - seen > RUN_TTL_MS) s.delete(rid);
       if (!s.size) {
         liveRunsByAgent.delete(aid);
-        runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid); glyphByAgent.delete(aid);
+        runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid); glyphByAgent.delete(aid); releaseActivity(aid);
         if (serverLit.has(aid)) { serverLit.delete(aid); setActivityFor(aid, 'idle'); }
         const b = bodyForAgent(aid); if (b && b !== agent && b.workUntil) b.workUntil = 0;
       }
@@ -9631,7 +9654,7 @@ const World = (() => {
         if (orphan && !serverLit.has(r.agentId)) { serverLit.add(r.agentId); setActivityFor(r.agentId, 'task'); }
       }
       for (const aid of Array.from(runStartByAgent.keys())) if (!live.has(aid)) {   // ended during the outage
-        runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid); glyphByAgent.delete(aid); liveRunsByAgent.delete(aid);
+        runStartByAgent.delete(aid); runLastSeenByAgent.delete(aid); glyphByAgent.delete(aid); liveRunsByAgent.delete(aid); releaseActivity(aid);
         if (serverLit.has(aid)) { serverLit.delete(aid); setActivityFor(aid, 'idle'); }
         const b = bodyForAgent(aid); if (b && b !== agent && b.workUntil) b.workUntil = 0;
       }
@@ -11220,6 +11243,7 @@ const World = (() => {
       const from = k.fromId ? (bodyForAgent(k.fromId) || agent) : agent, to = bodyForAgent(k.toId);
       const age = now - k.t0, endAge = k.tEnd ? now - k.tEnd : 0;
       if (!from || !to || (k.tEnd && endAge > BACK + FADE)) { summonLinks.splice(i, 1); continue; }
+      if (!k.tEnd && age > 5000 && !runStartByAgent.has(k.toId)) k.tEnd = now;   // the worker is no longer running: never a line to nothing
       const pts = summonLinkPts(from, to);
       const col = to.color || '#5ad0ff';
       const alpha = k.tEnd && endAge > BACK ? 1 - (endAge - BACK) / FADE : 1;
@@ -11478,15 +11502,19 @@ const World = (() => {
     // ── STRETCH: desk work-glyph state — a tool in flight (tool_call → its tool_result) marks the agent;
     //    the render pass (drawWorkGlyphs) draws a tiny tag at that desk. run.end clears any stale mark. ──
     U.bus.on('agent.tool_call', p => { if (p && p.agentId && p.name) glyphByAgent.set(p.agentId, { name: p.name, callId: p.callId || null }); });
-    U.bus.on('agent.run.start', p => { if (p && p.agentId) plateByAgent.set(p.agentId, { runId: String(p.runId || ''), wallStart: Date.now(), task: '', taskTry: 0, model: String(p.model || ''), name: '', target: '', live: false, callId: null, usd: null, est: null }); });
+    U.bus.on('agent.run.start', p => { if (p && p.agentId) plateByAgent.set(p.agentId, { runId: String(p.runId || ''), wallStart: Date.now(), task: '', taskTry: 0, model: String(p.model || ''), name: '', target: '', live: false, callId: null, usd: null, est: null, unpriced: false }); });
+    // a tag reads only ITS OWN run's events: a second run of the same agent (another session, a routine, internal self-talk
+    // whose cost still reaches the bus) never mixes its steps or spend into this card
+    const plateFor = p => { const k = p && p.agentId && plateByAgent.get(p.agentId); return k && (!p.runId || !k.runId || String(p.runId) === k.runId) ? k : null; };
     // the lead's task in words = its settled Task Brief objective (the COMMS "MY READ" line) — never a guess
     U.bus.on('taskbrief.settled', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.runId || !k.runId || p.runId === k.runId) && p.objective) k.task = String(p.objective); });
-    U.bus.on('agent.tool_call', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && p.name) Object.assign(k, { name: p.name, target: plateTarget(p.argsSummary), live: true, callId: p.callId || null }); });
-    U.bus.on('agent.tool_result', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.callId || !k.callId || k.callId === p.callId)) k.live = false; });
-    U.bus.on('cost.estimate', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd) && k.est !== false) { k.usd = +p.usd; k.est = true; } });
-    // agent.cost arrives once per model call: the plate shows the run's running SUM (an estimate stands until the first one)
-    U.bus.on('agent.cost', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd)) { k.usd = (k.est === false ? k.usd : 0) + (+p.usd); k.est = false; } });
-    U.bus.on('agent.run.end', p => { if (p && p.agentId) plateByAgent.delete(p.agentId); });
+    U.bus.on('agent.tool_call', p => { const k = plateFor(p); if (k && p.name) Object.assign(k, { name: p.name, target: plateTarget(p.argsSummary), live: true, callId: p.callId || null }); });
+    U.bus.on('agent.tool_result', p => { const k = plateFor(p); if (k && (!p.callId || !k.callId || k.callId === p.callId)) k.live = false; });
+    U.bus.on('cost.estimate', p => { const k = plateFor(p); if (k && isFinite(+p.usd) && k.est !== false) { k.usd = +p.usd; k.est = true; } });
+    // agent.cost arrives once per model call: the tag shows the run's running SUM (an estimate stands until the first one).
+    // The loop flags an unpriced model (unpriced:true, usd 0) once per run: from then on this run has NO proven $ to show.
+    U.bus.on('agent.cost', p => { const k = plateFor(p); if (k && isFinite(+p.usd)) { k.usd = (k.est === false ? k.usd : 0) + (+p.usd); k.est = false; if (p.unpriced) k.unpriced = true; } });
+    U.bus.on('agent.run.end', p => { const k = plateFor(p); if (k) plateByAgent.delete(p.agentId); });
     // the summon link's result packet says how the worker's run REALLY ended: delivered (green), failed (red), stopped short (amber)
     U.bus.on('agent.run.end', p => {
       if (!p || !p.agentId) return;
@@ -11598,7 +11626,9 @@ const World = (() => {
     // any WORKER run that starts inside it flies a box lead→worker + lights the worker. Contract-free — rides the
     // existing agent.tool_call / agent.run.* events (the delegated child's lifecycle is forwarded onto the lead's stream).
     U.bus.on('agent.tool_call', p => { if (p && /^team[._]dispatch$/.test(p.name || '')) { delegateLead = p.agentId; delegateCall = p.callId; } });
-    U.bus.on('agent.tool_result', p => { if (p && p.callId && p.callId === delegateCall) { delegateLead = null; delegateCall = null; } });
+    // only the LEAD's own result closes it: a worker's step can carry the same synthesized id ('call_0' on providers with no
+    // tool-call ids) and used to close the window mid-dispatch, leaving later workers unlit and unlinked
+    U.bus.on('agent.tool_result', p => { if (p && p.callId && p.callId === delegateCall && (!p.agentId || p.agentId === delegateLead)) { delegateLead = null; delegateCall = null; } });
     // OVERLAP REFCOUNT: register every live run by runId (any trigger) BEFORE the extinguish consumers below —
     // only the LAST live run's end may darken an agent's pose/screens (see noteRunStart/noteRunEnd).
     U.bus.on('agent.run.start', p => { if (p && p.agentId) noteRunStart(p.agentId, p.runId); });
@@ -11848,7 +11878,7 @@ const World = (() => {
     // followed by run.end reason 'error', so end is the one cleanup point). Internal reason-only runs
     // never reach U.bus (harness.js suppresses their start/end), so no clock ever shows for self-talk.
     U.bus.on('agent.run.start', p => { if (p && p.agentId) { if (!runStartByAgent.has(p.agentId)) runStartByAgent.set(p.agentId, performance.now()); stampRun(p.agentId); } });   // an overlapping start keeps the EARLIEST clock (the agent has been running since then)
-    U.bus.on('agent.run.end', p => { if (p && p.agentId && !noteRunEnd(p.agentId, p.runId)) { runStartByAgent.delete(p.agentId); runLastSeenByAgent.delete(p.agentId); } });
+    U.bus.on('agent.run.end', p => { if (p && p.agentId && !noteRunEnd(p.agentId, p.runId)) { runStartByAgent.delete(p.agentId); runLastSeenByAgent.delete(p.agentId); releaseActivity(p.agentId); } });
     // G0.2 SIM-TASK PROGRESS: store a desk fraction ONLY when a producer publishes a real prog/dur pair
     // on the 'task' event (subagent status events carry none and store none). Terminal states clear it.
     U.bus.on('task', t => {
@@ -12326,7 +12356,7 @@ const World = (() => {
        floor to the router. `station: false` = no floor loaded (nothing is known). */
     planStatus: () => Object.assign({ station: !!station, pending: !!(station && (geoDirty || !geo)),
       errors: (routingPlan && routingPlan.errors ? routingPlan.errors : []).filter(e => !e.warn), hash: routingPlan ? routingPlan.hash : null }, planPoster.state()),
-    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, cameraState, restoreCamera, setFrameCap, yieldToUi, setOverlays, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, awakeningHeld, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnPluginTerminal, setOnDesk, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgSendTo, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgDeskClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
+    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: dropRunFromPage, focusBody, lockBody, cameraMode, cameraState, restoreCamera, setFrameCap, yieldToUi, setOverlays, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, awakeningHeld, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnPluginTerminal, setOnDesk, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgSendTo, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgDeskClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
     // AGENT GROWTH: XpStore pushes pre-computed Xp.compute() snapshots here; pulseLevelUp fires
     // the addressed body's gold ring. The colony headline is the top-bar STATION chip.
     setXp: (agentId, a) => {
@@ -12389,6 +12419,8 @@ const World = (() => {
     _dbgSoftCross: (t) => SOFT_CROSS.has(String(t)),
     // TEST/DEBUG ONLY — containment harness: raw-place a body (bypassing every walkable-checked picker)
     // so the per-tick containment backstop (containBody / hero ensureAgentValid) is provable live.
+    // read-only proof hook (summon lines): how many links are still live and which agents wear a tag right now
+    _dbgActivity: () => ({ liveLinks: summonLinks.filter(L => !L.tEnd).map(L => (L.fromId || 'agent') + '>' + L.toId), tags: Array.from(plateByAgent.keys()) }),
     _dbgTeleport: (aid, px, py) => { const b = bodyForAgent(aid); if (!b) return false; b.pathPts = null; b.target = null; b.sitting = false; b.seated = false; b.px = +px; b.py = +py; return true; },
     // Local review controls use the real navigation path, including obstacle clearance.
     _dbgReviewWalk: (aid, tx, ty) => {
