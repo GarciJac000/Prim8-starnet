@@ -621,12 +621,17 @@ async function resolveStation(opts, env) {
     const joining = !!(desktop.appOwned && desktop.appExe && desktop.port === choice.port && APP_SESSIONS.indexOf(opts.cmd) >= 0);
     const joinAt = joining ? startupLogSize(desktopWs) : -1;
     if (joining) { try { launchApp(desktop.appExe).on('error', () => {}); } catch (_) {} }
-    const client = await attachClient(c.client, opts);
-    if (joining && (await awaitJoinOutcome(desktopWs, joinAt, JOIN_CONFIRM_MS)) === 'closing') {
+    // the attach and the app's answer run together: a closing station can fail the token fetch before its "closing" is
+    // read, and a StarNet on its way out is started again either way
+    const attaching = attachClient(c.client, opts).then(cl => ({ cl }), err => ({ err }));
+    const told = joining ? await awaitJoinOutcome(desktopWs, joinAt, JOIN_CONFIRM_MS) : null;
+    const attached = await attaching;
+    if (told === 'closing') {
       const fresh = await startAppStation(desktop.appExe, desktopWs, host, '· StarNet is closing (its last starnet session just ended) — starting it again', desktop.ownerPid);
       return { mode: 'attached', client: await attachClient(fresh, opts), workspace: desktopWs, child: null };
     }
-    return { mode: 'attached', client, workspace: (choice.source === 'desktop' && desktop.ownerAlive) ? desktopWs : '', child: null };
+    if (attached.err) throw attached.err;
+    return { mode: 'attached', client: attached.cl, workspace: (choice.source === 'desktop' && desktop.ownerAlive) ? desktopWs : '', child: null };
   }
   // spawn
   const ws = defaultWorkspace(opts);

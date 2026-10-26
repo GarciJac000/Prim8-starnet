@@ -210,6 +210,22 @@ const tail = s => s.trim().split('\n').slice(-4).join(' | ');
     A.ok(mine.length >= 2, 'it joined, then launched StarNet again (' + mine.length + ' launches with its pid)');
     A.ok(ownerPid() !== oldOwner, 'and ran on a NEW station, never the closing one');
     A.ok(await waitFor(() => !appRunning(), 20000), 'cleanup: with that terminal gone too, the new StarNet stood down');
+
+    /* ---- 6. CLOSING, station already down: the launch hands off to a StarNet on its way out, is told so, starts again - */
+    fs.writeFileSync(joinFile, '');
+    writeCfg({ closeMs: 5000, dropStationOnClose: true });
+    const t4 = terminal();
+    startApp(t4.pid);
+    A.ok(await stationUp(true), 'the app (started for another terminal) brought its station up');
+    t4.kill();
+    A.ok(await waitFor(() => { try { return fs.readFileSync(stateFile, 'utf8').trim() === 'closing' && !alive(ownerPid()); } catch (_) { return false; } }, 10000), 'that terminal left: the app is closing and its station is already down');
+    const before6 = launches().length;
+    const y = await cli(['-p', 'say hello'], env, 150000);
+    A.eq(y.code, 0, 'a terminal arriving then still runs, exit 0 (stderr: ' + tail(y.err) + ')');
+    A.ok(y.out.indexOf('Hello from the app\'s station.') >= 0, 'its answer streamed');
+    A.ok(/StarNet isn't running — starting it in the background/.test(y.err), 'it found no station and started StarNet');
+    A.ok(launches().slice(before6).filter(l => l[2] === String(y.pid)).length >= 2, 'its first launch was handed to the closing StarNet and told so, so it launched again once that one had gone');
+    A.ok(await waitFor(() => !appRunning(), 20000), 'cleanup: the new StarNet stood down after it');
   } catch (e) {
     A.ok(false, 'threw: ' + ((e && e.stack) || e));
   } finally {

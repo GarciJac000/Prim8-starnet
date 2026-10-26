@@ -13,9 +13,10 @@
      plugin's job) and logs the app's join line for that pid: it joins, or, while the first one is closing, it was
      told StarNet is closing (start it again once it has quit). Then it exits 0;
    - the first one runs while any terminal session it runs for is alive. When none is left it is CLOSING for
-     config.closeMs (default 0: at once) — its station still up, joins told so — then stops its sidecar and exits.
+     config.closeMs (default 0: at once) — its station still up (or, with config.dropStationOnClose, already down:
+     the real app's drain stops the sidecar before the process exits), joins told so — then stops and exits.
    Config: FAKE_APP_CONFIG names a JSON file { workspaces, record, joinFile, lockFile, stateFile, keychain, logSpawn,
-   closeMs }. */
+   closeMs, dropStationOnClose }. */
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
@@ -71,7 +72,7 @@ function healthy(port) {
     }),
     stdio: 'ignore'
   });
-  let stopping = false;
+  let stopping = false, closingSince = 0;
   const stop = () => {
     if (stopping) return;
     stopping = true;
@@ -80,12 +81,11 @@ function healthy(port) {
     try { fs.unlinkSync(cfg.lockFile); } catch (_) {}
     setTimeout(() => process.exit(0), 300);
   };
-  sidecar.on('exit', stop);
+  sidecar.on('exit', () => { if (!closingSince) stop(); });
   for (let i = 0; i < 240 && !(await healthy(port)); i++) await sleep(250);
   if (cfg.logSpawn !== false) logLine('spawn_sidecar pid=' + sidecar.pid + ' port=' + port + ' listening=true');
   fs.writeFileSync(cfg.stateFile, 'running');
   const sessions = new Set(terminalPid ? [terminalPid] : []);
-  let closingSince = 0;
   setInterval(() => {
     if (closingSince) { if (Date.now() - closingSince >= (Number(cfg.closeMs) || 0)) stop(); return; }
     try { for (const l of fs.readFileSync(cfg.joinFile, 'utf8').split('\n')) if (Number(l)) sessions.add(Number(l)); } catch (_) {}
@@ -94,6 +94,7 @@ function healthy(port) {
       closingSince = Date.now();
       fs.writeFileSync(cfg.stateFile, 'closing');
       logLine('terminal-done: every starnet session it ran for has ended; deciding as a window close');
+      if (cfg.dropStationOnClose) { try { sidecar.kill(); } catch (_) {} }
       if (!(Number(cfg.closeMs) > 0)) stop();
     }
   }, 250);
