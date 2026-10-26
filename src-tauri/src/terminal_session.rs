@@ -47,6 +47,17 @@ where
     }
 }
 
+/// What this process's own launch arguments mean once it is up. A terminal launch whose terminal has already exited is
+/// a person opening StarNet: an in-app update relaunches the app with the arguments it was started with (the updater
+/// copies them, and app.restart() keeps them), and the installer has stopped that `starnet` (it runs on the bundled
+/// node.exe), so the relaunched StarNet would otherwise park its window and close itself as a terminal close.
+pub fn at_startup(launch: TerminalLaunch, running: impl Fn(u32) -> bool) -> TerminalLaunch {
+    match launch {
+        TerminalLaunch::Background { pid } if pid > 0 && !running(pid) => TerminalLaunch::Person,
+        other => other,
+    }
+}
+
 /// Is the terminal process `pid` still running? Exact on purpose: on Windows an exited process whose handle someone
 /// still holds (a shell that has not collected it yet) is gone here, where a bare OpenProcess would say alive. A probe
 /// that cannot tell (access denied) says running: a wrong "running" only keeps StarNet in the tray, a wrong "gone"
@@ -95,7 +106,7 @@ pub fn terminal_running(_pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, terminal_running, TerminalLaunch};
+    use super::{at_startup, parse, terminal_running, TerminalLaunch};
 
     #[test]
     fn a_plain_launch_is_a_person_opening_starnet() {
@@ -117,6 +128,32 @@ mod tests {
         assert_eq!(parse(["x", "--background", "--terminal-pid"]), TerminalLaunch::Background { pid: 0 });
         assert_eq!(parse(["x", "--background", "--terminal-pid=-5"]), TerminalLaunch::Background { pid: 0 });
         assert_eq!(parse(["x", "--backgroundx"]), TerminalLaunch::Person, "only the exact flag counts");
+    }
+
+    #[test]
+    fn a_relaunch_for_a_terminal_that_has_exited_is_a_person_opening_starnet() {
+        // the in-app update case: the updater relaunches with the old --background --terminal-pid, that starnet is gone
+        let relaunch = parse(["x", "--background", "--terminal-pid", "4242"]);
+        assert_eq!(at_startup(relaunch, |_| false), TerminalLaunch::Person);
+        // a terminal still running keeps its launch
+        assert_eq!(at_startup(relaunch, |pid| pid == 4242), TerminalLaunch::Background { pid: 4242 });
+        // no pid to check: unchanged, and a person's launch is never asked about
+        assert_eq!(at_startup(TerminalLaunch::Background { pid: 0 }, |_| false), TerminalLaunch::Background { pid: 0 });
+        assert_eq!(at_startup(TerminalLaunch::Person, |_| panic!("not asked")), TerminalLaunch::Person);
+    }
+
+    #[test]
+    fn a_real_exited_terminal_pid_at_startup_is_a_person() {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn().expect("spawn cmd");
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("wait");
+        assert_eq!(at_startup(TerminalLaunch::Background { pid }, terminal_running), TerminalLaunch::Person);
+        drop(child);
+        let me = std::process::id();
+        assert_eq!(at_startup(TerminalLaunch::Background { pid: me }, terminal_running), TerminalLaunch::Background { pid: me });
     }
 
     #[test]
