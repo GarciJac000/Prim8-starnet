@@ -13,6 +13,7 @@
    Pure logic + injected deps ({ fsp, path, crypto, resolveInside }) so it unit-tests without a running server. */
 'use strict';
 const { note: failNote } = require('./failopen.js');
+const { tagImageSource } = require('./providers/provider.js');
 
 module.exports = function makeAttachments(deps) {
   const fsp = deps.fsp;
@@ -132,13 +133,16 @@ module.exports = function makeAttachments(deps) {
         const name = String(a.name || 'file');
         const rel = String(a.path || '');
         let buf = null;
-        try { const { abs } = await resolveInside(agentId, rel); buf = await fsp.readFile(abs); }
+        let absPath = '';
+        try { const { abs } = await resolveInside(agentId, rel); absPath = abs; buf = await fsp.readFile(abs); }
         catch (e) { blocks.push({ type: 'text', text: '\n[attachment "' + name + '" is no longer available]' }); continue; }
         const mime = String(a.mediaType || '').toLowerCase();
         if (a.kind === 'image' && IMAGE_MIME[mime]) {
           if (buf.length > imageBudget) { blocks.push({ type: 'text', text: '\n[image "' + name + '" omitted — over this message\'s image budget]' }); continue; }
           imageBudget -= buf.length;
-          blocks.push({ type: 'image_url', image_url: { url: 'data:' + mime + ';base64,' + buf.toString('base64') } });
+          // tagged (off-wire) with its name + absolute saved path: should the model turn out not to see images, the
+          // adapter's note (provider.withoutImageParts) can then say which file it was and where image_analyze reads it
+          blocks.push(tagImageSource({ type: 'image_url', image_url: { url: 'data:' + mime + ';base64,' + buf.toString('base64') } }, { name, path: absPath }));
         } else if (looksTextual(name, mime)) {
           let t = buf.toString('utf8'); let note = '';
           if (t.length > TEXT_INLINE_MAX) { t = t.slice(0, TEXT_INLINE_MAX); note = '\n…[truncated]'; }

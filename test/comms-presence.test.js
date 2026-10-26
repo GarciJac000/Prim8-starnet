@@ -92,7 +92,10 @@ A.ok(/catch\s*\(e\)[\s\S]{0,1500}persistPartial\(ws,\s*acc\)[\s\S]{0,900}error:\
 A.ok(/card\.dataset\.runId\s*=\s*presenceRunId/.test(src), 'resolved presence is joined to its durable run row by runId');
 A.ok(/function\s+hydrateRunTelemetry[\s\S]{0,2200}entry\.children/.test(src), 'run completion hydrates lead + worker hierarchy from persisted rows');
 A.ok(/workerCalls[\s\S]{0,800}reasoningEffort/.test(src), 'summary exposes worker call count plus actual model/effort');
-A.ok(/function\s+telemetryRun[\s\S]{0,1300}t\.ms/.test(src), 'expanded hierarchy renders each persisted per-tool duration');
+// read inside telemetryRun's own body (it ends on its two-space closing brace): a fixed character window broke when two
+// lanes each grew the function's head line (10-21: 1,155 → 1,384 characters before the tool line)
+const telemetryRunBody = (/function\s+telemetryRun\([\s\S]*?\n  \}\n/.exec(src) || [''])[0];
+A.ok(/\bt\.ms\b/.test(telemetryRunBody), 'expanded hierarchy renders each persisted per-tool duration');
 A.ok(/hydrateRunTelemetry\(ws,\s*entry,\s*runId\)[\s\S]{0,300}if\s*\(!arts\.length/.test(src), 'clean artifact-less runs still hydrate telemetry before the quiet recap return');
 
 // ONE run, ONE duration (live walkthrough 2026-10-13): the telemetry hydration rewrote the resolved card with the
@@ -103,6 +106,26 @@ A.ok(/hydrateRunTelemetry\(ws,\s*entry,\s*runId\)[\s\S]{0,300}if\s*\(!arts\.leng
   A.ok(/if \(started\) card\.dataset\.ms = String\(Math\.max\(0, Math\.round\(Channels\.elapsedOf\(ws\.id, Date\.now\(\)\)/.test(src), 'the resolved card carries the honest (pause-excluded) run time');
   A.ok(hyd.indexOf('const honest = Number(card.dataset.ms) || 0') >= 0 && hyd.indexOf("bits.push(fmtMs(wall - honest) + ' waiting on you')") >= 0,
     'hydration shows that honest time and names the approval wait apart — never the wall time as the run time');
+}
+
+// THE FOLD TELLS THE FOOTER'S TIME, BY NAME (Andrew 10-18, the step-rows pass): under "RUN COMPLETE · 907ms · 3.1s waiting
+// on you" the opened fold's lead line read the record's WALL time ("lead · agent · 4.0s") — and the hero's raw id for NOVA.
+{
+  A.ok(/const leadRow = honest > 0 \? Object\.assign\(\{\}, entry, \{ durationMs: honest, waitedMs: wall - honest > 1500 \? wall - honest : 0 \}\) : entry;\s*detail\.appendChild\(telemetryRun\(leadRow, 'lead', hasChips\)\);/.test(src),
+    'the fold\'s lead line tells the footer\'s machine time and names the wait on you apart');
+  A.ok(/const runWho = id => \(id && typeof App !== 'undefined' && App\.agentName && App\.agentName\(id\)\) \|\| id \|\| '';/.test(src) && /head\.textContent = \[role, runWho\(entry\.agentId\),/.test(src)
+    && /Number\(entry\.waitedMs\) > 0 \? fmtMs\(Number\(entry\.waitedMs\)\) \+ ' waiting on you' : ''/.test(src), 'and says who ran it by name, never the raw id');
+  // the glass layer's register for the steps and the footer (pipglass.css)
+  const pip = fs.readFileSync(path.join(__dirname, '../frontend/css/pipglass.css'), 'utf8');
+  const steps = pip.slice(pip.indexOf('PIP-BOY COMMS STEPS'));
+  // QUIET AGAIN (Andrew 10-25): the machinery sits below the 18px speech — dim phosphor, lowercase, never the bright caps opcode
+  A.ok(pip.indexOf('PIP-BOY COMMS STEPS') > 0 && /\.tool-chip \.tc-head \{[^}]*font-size: 14px;[^}]*color: var\(--ph-dim\);/.test(steps), 'a step row is quiet: 14px dim phosphor (16px bright caps read as loud as the reply)');
+  A.ok(/\.tool-chip \.tc-name \{[^}]*text-transform: none;/.test(steps) && !/\.tool-chip \.tc-name \{[^}]*--ph-bright/.test(steps), 'the tool name is plain lowercase phosphor, not a bright caps opcode');
+  A.ok(/\.tool-chip \.tc-glyph \{[^}]*animation: none;/.test(steps), 'a running step\'s glyph is steady (the working line\'s meter says the run is live)');
+  A.ok(/\.tool-chip\.held :is\(\.tc-glyph, \.tc-stat\) \{ color: var\(--ph-dim\); \}/.test(steps), 'a held step stays plain dim phosphor over the brighter step text');
+  A.ok(/\.tool-chip \.tc-exp \{[^}]*font-size: 0;[^}]*border-right: 2px solid/.test(steps) && /\.comms-presence\.resolved \.cp-chev \{[^}]*font-size: 0;[^}]*border-right: 2px solid currentColor;/.test(steps),
+    '"open me" is a drawn caret on the step and on the footer, never the ▸ a running step starts with');
+  A.ok(/\.comms-presence\.resolved \{\s*font-size: 14px;[^}]*opacity: \.5;/.test(steps), 'RUN COMPLETE is the quiet footer again: 14px at half strength (0.13.5), bright only on hover or open');
 }
 
 A.report('comms-presence.test');

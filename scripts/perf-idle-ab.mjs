@@ -178,7 +178,8 @@ function pageState() {
   gaps.sort((a, b) => a - b);
   const vsyncMs = gaps.length >= 20 ? +gaps[gaps.length >> 1].toFixed(3) : 0;   // under 20 gaps: no vsync-rate frames to read
   return { t: now, draws: p.draws, hasFocus: document.hasFocus(), visibilityState: document.visibilityState, vsyncMs, vsyncGaps: gaps.length,
-    pace: { running: p.running, mode: p.mode, focused: p.focused, motion: p.motion, paceMs: p.paceMs, vsyncMs: p.vsyncMs, drawCostMs: p.drawCostMs, strained: p.strained, timerWait: p.timerWait },
+    pace: { running: p.running, mode: p.mode, focused: p.focused, motion: p.motion, paceMs: p.paceMs, vsyncMs: p.vsyncMs, drawCostMs: p.drawCostMs, strained: p.strained, timerWait: p.timerWait,
+      still: p.still, stillWhy: p.stillWhy, stillFrames: p.stillFrames, stillWhyCounts: p.stillWhyCounts || null },
     raf: { fired: r.fired || 0, booked: r.booked || 0, sampled: r.sampled || 0, sites: Object.assign({}, r.sites || {}) },
     camera: { mode: c.mode, thresholdMs: c.thresholdMs, scale: c.scale } };
 }
@@ -213,13 +214,7 @@ const PHASE_WANT = {
   AB: { focus: 'focused', visibility: 'visible', camera: 'manual', hz: true, mode: 'focused' },
   P6: { focus: 'focused', visibility: 'visible', camera: 'auto', hz: true, mode: 'focused' },
 };
-// the pacer's own rule (world.js frame()): a pace under the timer line draws on the first vsync at or past pace - half a vsync
-function expectedDraws(paceMs, vsyncMs) {
-  if (!(paceMs > 0)) return null;
-  if (paceMs >= 100 || !(vsyncMs > 0)) return +(1000 / paceMs).toFixed(1);
-  const k = Math.max(1, Math.ceil((paceMs - Math.max(1, Math.min(vsyncMs, 17) / 2)) / vsyncMs));
-  return +(1000 / (k * vsyncMs)).toFixed(1);
-}
+// the pacer's draw-rate rule and the STILL window readout live in proc-footprint.mjs (F.expectedDraws, F.stillWindow: tested there)
 
 // ---------- one run ----------
 async function runOnce(k) {
@@ -420,7 +415,10 @@ async function runOnce(k) {
         cdp: { rendererPct: cpuBy.renderer ?? 0, stationRendererPct: renderers[0] ? renderers[0].pct : null, renderers: renderers.length, gpuPct: cpuBy.GPU ?? 0, browserPct: cpuBy.browser ?? 0,
           utilityPct: cpuBy.utility ?? 0, otherPct: +Object.entries(cpuBy).filter(([t]) => !['renderer', 'GPU', 'browser', 'utility'].includes(t)).reduce((s, [, v]) => s + v, 0).toFixed(2), procs: perProc },
         jsHeapMB: Math.round(b.m.JSHeapUsedSize / 1048576), nodes: b.m.Nodes,
-        obs: [a.s, b.s].map(s => ({ hasFocus: s.hasFocus, focusEmulated, visibilityState: s.visibilityState, vsyncMs: s.vsyncMs, vsyncGaps: s.vsyncGaps, worldVsyncMs: s.pace.vsyncMs, cameraMode: s.camera.mode, paceMode: s.pace.mode, paceMs: s.pace.paceMs, running: s.pace.running })),
+        obs: [a.s, b.s].map(s => ({ hasFocus: s.hasFocus, focusEmulated, visibilityState: s.visibilityState, vsyncMs: s.vsyncMs, vsyncGaps: s.vsyncGaps, worldVsyncMs: s.pace.vsyncMs, cameraMode: s.camera.mode, paceMode: s.pace.mode, paceMs: s.pace.paceMs, running: s.pace.running,
+          // the STILL pace books rAF from a timer ~30x a second: the probe sees the timer's gaps, not the panel's (see phaseValidity)
+          hzExempt: s.pace.mode === 'still' ? 'the still pace is timer-booked: no vsync-rate frame to read the panel from' : null, stillWhy: s.pace.stillWhy })),
+        still: F.stillWindow({ draws: a.s.draws, stillFrames: a.s.pace.stillFrames, stillWhyCounts: a.s.pace.stillWhyCounts }, { draws: b.s.draws, stillFrames: b.s.pace.stillFrames, stillWhyCounts: b.s.pace.stillWhyCounts }),
       };
       if (os) {
         if (os.error) row.os = { error: os.error };
@@ -450,10 +448,11 @@ async function runOnce(k) {
     const judge = (name, row, extra = {}) => {
       const w = PHASE_WANT[name] || {};
       const v = F.phaseValidity({ name, focus: w.focus, visibility: w.visibility, camera: w.camera, hz: w.hz ? targetHz : null, ...extra }, row.obs);
-      return Object.assign({ phase: name, label: v.label || name, valid: v.valid, invalidWhy: v.reasons }, row);
+      return Object.assign({ phase: name, label: v.label || name, valid: v.valid, invalidWhy: v.reasons, checksSkipped: v.skipped }, row);
     };
     const show = r => console.log('  ' + (r.phase + (r.cap != null ? '@' + r.capLabel : '')).padEnd(14) + (r.valid ? 'ok     ' : 'INVALID') + (r.contended ? ' CONTENDED' : '          ') +
-      ` draws ${r.drawsPerS}/s raf ${r.rafPerS}/s vsync ${r.vsyncHz}Hz main ${r.mainBusyPct}% | cdp rend ${r.cdp.rendererPct}% gpu ${r.cdp.gpuPct}% brw ${r.cdp.browserPct}%` +
+      ` draws ${r.drawsPerS}/s raf ${r.rafPerS}/s vsync ${r.vsyncHz}Hz main ${r.mainBusyPct}%` + (r.still ? ` still ${Math.round(r.still.share * 100)}%` + (r.still.share < 0.95 ? ' (' + Object.entries(r.still.why).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k, n]) => k + ' ' + n).join(', ') + ')' : '') : '') +
+      ` | cdp rend ${r.cdp.rendererPct}% gpu ${r.cdp.gpuPct}% brw ${r.cdp.browserPct}%` +
       (r.os && !r.os.error ? ` | os gpu3d ${r.os.gpu3dPct}% gpuDed ${r.os.gpuDedMB}MB side ${r.os.sidecarCpuPct}% ${r.os.sidecarPrivMB}MB` : r.os ? ' | os ' + r.os.error : '') +
       (r.valid ? '' : ' :: ' + r.invalidWhy.join('; ')));
 
@@ -472,9 +471,13 @@ async function runOnce(k) {
           await sleep(sliceSettleS * 1000);
           const row = judge('AB', await measure(sliceS), cap >= 100 ? { hz: null } : {});   // the timer path books no vsync-rate frame to read the panel from
           row.cap = cap; row.capLabel = cap ? Math.round(1000 / cap) + '/s' : 'pace'; row.round = r;
-          const pace = row.obs[1].paceMs;
-          row.expectedDrawsPerS = expectedDraws(pace, row.vsyncHz ? 1000 / row.vsyncHz : 0);
+          const pace = row.obs[1].paceMs, mode = row.obs[1].paceMode;
+          // a still row's draws are timer-booked: expect them from the world's own vsync; a row that mixed still and moving
+          // frames has no single pace to track, so it is labelled instead of judged
+          const mixed = !cap && row.still && row.still.share > 0.05 && row.still.share < 0.95;
+          row.expectedDrawsPerS = mixed ? null : F.expectedDraws(pace, mode === 'still' ? (row.worldVsyncHz ? 1000 / row.worldVsyncHz : 0) : (row.vsyncHz ? 1000 / row.vsyncHz : 0), mode);
           row.tracksPacer = row.expectedDrawsPerS ? Math.abs(row.drawsPerS - row.expectedDrawsPerS) / row.expectedDrawsPerS <= 0.1 : null;
+          if (mixed) row.paceNote = 'mixed: ' + Math.round(row.still.share * 100) + '% of draws still (' + Object.entries(row.still.why).map(([k, n]) => k + ' ' + n).join(', ') + ')';
           if (cap && row.obs.some(o => o.paceMode !== 'capped')) { row.valid = false; row.invalidWhy.push('setFrameCap(' + cap + ') but renderPace().mode is not capped'); }
           rows.push(row); show(row);
         }

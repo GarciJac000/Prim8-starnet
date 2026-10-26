@@ -495,6 +495,7 @@ const App = (() => {
     if (agent && a.id === agent.id) {   // focused agent — apply live so the next run reflects the pin at once
       if (m) {
         if (typeof Harness !== 'undefined' && Harness.setModel) Harness.setModel(m);
+        noteWirePin(a);
         if (p && typeof Harness !== 'undefined' && Harness.setProv) Harness.setProv(p);
         if (hasEffort && a.reasoningEffort && typeof Harness !== 'undefined' && Harness.setReasoningEffort) Harness.setReasoningEffort(a.reasoningEffort);
       } else {
@@ -775,8 +776,14 @@ const App = (() => {
   function focusWire(a) {
     const station = stationDefaultWire();
     if (!(a && a.model)) return station;
-    return { model: a.model, provider: a.provider || station.provider, effort: a.reasoningEffort || '' };
+    return { model: a.model, provider: a.provider || station.provider, effort: a.reasoningEffort || '', owner: a.id };
   }
+  // The crew agent whose OWN pin the global model wire holds ('' = the station's model). With an Overseer that has no
+  // model, an unpinned agent used to keep that pin, e.g. a StarNet slug that then ran on managed credits or reconciled
+  // to "no model selected" under CLAUDE CODE (2026-10-21 user report). Only a crew pin is cleared: an older station whose
+  // model lives in the wire alone (no hero model) keeps it.
+  let wirePinOwner = '';
+  function noteWirePin(a) { wirePinOwner = (a && a.id !== 'agent' && a.model) ? String(a.id) : ''; }
   // SETTINGS -> PROVIDERS picks the STATION's provider, and the station default IS the Overseer's pin
   // (stationDefaultWire). The card used to move only the global wire, so the Overseer kept the provider the station
   // had just left: unpinned agents, their roster rows and a restore all followed it (the #24 "Out of managed credit"
@@ -794,6 +801,8 @@ const App = (() => {
   function applyWire(w) {
     if (typeof Harness === 'undefined') return;
     if (w.model && Harness.setModel) Harness.setModel(w.model);
+    else if (wirePinOwner && Harness.setModel) Harness.setModel('');
+    wirePinOwner = (w.model && w.owner && w.owner !== 'agent') ? String(w.owner) : '';
     if (w.provider && Harness.setProv) Harness.setProv(w.provider);
     if (w.effort && Harness.setReasoningEffort) Harness.setReasoningEffort(w.effort);
   }
@@ -956,6 +965,7 @@ const App = (() => {
       if (typeof Harness !== 'undefined' && Harness.setProv) Harness.setProv(provider);
       if (typeof Harness !== 'undefined' && Harness.setModel) Harness.setModel(model);
       agent.model = model; agent.provider = provider; agent.reasoningEffort = effort;   // #4: keep model+provider+effort TOGETHER on the agent
+      noteWirePin(agent);
       const stored = agents.get(agent.id);
       if (stored) { stored.model = model; stored.provider = provider; stored.reasoningEffort = effort; }
       const gtM = el('gt-model'); if (gtM) gtM.textContent = model;
@@ -1624,7 +1634,9 @@ const App = (() => {
     const worksignal = (typeof WorkSignalStore !== 'undefined') ? WorkSignalStore.serialize() : undefined;   // the capability-usage histogram (adaptive recruitment)
     const roster = liveAgents();
     const dossier = (typeof DossierStore !== 'undefined') ? DossierStore.serialize() : undefined;   // the station-wide Commander model
-    const saveState = Object.assign({ _saveDirty: true, _saveRevision: typeof CloudSave !== 'undefined' && CloudSave.revision ? CloudSave.revision() : 0, agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, reasoningMigrated: '0125' /* = REASONING_MIGRATION; a literal so persist() also runs when lifted alone */, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize());
+    // _saveClient: the window whose work this is (CloudSave.writerId), in the browser cache too, so a reopened window can
+    // prove a cached save left behind by a crash is that window's newer work (cloudsave reconcile)
+    const saveState = Object.assign({ _saveDirty: true, _saveRevision: typeof CloudSave !== 'undefined' && CloudSave.revision ? CloudSave.revision() : 0, _saveClient: typeof CloudSave !== 'undefined' && CloudSave.writerId ? CloudSave.writerId() : undefined, agent: hero, agents: roster.length > 1 ? roster.map(serializeAgentLite) : undefined, usage: Harness.totals(), prov, reasoningEffort, reasoningMigrated: '0125' /* = REASONING_MIGRATION; a literal so persist() also runs when lifted alone */, station: station ? station.serialize() : undefined, stationStats, profile, worksignal, dossier }, Workstreams.serialize());
     // #121 WRITE-THROUGH: build the envelope ONCE and always queue it for the station file. The browser cache holds the
     // whole save under one key and refuses it past the browser's per-site cap; gating the station file on that write
     // froze BOTH copies at the first failure, so every restart reverted the station.
@@ -2029,13 +2041,22 @@ const App = (() => {
     syncModelPicks();   // keep the recommended-chip highlight in lockstep with whatever's in the field
     if (isOAuthProviderId(pickedProvider)) { hint.textContent = 'included in your ' + OAUTH_GENESIS[pickedProvider].sub.replace(/ subscription$/, '') + ' subscription'; return; }
     if (!id) { hint.textContent = 'pick or type a model slug'; return; }
-    const limit = Harness.contextLimitOf ? Harness.contextLimitOf(id) : 0;
+    // the PICKED card's own catalog row (genesisModels = Harness.listModels(pickedProvider)): the Harness lookups prefer
+    // the station's stored provider, which only WAKE sets, and two routes can list one id with different run windows
+    // (StarNet credits work in a 200k tier, OpenRouter in the whole window) — final-polish 10-23
+    const row = genesisModels.find(m => m && m.id === id) || null;
+    const limit = (row && +row.context_length) || (Harness.contextLimitOf ? Harness.contextLimitOf(id) : 0);
     const price = Harness.priceOf ? Harness.priceOf(id) : null;
     if (limit || price) {
       // the catalog knows this model — surface BOTH context window and $/M in/out (previously ctx only)
       const fmt = (typeof CtxGauge !== 'undefined' && CtxGauge.fmtTokens) ? CtxGauge.fmtTokens : (n => String(n || 0));
       const bits = [];
-      if (limit) bits.push('remembers up to ' + fmt(limit) + ' tokens of chat');
+      // a route that bills a dearer rate past a prompt size runs in a window stopped at it (the picked row's runWindow, the
+      // sidecar's runWindow): name THAT window and why, never the 1M a 200k-tier run folds inside (final-polish 10-23). The
+      // tier belongs to the ROUTE: an id the picked catalog does not list names none (only another route's catalog has it)
+      const run = row ? (Number(row.runWindow) || 0) : 0;
+      if (limit && run > 0 && run < limit) bits.push('remembers up to ' + fmt(run) + ' tokens of chat (the model can hold ' + fmt(limit) + ', but it bills a higher rate for a prompt over ' + fmt(run) + ')');
+      else if (limit) bits.push('remembers up to ' + fmt(limit) + ' tokens of chat');
       if (price) bits.push('costs ' + usdPerM(price.in) + ' in · ' + usdPerM(price.out) + ' out per million tokens (a token ≈ ¾ of a word)');
       hint.textContent = bits.join('  ·  ');
       return;
@@ -3373,7 +3394,7 @@ const App = (() => {
     if (!agent.reasoningEffort && saved.reasoningEffort) agent.reasoningEffort = saved.reasoningEffort;
     Harness.setModel(agent.model || Harness.getModel());
     Harness.setTotals(saved.usage || { tokens: 0, cost: 0, calls: 0 });
-    Workstreams.init({ workstreams: saved.workstreams, activeId: saved.activeId, generalId: saved.generalId, sessionUndo: saved.sessionUndo, deletedIds: saved.deletedIds });
+    Workstreams.init({ workstreams: saved.workstreams, activeId: saved.activeId, generalId: saved.generalId, sessionUndo: saved.sessionUndo, deletedIds: saved.deletedIds, forgetIds: saved.forgetIds });
     pendingStationDoc = saved.station || null;   // restore the built station (if any)
     pendingStationStats = saved.stationStats || null;   // restore the station-growth rollup (XP/level/confidence)
     pendingGrowthSyncAt = Math.max(0, Number((saved.stationStats && saved.stationStats.runSyncAt) || saved.updatedAt || 0));
@@ -4785,7 +4806,9 @@ const App = (() => {
       return false;
     }
     const wasActive = (id === Workstreams.activeId());
-    if (!Workstreams.del(id)) { SFX.bad(); return false; }
+    // the Commander's Delete of a conversation: the sidecar forgets it (forget: true — qa/bugs/3e926b6a). DELETE AGENT's
+    // removeByAgent and a task card's remove only hide rows.
+    if (!Workstreams.del(id, { forget: true })) { SFX.bad(); return false; }
     SFX.bad();
     if (wasActive) loadActiveStream();   // deleting the OPEN stream falls back to General
     renderRail(); persist();
@@ -5993,6 +6016,22 @@ const App = (() => {
         try { if (typeof CloudSave !== 'undefined' && CloudSave.ackRecovery) CloudSave.ackRecovery(); } catch (_) {}
       }, 1500);
     }
+    // A REOPENING WINDOW'S UNSENT SAVE WAS MERGED into the station file (cloudsave reconcile → POST /api/save/adopt): say so
+    // once, with where the copies from before the merge are kept. Never claims more than the station's answer.
+    const merge = (typeof CloudSave !== 'undefined' && CloudSave.mergeNotice) ? CloudSave.mergeNotice() : null;
+    if (merge) {
+      const n = merge.added + merge.extended + merge.copied, s = k => k === 1 ? '' : 's';
+      const line = merge.late
+        ? 'Your unsent changes from last time were merged into the station file before this window opened. The station file from before is kept beside it.'
+        : merge.base === 'window'
+        ? 'Your newest changes from last time had not reached the station file; they are in it now' + (n ? ', with ' + n + ' session' + s(n) + ' only the station file held' : '') + '. The station file from before is kept as ' + (merge.backup || 'a backup beside it') + '.'
+        : 'The station file was kept over this window’s unsent changes from last time' + (n ? ', with ' + n + ' session' + s(n) + ' from this window added' : '') + '. This window’s whole save is kept beside it' + (merge.kept ? ' as ' + merge.kept : '') + '.';
+      setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify(line, 'warn'); } catch (_) {} }, 1500);
+    }
+    // a window's refused save left on the station may hold sessions this station lacks: offer them back once it is up
+    // (held in 0.14.0; back in 0.14.1 — a copy the station could not read this instant is never settled as empty, and
+    // "Not now" stays the review's watermark: no copy saved at or before the declined one is offered again)
+    if (saved && saved.agent) setTimeout(() => { try { if (typeof StationUI !== 'undefined' && StationUI.offerPreservedSaves) StationUI.offerPreservedSaves(); } catch (_) {} }, 2500);
     // restore the provider BEFORE the credential check so a codex agent (tokens server-side) jumps straight
     // in after a wipe/origin-reset instead of being misrouted to an OpenRouter key prompt.
     if (saved && saved.agent) migrateLegacyReasoning(saved);   // before any saved effort reaches the wire (0.12.5 reasoning migration)

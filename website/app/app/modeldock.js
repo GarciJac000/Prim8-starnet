@@ -59,6 +59,27 @@ const ModelDock = (() => {
   // CLAUDE CODE sits with the other subscription sign-ins (2026-10-02): at 15.5 its handful of models sank under
   // OpenRouter's whole catalog, and only an exact "claude code" search found them.
   const PROVIDER_RANK = { starnet: -1, codex: 0, grok: 1, kimi: 2, 'claude-cli': 2.5, openrouter: 3, openai: 4, anthropic: 5, gemini: 6, xai: 7, groq: 8, mistral: 9, deepseek: 10, together: 11, fireworks: 12, perplexity: 13, cerebras: 14, ollama: 15, custom: 16 };
+  // A linked station with an EMPTY wallet still led with STARNET, so its managed "Claude Opus" sat right above CLAUDE
+  // CODE's and one mis-pick sent every run into "Out of managed credit" (2026-10-21 user reports). A REPORTED balance
+  // <= 0 sinks the group below every other provider and labels it NO CREDITS; an unknown balance (null) changes nothing.
+  let starnetBalanceUsd = null;
+  function starnetDry() { return typeof starnetBalanceUsd === 'number' && !(starnetBalanceUsd > 0); }
+  function providerRank(p) {
+    if (p === 'starnet' && starnetDry()) return 19;
+    return PROVIDER_RANK[p] == null ? 20 : PROVIDER_RANK[p];
+  }
+  async function refreshStarnetBalance() {
+    let bal = null;
+    if (providerEnabled('starnet')) {
+      try {
+        const r = await apiFetch('/api/credits?history=0', { cache: 'no-store' });
+        const j = r.ok ? await r.json() : null;
+        // a failed balance check answers balanceUsd:null: keep it unknown, never a $0 that buries a funded account
+        if (j && j.configured && typeof j.balanceUsd === 'number' && isFinite(j.balanceUsd)) bal = j.balanceUsd;
+      } catch (_) { bal = null; }
+    }
+    starnetBalanceUsd = bal;
+  }
 
   let opts = {};
   let wired = false;
@@ -161,8 +182,11 @@ const ModelDock = (() => {
     return 'openrouter';
   }
   function isAgentModel(item) {
-    return !(item && normalizeProvider(item.provider) === 'openai'
-      && /^(?:gpt-image-|chatgpt-image-|dall-e-)/i.test(String(item.id || '').trim()));
+    const p = item ? normalizeProvider(item.provider) : '';
+    const id = String((item && item.id) || '').trim();
+    if (p === 'openai' && /^(?:gpt-image-|chatgpt-image-|dall-e-)/i.test(id)) return false;
+    // an OpenRouter-catalog batch-only row ('<id>:batch') cannot run a chat turn (sidecar providers/provider.js isBatchOnlyModel)
+    return !((p === 'openrouter' || p === 'starnet') && /:batch$/i.test(id));
   }
   function apiFetch(url, init) {
     return (typeof Harness !== 'undefined' && Harness.apiFetch) ? Harness.apiFetch(url, init) : fetch(url, init);
@@ -298,7 +322,9 @@ const ModelDock = (() => {
     if (!id) return '';
     if (rows.some(m => m && m.id === id)) return id;
     let candidate = '';
-    if ((p === 'starnet' || p === 'openrouter') && id.indexOf('/') < 0) {
+    // a batch-only variant an older build saved ('<id>:batch', never offered now) runs as its base row when the catalog lists it
+    if ((p === 'starnet' || p === 'openrouter') && /:batch$/i.test(id)) candidate = id.replace(/:batch$/i, '');
+    else if ((p === 'starnet' || p === 'openrouter') && id.indexOf('/') < 0) {
       candidate = 'anthropic/' + id;
       // #93: a bare vendor id ('gpt-5.5' — the default a managed setup used to save) names its routed row
       // 'openai/gpt-5.5'. Map it only when EXACTLY ONE catalog row is <vendor>/<id>: two vendors serving the
@@ -590,7 +616,9 @@ const ModelDock = (() => {
     if (ids.indexOf(active) < 0) ids.unshift(active);
     const pending = ids.map(p => fetchProviderModels(p, force));
     const activeRequest = catalogRequests[active];
+    const balance = refreshStarnetBalance().catch(() => {});
     const parts = await Promise.all(pending);
+    await balance;
     const activeList = parts[ids.indexOf(active)] || [];
     // Cache completion must not apply to a later selection or focused agent.
     if (generation !== fetchGeneration) return models;
@@ -600,7 +628,7 @@ const ModelDock = (() => {
     models = mergeCurrent(parts.reduce((a, b) => a.concat(b), []).filter(isAgentModel));
     models.sort((a, b) => {
       const pa = normalizeProvider(a.provider), pb = normalizeProvider(b.provider);
-      if (pa !== pb) return ((PROVIDER_RANK[pa] == null ? 20 : PROVIDER_RANK[pa]) - (PROVIDER_RANK[pb] == null ? 20 : PROVIDER_RANK[pb]));
+      if (pa !== pb) return providerRank(pa) - providerRank(pb);
       if (pa === 'openrouter') {
         const ga = openRouterGroupName(a), gb = openRouterGroupName(b);
         if (ga !== gb) return ga.localeCompare(gb);
@@ -735,6 +763,13 @@ const ModelDock = (() => {
         // connect screen's "(catalog offline — type or pick a slug)" honesty.
         const groupFallback = list.some(x => groupOf(x) === g && x.fallback);
         head.textContent = group;
+        if (normalizeProvider(m.provider) === 'starnet' && starnetDry()) {
+          const dry = document.createElement('i');
+          dry.className = 'model-dock-group-offline';
+          dry.textContent = ' · NO CREDITS';
+          head.appendChild(dry);
+          head.title = 'your StarNet balance is ' + (starnetBalanceUsd < 0 ? '-$' : '$') + Math.abs(starnetBalanceUsd).toFixed(2) + ' — these models run on managed credits; pick one under your own sign-in or key, or add credits in the STORE';
+        }
         if (groupFallback) {
           const off = document.createElement('i');
           off.className = 'model-dock-group-offline';
@@ -1032,7 +1067,9 @@ const ModelDock = (() => {
     const ids = ['starnet', 'codex', 'grok', 'kimi', 'openrouter', 'openai', 'anthropic', 'gemini', 'xai', 'groq', 'mistral', 'deepseek', 'together', 'fireworks', 'perplexity', 'cerebras', 'ollama', 'claude-cli', 'custom'];
     const active = provider();
     if (ids.indexOf(active) < 0) ids.unshift(active);
+    const balance = refreshStarnetBalance().catch(() => {});
     const parts = await Promise.all(ids.map(p => fetchProviderModels(p, force).catch(() => [])));
+    await balance;
     let list = parts.reduce((a, b) => a.concat(b), []).filter(m => m && m.id);
     if (ensure && ensure.id) {
       const eid = String(ensure.id).trim();
@@ -1044,7 +1081,7 @@ const ModelDock = (() => {
     list = list.filter(m => { const k = normalizeProvider(m.provider) + '' + m.id; if (seen.has(k)) return false; seen.add(k); return true; });
     list.sort((a, b) => {
       const pa = normalizeProvider(a.provider), pb = normalizeProvider(b.provider);
-      if (pa !== pb) return ((PROVIDER_RANK[pa] == null ? 20 : PROVIDER_RANK[pa]) - (PROVIDER_RANK[pb] == null ? 20 : PROVIDER_RANK[pb]));
+      if (pa !== pb) return providerRank(pa) - providerRank(pb);
       if (pa === 'openrouter') { const ga = openRouterGroupName(a), gb = openRouterGroupName(b); if (ga !== gb) return ga.localeCompare(gb); }
       return modelLabel(a).localeCompare(modelLabel(b)) || a.id.localeCompare(b.id);
     });
@@ -1061,6 +1098,7 @@ const ModelDock = (() => {
     normalizeEffort,
     // reuse surface for per-target pickers (bay / dossier) — pure data + label/effort helpers, no side effects
     catalog: (o) => computeCatalog(!!(o && o.force), o && o.ensure),
+    starnetDry,
     labels: { model: modelLabel, provider: providerLabel, group: groupOf, short: shortModelName, normProvider: normalizeProvider, orGroup: openRouterGroupName },
     efforts: { optionsFor: effortOptionsFor, label: effortLabel, clamp: clampEffortForModel, list: () => EFFORTS.slice(), presetsFor: reasoningPresetsFor, presetFor: reasoningPresetFor, forPreset: effortForPreset },
     _internals: { tierIndexFrom, tiersFor, reasoningPresetsFor, reasoningPresetFor, effortForPreset, effortOptionsFor, clampEffortForModel, modelFamily, supportsReasoning, selectorLabel, catalogEquivalent, isAgentModel, asModel, dialLess, effortShown }

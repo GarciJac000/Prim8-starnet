@@ -40,6 +40,12 @@
   // human re-open, e.g. the OUTBOX crate's "review"). Bounded so the list can't grow unboundedly.
   const MAX_TOMBS = 500;
   let tombs = [];       // string ids of deleted workstreams, oldest first
+  // FORGOTTEN SESSIONS (qa/bugs/3e926b6a): the subset the Commander deleted AS A CONVERSATION (the rail's Delete, and
+  // station.control session.delete, which asks them first) — del(id, { forget: true }). It rides the save as
+  // `forgetIds`, and the sidecar forgets only these: their history, recall and the memory they wrote. A row removed as a
+  // side effect (DELETE AGENT's removeByAgent, a task card's remove) is only hidden, as it always was: deleting an
+  // agent archives its record, it is not a privacy delete of its conversations. Same bound, same revive/reset rules.
+  let forgets = [];
 
   // frontend module: ambient time/rng is fine here (lint-determinism scans only shared/ + sidecar/).
   function now() { return Date.now(); }
@@ -171,6 +177,7 @@
     ws = Array.isArray(slice.workstreams) ? slice.workstreams.map(make) : [];
     delegatedAgents = null;
     tombs = Array.isArray(slice.deletedIds) ? slice.deletedIds.filter(x => typeof x === 'string' && x).slice(-MAX_TOMBS) : [];
+    forgets = Array.isArray(slice.forgetIds) ? slice.forgetIds.filter(x => typeof x === 'string' && x).slice(-MAX_TOMBS) : [];
     generalId = (slice.generalId && find(slice.generalId)) ? slice.generalId : null;
     ensureGeneral();
     activeId = (slice.activeId && find(slice.activeId)) ? slice.activeId : generalId;
@@ -182,10 +189,10 @@
   }
 
   // wipe to a single fresh General (NEW AGENT clears everything).
-  function reset() { ws = []; delegatedAgents = null; activeId = generalId = null; undoCheckpoint = null; tombs = []; const g = ensureGeneral(); activeId = g.id; return active(); }
+  function reset() { ws = []; delegatedAgents = null; activeId = generalId = null; undoCheckpoint = null; tombs = []; forgets = []; const g = ensureGeneral(); activeId = g.id; return active(); }
 
   // the persisted slice — App.persist() serializes this alongside { agent, usage }.
-  function serialize() { return { workstreams: ws, activeId, generalId, sessionUndo: undoCheckpoint, deletedIds: tombs }; }
+  function serialize() { return { workstreams: ws, activeId, generalId, sessionUndo: undoCheckpoint, deletedIds: tombs, forgetIds: forgets }; }
   function all() { return ws; }
 
   // ---------- selection ----------
@@ -302,6 +309,7 @@
       if (isDeleted(opts.id)) {
         if (opts.revive !== true) return null;
         tombs = tombs.filter(t => t !== opts.id);
+        forgets = forgets.filter(t => t !== opts.id);   // what was forgotten stays forgotten (the sidecar keeps its stamp)
       }
     }
     const w = make(opts);
@@ -357,16 +365,18 @@
     if (w.archived && activeId === id) activeId = generalId;
     return true;
   }
-  function del(id) {
+  // opts.forget === true: the Commander deleted this conversation (see `forgets` above); its workers' threads with it
+  function del(id, opts) {
     if (id === generalId) return false;
     const i = ws.findIndex(w => w.id === id);
     if (i < 0) return false;
     ws.splice(i, 1);
     delegatedAgents = null;
     if (tombs.indexOf(id) < 0) { tombs.push(id); if (tombs.length > MAX_TOMBS) tombs = tombs.slice(-MAX_TOMBS); }
+    if (opts && opts.forget === true && forgets.indexOf(id) < 0) { forgets.push(id); if (forgets.length > MAX_TOMBS) forgets = forgets.slice(-MAX_TOMBS); }
     if (activeId === id) activeId = generalId;
     // its delegated workers' threads were its record: they go with it (never left behind, unreachable)
-    for (const k of ws.filter(x => x.worker === true && x.parentStreamId === id)) del(k.id);
+    for (const k of ws.filter(x => x.worker === true && x.parentStreamId === id)) del(k.id, opts);
     return true;
   }
   // DOSSIER › DELETE AGENT support: drop every (non-General) stream bound to a now-deleted agent so the rail

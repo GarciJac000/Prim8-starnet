@@ -61,6 +61,15 @@ function makeRunTranscript(opts) {
   const taintNow = typeof o.taint === 'function' ? function () { try { return o.taint() || null; } catch (e) { onFailure('taint', e); return null; } } : function () { return null; };
   let directive = '';
   let directiveWritten = false;
+  /* HOLD FOR A PASTED KEY (keys.save, 2026-10-25). On a run whose Commander message holds a key-shaped string the
+     directive row would reach disk before the model could save that key to KEYS — raw, in a segment that is never
+     rewritten. While o.hold() is true, start() and every boundary write nothing; the first boundary after it turns
+     false (the host flips it when keys.save SUCCEEDS, so the store's redaction can name the key) drains everything in
+     its usual order: directive, then each turn. Not "the first tool batch": a real model's first batch is often a
+     Task Brief step, with the save a turn later (live run 2026-10-25). The strict drain (compaction, run end) always
+     writes, held or not. A crash while held leaves those rows only in the run journal — the state a failed start()
+     already leaves, which a recovery continuation appends. */
+  const holding = typeof o.hold === 'function' ? function () { try { return !!o.hold(); } catch (e) { onFailure('hold', e); return false; } } : function () { return false; };
 
   function writeDirective() {
     if (directiveWritten || !directive) return;
@@ -106,12 +115,14 @@ function makeRunTranscript(opts) {
     drain,
     // before the first model call. Never throws: a failure is reported and retried at the next boundary.
     start(messages) {
+      if (holding()) return 0;
       try { return drain(messages); }
       catch (e) { onFailure('start', e); return 0; }
     },
     // a loop durable boundary ({ phase, messages } — loop.js saveCheckpoint's payload). Never throws.
     checkpoint(c) {
       const cp = c || {};
+      if (holding()) return 0;
       if (waitsForNextBoundary(cp.phase, cp.messages)) return 0;
       try { return drain(cp.messages); }
       catch (e) { onFailure('checkpoint', e); return 0; }

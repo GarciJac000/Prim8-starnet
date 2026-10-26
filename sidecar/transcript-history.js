@@ -723,6 +723,9 @@ function makeSegmentedTranscriptIo(opts) {
     const terms = tokenize(query);
     if (!terms.length) return [];
     const all = settings.scope === 'all';
+    // exclude(row) -> true: a row the caller may not return (a deleted session's, qa/bugs/3e926b6a). Skipped before it
+    // is ranked, so it never takes one of the `limit` slots from a row that may be returned.
+    const exclude = typeof settings.exclude === 'function' ? settings.exclude : null;
     const best = [];
     const counts = new Array(terms.length);
     const ranksAfter = (score, ts, rowId, b) => (b.score - score) || (num(b.ts) - ts) || (num(b.rowId) - rowId);   // > 0: b ranks first
@@ -743,6 +746,7 @@ function makeSegmentedTranscriptIo(opts) {
       }
       for (const row of rows) {
         if ((candidates && !candidates.has(num(row.rowId))) || (!all && row.streamId !== streamId)) continue;
+        if (exclude && exclude(row)) continue;
         countTerms(row.content, terms, counts);
         let distinct = 0, freq = 0;
         for (const seen of counts) if (seen) { distinct++; freq += seen; }

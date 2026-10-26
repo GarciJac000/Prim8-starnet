@@ -153,9 +153,11 @@ module.exports = (async () => {
     const run = factory.selectProvider({ provider: 'deepseek', fetch: ep.fetch, key: 'fixture-key', baseUrl: base });
     const history = [{ role: 'user', content: 'earlier question' }, { role: 'assistant', content: 'earlier answer (kept by the page, no reasoning)' }, { role: 'user', content: 'read a.txt' }];
     const ev1 = await collect(run, { model: 'deepseek-flash', messages: history, tools: TOOLS, reasoningEffort: 'high' });
-    const block = ev1.find(e => e.type === 'reasoning');
+    // a blockless { type:'reasoning' } says reasoning began streaming (a Stop's spend truth); the block is parked once
+    const block = ev1.find(e => e.type === 'reasoning' && e.block);
     A.eq(block && block.block, { type: 'reasoning_content', text: 'I should read the file first.' }, 'the turn\'s reasoning_content is parked as ONE reasoning block');
-    A.ok(ev1.findIndex(e => e.type === 'reasoning') < ev1.findIndex(e => e.type === 'done'), 'the block precedes the terminal event');
+    A.eq(ev1.filter(e => e.type === 'reasoning' && e.block).length, 1, 'exactly one parked block');
+    A.ok(ev1.findIndex(e => e.type === 'reasoning' && e.block) < ev1.findIndex(e => e.type === 'done'), 'the block precedes the terminal event');
     A.ok(passedBack(ep.posts[0]), 'first request: the page-kept history turn got reasoning_content "" (no 400)');
     A.eq(ep.posts[0].messages[1].reasoning_content, '', 'an uncaptured turn is handed back as ""');
     // the loop parks the block on the turn (loop.js assistantTurn) and runs the tool; the next request must hand it back

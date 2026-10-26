@@ -1,0 +1,1041 @@
+/* node test/render-still.test.js — the STILL tier of RENDER PACING (world.js).
+
+   Andrew, 2026-10-21 (approved): "draw 30/s while nothing on screen moves, snap back to 60 the instant anything moves
+   (144 while panning)". The installed 0.13.5 idled at 178% of a core, 96% of it DRAWING an unchanged station 60x a second.
+   The contract this file locks:
+     1. a still scene is redrawn 30x a second, waiting in a timer (no per-vsync rAF spin) — and mode 'still' says so;
+     2. anything that moves is drawn at the normal pace from the very next vsync: 60, or 144 while the hand pans;
+     3. motion that STARTS between still frames never waits out the 33 ms tick — a body whose idle clock, fidget or talk
+        turn comes due mid-interval, a decision whose first step lands on the next tick, and a wake from outside the
+        frame (input, a harness event, a World API call) all land on the next vsync;
+     4. every motion source the frame knows about flips the still flag (unsure is motion: a prop whose art moves on its
+        clock, a bobbing body, a meteor, a bubble sliding with its body even off screen), the ambient ones (an off-screen
+        body with nothing over it, float dust, a static speech bubble, a planted body's sub-pixel breath, a cold belt) do
+        not, and every clock the inner life gates on is either due in the verdict or exempt for a reason.
+   The world is a browser IIFE: the pacer block, the verdict block and frame() are lifted out of the source and run in a vm
+   sandbox on a fake vsync clock — behaviour, not prose. The prop / sky / sprite readouts the verdict reads are proven by
+   test/render-still-readouts.test.js. */
+'use strict';
+const A = require('./_assert.js');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const root = path.join(__dirname, '..');
+const world = fs.readFileSync(path.join(root, 'frontend/app/world.js'), 'utf8');
+const assets = fs.readFileSync(path.join(root, 'frontend/js/assets.js'), 'utf8');
+const ghostline = fs.readFileSync(path.join(root, 'frontend/app/ghostline.js'), 'utf8');
+const util = fs.readFileSync(path.join(root, 'frontend/js/util.js'), 'utf8');
+const strip = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"\\])\/\/.*$/gm, '$1');
+const code = strip(world);
+
+// ---- the lifted source --------------------------------------------------------------------------------------------
+const pFrom = world.indexOf('  const PACE_VISIBLE_MS'), pTo = world.indexOf('  function renderPace()');
+const vFrom = world.indexOf('  /* STILL VERDICT'), vTo = world.indexOf('  // ---- end STILL VERDICT');
+A.ok(pFrom > 0 && pTo > pFrom && pTo - pFrom < 12000, 'world.js carries the RENDER PACING block before renderPace()');
+A.ok(vFrom > pTo && vTo > vFrom && vTo - vFrom < 24000, 'world.js carries the STILL VERDICT block after renderPace()');
+const renderPaceSrc = A.fnBody(world, '  function renderPace()');
+const frameSrc = A.fnBody(code, 'function frame(now, force)');
+const isTalkKindSrc = A.fnBody(code, 'function isTalkKind(kind)');
+A.ok(renderPaceSrc && frameSrc && frameSrc.length < 3000 && isTalkKindSrc, 'renderPace(), the paced frame(now, force) and isTalkKind are found');
+// the inner-life constants the verdict reads, taken from world.js itself (never re-typed here)
+const num = name => {
+  const m = world.match(new RegExp('\\b' + name + ' = ([0-9][0-9 *+/.]*)[;,]'));
+  A.ok(!!m, name + ' is a world.js constant');
+  return m ? Function('return (' + m[1] + ')')() : NaN;
+};
+const K = {};
+for (const n of ['TALK_SLOT_MS', 'TALK_SPEAK_MS', 'GATHER_SPEAK_MS', 'GATHER_GAP_MS', 'GATHER_QUIET_MS', 'OVERSEER_BREAK_MS', 'CURSOR_FRESH_MS', 'LINK_STALE_MS']) K[n] = num(n);
+
+// the world state the verdict reads, as sandbox globals (var = settable from the test)
+const PRELUDE = `
+var frameCapMs = 0, lastDrawnAt = 0, running = true, raf = 0, camUserAt = 0;
+var renderFaults = 0, lastFaultMsg = '', reviewParts = null, reviewStamp = 0, cache = {};
+var RENDER_FAULT_LIMIT = 30, reviewPerformance = { enabled: false, samples: [] };
+var scale = 2, panX = 0, panY = 0, cv = { width: 800, height: 600 }, T = 12;
+var agent = null, crew = [], camAnim = null, camLerp = null, camLock = null, geo = null, beltLiveSet = null;
+var convey = null, ghost = null, handoffBoxes = [], sendCrates = [], deskFlash = new Map(), dockFlashes = new Map();
+var pinFlourishAt = -1e9, firstShipPulse = null, awakeFrozen = false, arrivalScene = null, kindleArmed = false, kindleP = 0, floodAt = 0;
+var wakeDark = 0, wakeDarkTarget = 0, dawnAt = 0, sparkAt = 0, bornAt = 0, truthPulseAt = 0, wakeAt = 0, levelUpAt = 0;
+var cineHoldUntil = 0, cineWalkAt = -1e9, cineIdleMs = 120000, socialBeat = null, gathering = null;
+var FLASH_MS = 950, HANDOFF_GRACE_MS = 8000;
+var activity = 'idle', lastCursor = { wx: 0, wy: 0, t: -1e9 }, gatherGateUntil = -1e9, stationBusyAt = -1e9, gatherRollAt = -1e9;
+var chatFocusId = null, chatWarmUntil = -1e9, stillPass = null, linkStaleDim = false, lastSseEventAt = 0, rmOn = false;
+var overlaysOn = true, hoverAgent = null, palletPopAt = -1e9;
+${Object.entries(K).map(([k, v]) => 'var ' + k + ' = ' + v + ';').join(' ')}
+function reduceMotion() { return rmOn; }
+${isTalkKindSrc}
+var bodyPosX = b => b ? (b.seated ? b.seatPx : b.px) : 0, bodyPosY = b => b ? (b.seated ? b.seatPy : b.py) : 0;
+var propUse = p => (p && p.use) || null;
+var scene = { step() {} };
+function drawRenderFault() {}
+function frameBody(now) { stillBegin(); scene.step(now); stillVerdict(now); }
+`;
+const EXPOSE = `
+this.W = { paceMs, scheduleFrame, paceWake, motionWake, userActive, cameraMoved, renderPace, stillBegin, stillVerdict, stillMove, noteDue, frame,
+  noteDrawCost, resetBudget: () => { drawCostMs = 0; },
+  dueLeadMs,
+  st: () => ({ stillNow, stillWhy, stillDue, paceTimer, inputAt, motionUntil, vsyncMs, stillFrames }),
+  consts: { PACE_VISIBLE_MS, PACE_MOTION_MS, PACE_STILL_MS, PACE_MOTION_HOLD_MS, INPUT_HOLD_MS, BODY_CLOCKS } };`;
+
+// opts.timerLate: every setTimeout fires this many ms late (a Windows / WebView2 system tick is ~15.6 ms) ·
+// opts.pacer(src) / opts.verdict(src): rewrite the lifted pacer / verdict block (a mutation check: the old rule must fail) ·
+// opts.extra: more real world.js source (lifted functions + their stubs), run in the same sandbox
+function makeWorld(hz, opts) {
+  opts = opts || {};
+  const env = { now: 0, rafQ: [], timers: [], tid: 0, rafCalls: 0, draws: [], hz };
+  const P = 1000 / hz, late = opts.timerLate || 0;
+  const sb = {
+    console, Map, Set, Math, Object, Infinity, NaN,
+    document: { hasFocus: () => true },
+    performance: { now: () => env.now },
+    requestAnimationFrame: fn => { env.rafQ.push(fn); return env.rafQ.length + 1000; },
+    cancelAnimationFrame: () => { env.rafQ.length = 0; },
+    setTimeout: (fn, ms) => { const id = ++env.tid; env.timers.push({ id, at: env.now + Math.max(0, ms) + late, fn }); return id; },
+    clearTimeout: id => { env.timers = env.timers.filter(t => t.id !== id); },
+  };
+  vm.createContext(sb);
+  const pacer = opts.pacer ? opts.pacer(world.slice(pFrom, pTo)) : world.slice(pFrom, pTo);
+  const verdict = opts.verdict ? opts.verdict(world.slice(vFrom, vTo)) : world.slice(vFrom, vTo);
+  vm.runInContext(PRELUDE + pacer + '\n' + renderPaceSrc + '\n' + verdict + '\n' + frameSrc + '\n' + (opts.extra || '') + '\n' + EXPOSE, sb);
+  const W = sb.W;
+  // the event loop: timers fire at their time; rAF callbacks run on the next vsync boundary (k * P)
+  const actions = [];   // test-side events at a wall time: { at, fn }
+  let vk = 1;           // the index of the next vsync to deliver (counted, so an event landing ON a boundary can't skip it)
+  function runUntil(t) {
+    for (let guard = 0; guard < 1e6; guard++) {
+      const nextV = vk * P;
+      let nextT = Infinity, ti = -1;
+      for (let i = 0; i < env.timers.length; i++) if (env.timers[i].at < nextT) { nextT = env.timers[i].at; ti = i; }
+      let nextA = Infinity, ai = -1;
+      for (let i = 0; i < actions.length; i++) if (actions[i].at < nextA) { nextA = actions[i].at; ai = i; }
+      const next = Math.min(nextV, nextT, nextA);
+      if (next > t) { env.now = t; return; }
+      env.now = next;
+      if (next === nextA) { const a = actions.splice(ai, 1)[0]; a.fn(); continue; }
+      if (next === nextT && nextT < nextV) { const tm = env.timers.splice(ti, 1)[0]; tm.fn(); continue; }
+      vk++;
+      const q = env.rafQ.splice(0);
+      for (const fn of q) { env.rafCalls++; fn(env.now); }
+    }
+    throw new Error('event loop did not settle');
+  }
+  // run on to the next draw and stop just after it: the returned time is that draw, and the clock is within 0.5 ms of it
+  function toNextDraw() { const n = env.draws.length; while (env.draws.length === n) runUntil(env.now + 0.5); return env.draws[env.draws.length - 1]; }
+  const firstVsyncAtOrAfter = t => Math.ceil(t / P - 1e-9) * P;
+  return { sb, W, env, P, runUntil, toNextDraw, firstVsyncAtOrAfter, at: (t, fn) => actions.push({ at: t, fn }) };
+}
+const count = (arr, a, b) => arr.filter(t => t >= a && t < b).length;
+
+// a body the scene sim moves: idle until its clock comes due, then walks 30 world px/s; drawBody's readouts held constant.
+// glanceCd: Infinity — a hero whose glance cooldown is far off (a lapsed one rolls every tick: motion, see section 7)
+function body(over) {
+  return Object.assign({ id: 'a', px: 200, py: 150, dir: 'south', state: 'idle', idleUntil: Infinity, glanceCd: Infinity, _pose: 'set.rot.south', _renderFrame: 0 }, over || {});
+}
+function walkerScene(w, b) {
+  let last = 0;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    const dt = last ? now - last : 0; last = now;
+    if (b.state === 'idle' && now >= b.idleUntil) { b.state = 'walk'; b.walkFrom = now; }
+    if (b.state === 'walk') b.px += 0.03 * dt;
+  } };
+}
+
+// ---- 1. a still scene is drawn 30x a second, from a timer --------------------------------------------------------
+{
+  const w = makeWorld(60), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0);
+  w.runUntil(1000);
+  const raf0 = w.env.rafCalls;
+  w.runUntil(2000);
+  const n = count(w.env.draws, 1000, 2000);
+  A.ok(n >= 29 && n <= 31, 'a still station is redrawn 30x a second (' + n + ' draws in 1 s on a 60 Hz panel)');
+  A.ok(w.env.rafCalls - raf0 <= 31, '...each one booked from a timer: no per-vsync rAF spin while still (' + (w.env.rafCalls - raf0) + ' callbacks)');
+  const rp = w.W.renderPace();
+  A.eq(rp.mode, 'still', "renderPace().mode reads 'still' — the bench and telemetry can prove the tier");
+  A.ok(Math.abs(rp.paceMs - 33.3) < 0.1 && rp.still === true && rp.stillWhy === null, '...at the 30/s pace, with no motion source named');
+  A.ok(rp.stillFrames >= 29 && typeof rp.stillWhyCounts === 'object', '...and it counts the frames it judged still (' + rp.stillFrames + '), for a bench window');
+  // the wait between still draws (THE STILL TICK'S TIMER): a timer to just past the vsync before the draw, then the one booked
+  // rAF that lands it — the rAF tail is part of the wait (one callback, at the draw), never a spin
+  let inTimer = 0, inTail = 0;
+  for (let i = 0; i < 100; i++) { w.runUntil(w.env.now + 1); if (w.W.renderPace().timerWait) inTimer++; else if (w.sb.raf) inTail++; }
+  A.ok(inTimer >= 45 && inTimer + inTail >= 99, '...waiting between draws: in a timer ' + inTimer + '% of the time, then in the one booked rAF that lands the draw (' + inTail + '%)');
+  A.ok(Math.abs(w.W.st().vsyncMs - 1000 / 60) < 0.5, 'a timer-booked callback is never learned as a vsync (vsyncMs stays ' + w.W.st().vsyncMs.toFixed(2) + ' ms)');
+}
+
+// ---- 1b. exactly 30/s while still, even when the timers run late (Andrew approved exactly 30/s) -------------------------
+// Windows / WebView2 timers can fire a ~15.6 ms system tick late. The still tick's timer wakes a vsync early and rAF lands
+// the draw, so the still pace holds; with on-time timers it books one rAF callback per still draw, as before.
+{
+  const stillRate = (hz, opts) => {
+    const w = makeWorld(hz, opts), b = body();
+    w.sb.agent = b; walkerScene(w, b);
+    w.W.frame(0); w.runUntil(1000);
+    const d0 = w.env.draws.length, r0 = w.env.rafCalls;
+    w.runUntil(3000);
+    return { per: (w.env.draws.length - d0) / 2, cb: (w.env.rafCalls - r0) / 2, mode: w.W.renderPace().mode };
+  };
+  for (const lag of [4, 15.6]) {
+    const r = stillRate(60, { timerLate: lag });
+    A.ok(r.per >= 28 && r.per <= 31 && r.mode === 'still', 'timers ' + lag + ' ms late, 60 Hz: a still station is still drawn ~30x a second (' + r.per + '/s)');
+    A.ok(r.cb <= r.per + 0.5, '...with one rAF callback per still draw (' + r.cb + ' callbacks/s)');
+  }
+  // (144 Hz: the vsync nearest 33.3 ms is the 5th, 34.7 ms — frame()'s half-vsync rule — so ~28.8/s there, as before)
+  for (const hz of [60, 144]) {
+    const r = stillRate(hz);
+    A.ok(r.per >= (hz === 60 ? 29 : 28) && r.per <= 31 && r.cb <= r.per + 0.5, 'on-time timers, ' + hz + ' Hz: ~30 still draws/s (' + r.per + ') and no extra rAF callbacks (' + r.cb + '/s)');
+  }
+  // the timer aims at the vsync frame() itself draws on: its slack is frame()'s skip rule, byte for byte
+  const slack = (world.slice(pFrom, pTo).match(/function drawSlackMs\(\) \{ return (Math\.max\(1, Math\.min\(vsyncMs \|\| 2, 17\) \/ 2\)); \}/) || [])[1];
+  A.ok(!!slack && frameSrc.includes('now - lastDrawnAt < pace - ' + slack + ')'), "the still tick timer's slack (drawSlackMs) is frame()'s own skip rule (" + slack + ')');
+  // MUTATION CHECK: the old tick timer (2 ms before the draw) loses a vsync to any timer over 2 ms late
+  const OLD_TICK = src => src.replace('Math.min(stillTickTimerAt(pace), stillDue - lead)', 'Math.min(lastDrawnAt + pace - 2, stillDue - lead)');
+  A.ok(OLD_TICK(world.slice(pFrom, pTo)) !== world.slice(pFrom, pTo), '(the mutation check finds the still tick timer in scheduleFrame)');
+  const old = stillRate(60, { timerLate: 4, pacer: OLD_TICK });
+  A.ok(old.per < 25, 'MUTATION CHECK — the old tick timer, timers 4 ms late: the still pace fell to ' + old.per + '/s');
+}
+
+// ---- 2. motion is drawn at the normal pace ------------------------------------------------------------------------
+{
+  const w = makeWorld(60), b = body({ idleUntil: 0 });
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0);
+  w.runUntil(2000);
+  const n = count(w.env.draws, 1000, 2000);
+  A.ok(n >= 59 && n <= 61, 'a walking body is drawn 60x a second (' + n + ')');
+  A.eq(w.W.renderPace().mode, 'visible', "...in the 'visible' mode");
+  A.eq(w.W.st().stillWhy, 'body', "...and the verdict names the body as the motion");
+  const c = w.W.renderPace().stillWhyCounts;
+  A.ok(c.body >= 100, '...and counts the frames the body kept moving (' + JSON.stringify(c) + ')');
+}
+
+// ---- 3. the hand panning: 144x a second, then back to still --------------------------------------------------------
+{
+  const w = makeWorld(144), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0);
+  w.runUntil(1000);
+  A.eq(w.W.renderPace().mode, 'still', 'a 144 Hz panel at rest is still');
+  for (let t = 1000; t < 2000; t += 3) w.at(t, () => { w.sb.panX += 1; w.W.cameraMoved(); });   // a drag: mousemove every 3 ms
+  w.runUntil(2000);
+  const n = count(w.env.draws, 1100, 2000);
+  A.ok(n >= 128 && n <= 131, 'while the hand pans, the floor is drawn 144x a second (' + n + ' in 0.9 s on a 144 Hz panel)');
+  A.eq(w.W.renderPace().mode, 'motion', "...in the 'motion' mode");
+  w.runUntil(2000 + w.W.consts.PACE_MOTION_HOLD_MS + 500);
+  const t0 = w.env.now; w.runUntil(t0 + 1000);
+  const s = count(w.env.draws, t0, t0 + 1000);
+  A.ok(s >= 27 && s <= 31, 'the hand lets go, the hold runs out, and the still scene drops back to ~30/s (' + s + ')');
+  A.eq(w.W.renderPace().mode, 'still', "...in the 'still' mode");
+}
+
+// ---- 4. a body whose idle clock comes due MID-INTERVAL walks on the next vsync ------------------------------------------
+{
+  const w = makeWorld(60), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0);
+  w.runUntil(1000);
+  A.ok(w.W.st().stillNow, 'the floor is still before the walk');
+  const L = w.toNextDraw();
+  // the decision is set on the scene (the inner life's idleUntil) BEFORE the next still frame, due between two still ticks
+  b.idleUntil = L + 45;   // still ticks would land at L+33.3 and L+66.7; the first vsync at/after the clock is L+50
+  w.runUntil(L + 200);
+  const after = w.env.draws.filter(t => t > L + 34);
+  A.ok(Math.abs(after[0] - (L + 50)) < 0.01, 'the body starts walking ON the first vsync after its clock (drawn at +' + (after[0] - L).toFixed(1) + ' ms, not +66.7)');
+  A.ok(b.state === 'walk' && b.walkFrom === after[0], '...and that very draw is the one that shows it walking');
+  const gaps = after.slice(1, 6).map((t, i) => t - after[i]);
+  A.ok(gaps.every(g => Math.abs(g - 1000 / 60) < 0.01), '...followed at the normal 60/s pace (' + gaps.map(g => g.toFixed(1)).join(' ') + ')');
+}
+
+// ---- 4b. what else starts between still frames: a fidget, a talk turn, a decision whose step lands next tick ------------
+{
+  // (a) the hero at a prop: maybeGlance's fidget comes due 3 ms after a still draw → drawn on the first vsync (+16.7, not +33.3).
+  // The inner life arms it inside a tick (a frame), as maybeGlance does: here, the draw at/after armAt sets nextFidget = now + 3.
+  const w = makeWorld(60), b = body({ goal: 'use', glanceCd: 0, nextFidget: Infinity });
+  w.sb.agent = b;
+  let armAt = Infinity, L = null;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    if (b.goal === 'use' && now >= b.nextFidget) { b.dir = 'west'; b.fidgetAt = now; b.nextFidget = now + 4000; }
+    if (now >= armAt && L == null) { L = now; b.nextFidget = now + 3; }
+  } };
+  w.W.frame(0); w.runUntil(1000);
+  A.ok(w.W.st().stillNow, 'the hero standing at a prop, fidget not due, is still');
+  armAt = w.env.now;
+  w.runUntil(armAt + 200);
+  const next = w.env.draws.find(t => t > L);
+  A.ok(Math.abs(next - (L + 1000 / 60)) < 0.01 && b.fidgetAt === next, 'a fidget due 3 ms after a still draw is drawn on the first vsync (+' + (next - L).toFixed(1) + ' ms; the still tick is +33.3)');
+}
+{
+  // (b) a talking huddle: the next speaker's turn opens between still frames → its mouth moves on that vsync
+  const w = makeWorld(60), hero = body({ id: 'h' }), mate = body({ id: 'm', px: 220 });
+  w.sb.agent = hero; w.sb.crew = [mate];
+  const S = K.TALK_SLOT_MS, SP = K.TALK_SPEAK_MS;
+  let setupAt = null;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    if (setupAt == null && now >= 500) {   // the encounter settles into its hold: slot 0's mouth time is already over
+      setupAt = now;
+      w.sb.socialBeat = { startedAt: now - SP - 10, until: now + 1e6, lastArrivalAt: now - SP - 10 };
+      for (const [i, bd] of [hero, mate].entries()) bd.social = { phase: 'hold', kind: 'huddle', holdAt: now - SP - 10, holdLen: 1e6, seat: i };
+    }
+    const sbt = w.sb.socialBeat;
+    if (sbt) for (const bd of [hero, mate]) {   // talkTurn: seat k talks for the first SPEAK ms of every k-th slot
+      const e = now - sbt.startedAt, k = Math.floor(e / S);
+      bd.talking = bd.speaking = (k % 2) === bd.social.seat && e - k * S < SP;
+      if (bd.talking && bd.talkFrom == null) bd.talkFrom = now;
+    }
+  } };
+  w.W.frame(0); w.runUntil(900);
+  const open = w.sb.socialBeat.startedAt + S;   // slot 1 (the mate's) opens here
+  A.ok(open > 900 && hero.talkFrom == null && mate.talkFrom == null, 'the huddle sits in the silence between turns (slot 1 opens at ' + open.toFixed(1) + ')');
+  A.ok(w.W.st().stillNow, '...and the silence is still');
+  w.runUntil(open + 100);
+  A.ok(Math.abs(mate.talkFrom - w.firstVsyncAtOrAfter(open)) < 0.01, "the mate's mouth moves on the first vsync of its turn (+" + (mate.talkFrom - open).toFixed(1) + ' ms after the slot opens)');
+}
+{
+  // (c) a decision frame: the encounter is DECIDED on a due vsync (only goal + plan change); stepSocial paths it on the NEXT tick
+  const w = makeWorld(60), b = body({ goal: null });
+  w.sb.agent = b;
+  let last = 0, decidedAt = null;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    const dt = last ? now - last : 0; last = now;
+    if (b.state === 'walk') b.px += 0.03 * dt;
+    if (b.goal === 'social' && b.social.phase === 'walk' && b.state !== 'walk') { b.state = 'walk'; b.target = { x: 400, y: 150 }; b.walkFrom = now; }
+    if (b.goal == null && now >= b.idleUntil) { b.goal = 'social'; b.social = { phase: 'walk' }; b.idleUntil = Infinity; decidedAt = now; }
+  } };
+  w.W.frame(0); w.runUntil(1000);
+  const L = w.toNextDraw();
+  b.idleUntil = L + 45;
+  const x0 = b.px;
+  w.runUntil(L + 300);
+  A.ok(Math.abs(decidedAt - (L + 50)) < 0.01, 'the encounter is decided on the first vsync after its clock (+' + (decidedAt - L).toFixed(1) + ' ms)');
+  A.ok(Math.abs(b.walkFrom - (decidedAt + 1000 / 60)) < 0.01, '...and the walk it starts is drawn the very next vsync (+' + (b.walkFrom - decidedAt).toFixed(1) + ' ms after the decision; the still tick is +33.3)');
+  const firstStep = w.env.draws.find(t => t > b.walkFrom);
+  A.ok(Math.abs((firstStep - b.walkFrom) - 1000 / 60) < 0.01, '...at the normal pace from its first step (' + (firstStep - b.walkFrom).toFixed(1) + ' ms, so no step covers two ticks of ground)');
+  A.ok(b.px > x0, '(the body really walked)');
+}
+
+// ---- 4c. what the 10-21 review found the tier slowing or delaying ------------------------------------------------------
+{
+  // (a) a crew body walking OFF screen with its speech bubble up: drawBubble clamps the bubble to the canvas edge and it slides
+  // with the body (setActivityFor's 'working…' lasts 4.2 s while a summoned body walks to an off-camera desk) → normal pace
+  const w = makeWorld(60), mate = body({ id: 'm', px: -400, py: 100, state: 'walk', say: { text: 'working…', until: 1e9 } });
+  w.sb.crew = [mate];
+  let last = 0;
+  w.sb.scene = { step(now) { w.env.draws.push(now); const dt = last ? now - last : 0; last = now; mate.py += 0.03 * dt; } };
+  w.W.frame(0); w.runUntil(1000); w.runUntil(2000);
+  const n = count(w.env.draws, 1000, 2000);
+  A.ok(n >= 59 && n <= 61 && w.W.st().stillWhy === 'speech', 'a body walking off screen with its bubble up is drawn 60x a second (' + n + ', ' + w.W.st().stillWhy + '): the clamped bubble slides along the edge');
+  mate.say = { text: '', until: 0 };
+  w.runUntil(3000);
+  A.eq(w.W.renderPace().mode, 'still', '...and once the bubble is gone the off-screen walker changes nothing you can see: still');
+}
+{
+  // (b) an OFF-SCREEN initiator's decision starts an ON-SCREEN partner walking (planHuddle / a border meeting write the
+  // partner's plan): its clock comes due mid-interval, and the partner's first step is drawn on the first vsync after it
+  const w = makeWorld(60);
+  const init = body({ id: 'off', px: -60, py: 150 });   // 60 world px past the left edge (the pad is 48), inside SOCIAL_NEAR_RADIUS
+  const partner = body({ id: 'on', px: 20, py: 150 });
+  w.sb.crew = [init, partner];
+  let last = 0, decidedAt = null;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    const dt = last ? now - last : 0; last = now;
+    if (now >= init.idleUntil && decidedAt == null) { decidedAt = now; init.idleUntil = Infinity; partner.state = 'walk'; partner.walkFrom = now; }
+    if (partner.state === 'walk') partner.px += 0.03 * dt;
+  } };
+  w.W.frame(0); w.runUntil(1000);
+  A.ok(w.W.st().stillNow, 'an off-screen initiator and its idle on-screen partner are still');
+  const L = w.toNextDraw();
+  init.idleUntil = L + 45;   // still ticks: L+33.3, L+66.7; the first vsync at/after the clock is L+50
+  w.runUntil(L + 200);
+  A.ok(Math.abs(decidedAt - (L + 50)) < 0.01, "the off-screen initiator's decision lands on the first vsync after its clock (+" + (decidedAt - L).toFixed(1) + ' ms, not +66.7)');
+  A.ok(partner.walkFrom === decidedAt && w.env.draws.includes(decidedAt), '...and that draw shows the on-screen partner starting to walk');
+}
+{
+  // (c) the hero's voice starts 3 ms after a still draw: voice.js flips isSpeaking from the audio element's 'play' callback and
+  // calls World.voiceChanged (→ motionWake), so the talk track is drawn on the next vsync, not the next still tick
+  const w = makeWorld(60), hero = body({ id: 'hero' });
+  let speaking = false, mouthAt = null;
+  w.sb.agent = hero; w.sb.Voice = { isListening: () => false, isSpeaking: () => speaking };
+  w.sb.scene = { step(now) { w.env.draws.push(now); if (speaking && mouthAt == null) mouthAt = now; } };
+  w.W.frame(0); w.runUntil(1000);
+  A.ok(w.W.st().stillNow, 'a quiet hero is still');
+  const L = w.toNextDraw();
+  w.at(L + 3, () => { speaking = true; w.W.motionWake(); });   // Voice.onSpeakStart → setSpeaking → World.voiceChanged()
+  w.runUntil(L + 200);
+  A.ok(Math.abs(mouthAt - (L + 1000 / 60)) < 0.01, 'the voice starting between frames is drawn on the next vsync (+' + (mouthAt - L).toFixed(1) + ' ms; the still tick is +33.3)');
+  const L2 = w.toNextDraw();
+  A.eq(w.W.st().stillWhy, 'speech', '...and the floor keeps the normal pace while it speaks');
+  w.at(L2 + 4, () => { speaking = false; w.W.motionWake(); });   // onSpeakEnd: the mouth stops and a voice-held bubble vanishes
+  w.runUntil(L2 + 100);
+  const after = w.env.draws.find(t => t > L2 + 4);
+  A.ok(Math.abs(after - (L2 + 1000 / 60)) < 0.01, '...and its end is drawn on the next vsync too (+' + (after - L2).toFixed(1) + ' ms)');
+  const wcode = strip(world);
+  A.ok(/voiceChanged: \(\) => \{ motionWake\(\); \}/.test(wcode), 'World.voiceChanged is the wake voice.js calls (test/render-still-wakes.test.js boots the real voice.js)');
+}
+{
+  // (d) a planted body breathing (the hero standing idle in the default view): the sub-pixel breath is _renderDrift, not
+  // motion — the scene is still at 30/s, and every one of those frames draws the breath at its true phase
+  const w = makeWorld(60), hero = body({ id: 'hero', _renderDrift: true, _renderLive: false });
+  w.sb.agent = hero; walkerScene(w, hero);
+  w.W.frame(0); w.runUntil(1000); w.runUntil(2000);
+  const n = count(w.env.draws, 1000, 2000);
+  A.ok(n >= 29 && n <= 31 && w.W.renderPace().mode === 'still', 'a hero standing and breathing is drawn 30x a second (' + n + ') — it was 60, so the tier never engaged with a body on screen');
+  hero.say = { text: 'hello', until: 2600 };
+  w.runUntil(2500);
+  const m = count(w.env.draws, 2050, 2500);
+  A.ok(m >= 26 && w.W.st().stillWhy === 'speech', '...but with a bubble over its head (which rounds to whole px as the head swells) it keeps the normal pace (' + m + ' draws in 450 ms)');
+}
+
+// ---- 4d. DUE LEAD: a due change is met by rAF, never by a timer that can fire a Windows tick late (final fixes 10-21) ---
+// The scene arms a body's idle clock d ms after a draw (inside the frame, as the inner life does); its walk must be drawn on
+// the first vsync at/after the clock, whatever the timers do. WebView2 on Windows can fire a timer a whole ~15.6 ms system
+// tick late: the old rule (a timer 2 ms before the change) then missed the vsync and drew the change a frame late.
+function dueRun(d, opts) {
+  const w = makeWorld(60, opts), b = body();
+  w.sb.agent = b;
+  let last = 0, armAt = Infinity, L = null;
+  w.sb.scene = { step(now) {
+    w.env.draws.push(now);
+    const dt = last ? now - last : 0; last = now;
+    if (b.state === 'idle' && now >= b.idleUntil) { b.state = 'walk'; b.walkFrom = now; }
+    if (b.state === 'walk') b.px += 0.03 * dt;
+    if (now >= armAt && L == null) { L = now; b.idleUntil = now + d; }
+  } };
+  w.W.frame(0); w.runUntil(1000);
+  armAt = w.env.now;
+  w.runUntil(armAt + d + 200);
+  return { w, L, at: b.walkFrom, want: w.firstVsyncAtOrAfter(L + d) };
+}
+{
+  // the rule before the fix: the still wait's timer aims 2 ms before the change (inside the last vsync too), and a frame's
+  // verdict re-books only a timer that would fire after the change
+  const OLD = {
+    pacer: src => src.replace('still && stillDue - now > lead ? Math.min(stillTickTimerAt(pace), stillDue - lead) - now : 0', 'still ? Math.min(lastDrawnAt + pace, stillDue) - now - 2 : 0'),
+    verdict: src => src.replace('stillDue - dueLeadMs() < paceTimerAt - 0.5', 'stillDue < paceTimerAt'),
+  };
+  A.ok(OLD.pacer(world.slice(pFrom, pTo)) !== world.slice(pFrom, pTo) && OLD.verdict(world.slice(vFrom, vTo)) !== world.slice(vFrom, vTo),
+    '(the mutation check finds the DUE LEAD rule in scheduleFrame and the verdict\'s re-book)');
+  // +60 ms: the change is known a still tick ahead, so the draw before it books the wait toward it
+  const old = dueRun(60, Object.assign({ timerLate: 15.6 }, OLD));
+  A.ok(old.at - old.want > 1, 'MUTATION CHECK — the old rule, timers 15.6 ms late: a change due +60 ms is drawn a vsync late (+' + (old.at - old.L).toFixed(1) + ' ms; its vsync is +' + (old.want - old.L).toFixed(1) + ')');
+  A.ok(old.w.W.renderPace().dueLate === 1, "...and renderPace's dueLate counts it (the readout catches a miss)");
+  for (const d of [60, 10]) {
+    const r = dueRun(d, { timerLate: 15.6 });
+    A.ok(Math.abs(r.at - r.want) < 0.01, 'timers 15.6 ms late: a change due +' + d + ' ms lands on its vsync (+' + (r.at - r.L).toFixed(1) + ' ms) — rAF, not a timer, covers the last vsync before it');
+    const rp = r.w.W.renderPace();
+    A.ok(rp.dueDraws === 1 && rp.dueLate === 0 && rp.dueLatMaxMs <= 1000 / 60 && rp.dueLatAvgMs === rp.dueLatMaxMs, '...and renderPace reads it: one due change drawn, none late (latency ' + rp.dueLatMaxMs + ' ms)');
+  }
+  const miss = [], lateCount = [];
+  for (const lag of [0, 4, 15.6]) for (let d = 1; d <= 400; d += d < 60 ? 2.3 : 17.9) {
+    const x = dueRun(d, { timerLate: lag });
+    if (!(Math.abs(x.at - x.want) < 0.01)) miss.push(lag + 'ms late, due +' + d.toFixed(1) + ' → drawn +' + (x.at - x.L).toFixed(1) + ' (want +' + (x.want - x.L).toFixed(1) + ')');
+    if (x.w.W.renderPace().dueLate) lateCount.push(lag + '/' + d.toFixed(1));
+  }
+  A.ok(!miss.length, 'SWEEP — due +1..400 ms, timers on time, 4 ms and 15.6 ms late: every change lands on the first vsync at/after it' + (miss.length ? ' — missed: ' + miss.slice(0, 6).join('; ') : ''));
+  A.ok(!lateCount.length, '...and renderPace counts none of them late' + (lateCount.length ? ' — ' + lateCount.slice(0, 6).join(', ') : ''));
+  // the long still wait stays a timer: a still floor with nothing due spins no rAF, even with late timers
+  const w = makeWorld(60, { timerLate: 15.6 }), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0); w.runUntil(1000);
+  const d0 = w.env.draws.length, r0 = w.env.rafCalls;
+  w.runUntil(3000);
+  const dn = w.env.draws.length - d0, rn = w.env.rafCalls - r0;
+  A.ok(rn <= dn + 1 && w.W.renderPace().mode === 'still', 'the long still wait is still a timer: one rAF callback per still draw, no spin (' + rn + ' callbacks, ' + dn + ' draws in 2 s, timers 15.6 ms late)');
+  A.ok(Math.abs(w.W.dueLeadMs() - (1000 / 60 + 4)) < 0.5, 'the lead is one learned vsync + 4 ms (' + w.W.dueLeadMs().toFixed(1) + ' ms)');
+}
+
+// ---- 4e. the final fixes' wakes, through the real pacer: a camera cut from a timer, a layout edit, start stamps ------------
+const WAKE_SRC = (world.match(/  const WAKE_API = new Set\(\[[\s\S]*?\]\);/) || [''])[0] + '\n' + A.fnBody(code, 'function wakeOnCall(api)');
+A.ok(/const WAKE_API/.test(WAKE_SRC) && /function wakeOnCall\(api\)/.test(WAKE_SRC), 'world.js carries WAKE_API and wakeOnCall (lifted below)');
+{
+  // (a) frameReviewRoom: stationcommands.js frames what the builder built from a setTimeout (700 ms after the build) — the real
+  // function, wrapped by the real wakeOnCall, cuts the camera on the next vsync; unwrapped (before the fix) it waited out a still tick
+  const extra = WAKE_SRC + '\n' + A.fnBody(code, 'function frameReviewRoom(id)') + '\n' + A.fnBody(code, 'function fitCamera()') + `
+var MINZ = 0.5, MAXZ = 8, fitW = 0, fitH = 0, StationBake = { WALL: { up: 24, skirt: 6 } };
+function clampz(v, a, b) { return Math.max(a, Math.min(b, v)); }
+var station = { serialize: () => ({ rooms: { r1: { rects: [{ x1: 2, y1: 2, x2: 9, y2: 7 }] } } }) };
+this.API = wakeOnCall({ frameReviewRoom }); this.rawFrameReviewRoom = frameReviewRoom;`;
+  const run = (fn) => {
+    const w = makeWorld(60, { extra }), b = body();
+    w.sb.agent = b; w.sb.cache = { W: 400, H: 300 }; w.sb.geo = { origin: { tx: 0, ty: 0 } };
+    const seen = [];
+    w.sb.scene = { step(now) { w.env.draws.push(now); seen.push([now, w.sb.scale]); } };
+    w.W.frame(0); w.runUntil(1000);
+    const L = w.toNextDraw(), s0 = w.sb.scale, c0 = w.W.renderPace().stillWhyCounts;
+    w.at(L + 5, () => fn(w));
+    w.runUntil(L + 120);
+    const cut = seen.find(([t, s]) => t > L && s !== s0), c1 = w.W.renderPace().stillWhyCounts;
+    return { w, L, cut, moved: (c1.wake || 0) + (c1.camera || 0) - (c0.wake || 0) - (c0.camera || 0) };
+  };
+  const ok = run(w => w.sb.API.frameReviewRoom('r1'));
+  A.ok(ok.cut && Math.abs(ok.cut[0] - (ok.L + 1000 / 60)) < 0.01, "World.frameReviewRoom from a timer between still frames: the camera cut is drawn on the next vsync (+" + (ok.cut ? (ok.cut[0] - ok.L).toFixed(1) : '?') + ' ms)');
+  A.ok(ok.moved >= 1 && ok.w.W.renderPace().mode === 'still', '...that frame is judged moving (' + ok.moved + '), and the new framing then goes still again');
+  const raw = run(w => w.sb.rawFrameReviewRoom('r1'));
+  A.ok(raw.cut && raw.cut[0] - raw.L > 30, 'MUTATION CHECK — unwrapped (before the fix), the same cut waited out the still tick (+' + (raw.cut ? (raw.cut[0] - raw.L).toFixed(1) : '?') + ' ms)');
+}
+{
+  // (b) station.onChange: a layout edit that lands after an await (a builder step, a restyle, an undo) wakes a still floor — the
+  // real subscriber from loadStation
+  const sub = (A.fnBody(code, 'function loadStation(st)').match(/if \(station && station\.onChange\) unsub = station\.onChange\(p => \{[^\n]*\}\);/) || [''])[0];
+  A.ok(/motionWake\(\); \}\);$/.test(sub), "loadStation's station.onChange subscriber ends in motionWake()");
+  const extra = 'var geoDirty = false, bakeEditPending = false, unsub = null, onEdit = null;\nvar station = { onChange(fn) { onEdit = fn; return () => {}; } };\n' + sub + '\nthis.edit = p => onEdit(p); this.dirty = () => geoDirty;';
+  const w = makeWorld(60, { extra }), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0); w.runUntil(1000);
+  const L = w.toNextDraw();
+  w.at(L + 4, () => w.sb.edit({ staticBakeUnchanged: true }));   // a prop placed after an await
+  w.runUntil(L + 100);
+  const next = w.env.draws.find(t => t > L);
+  A.ok(w.sb.dirty() && Math.abs(next - (L + 1000 / 60)) < 0.01, 'a layout edit between still frames is drawn on the next vsync (+' + (next - L).toFixed(1) + ' ms; the still tick is +33.3)');
+}
+{
+  // (c) animation start stamps set between frames read the wall clock, never the last frame's fnow (up to 33 ms old on a still
+  // floor, so the flash / ripple would start part-way through): the real dockArrival, onWorkitemDeliver and spawnAgent
+  const extra = A.fnBody(code, 'function dockArrival(p)') + '\n' + A.fnBody(code, 'function onWorkitemDeliver(bx)') + '\n' + A.fnBody(code, 'function spawnAgent(a)') + `
+var fnow = 0, routingPlan = { dockBays: [{ propId: 'bay1', agentId: 'm' }], bayTileToAgent: {} }, U = { irnd: (a) => a };
+function bodyForAgent(id) { return crew.find(x => x.agentId === id) || null; }
+function wakeIn() { wakeAt = performance.now(); }
+function workerFoot() { return { x: 300, y: 150 }; }
+function crewColor() { return '#fff'; }
+function makeCrewBody(id, name, color, x, y) { return { id: 'c_' + id, agentId: id, name, px: x, py: y, dir: 'south', state: 'idle', idleUntil: Infinity, glanceCd: Infinity, _pose: 'p', _renderFrame: 0 }; }
+function greetNewcomer() {}
+this.dock = dockArrival; this.deliver = onWorkitemDeliver; this.spawn = spawnAgent;`;
+  const w = makeWorld(60, { extra }), mate = body({ id: 'm1', agentId: 'm', px: 260 });
+  w.sb.agent = body(); w.sb.crew = [mate];
+  w.sb.scene = { step(now) { w.env.draws.push(now); w.sb.fnow = now; } };   // frameBody: fnow = now
+  w.W.frame(0); w.runUntil(1000);
+  const L = w.toNextDraw();
+  w.runUntil(L + 30);   // 30 ms into a still interval: fnow is still L
+  w.sb.dock({ agentId: 'm' });
+  A.ok(w.sb.dockFlashes.get('bay1') === L + 30 && mate.wakeAt === L + 30, 'dockArrival between frames: the dock flash and the ripple start on the wall clock (+30 ms), not the stale fnow (' + (w.sb.dockFlashes.get('bay1') - L) + ', ' + (mate.wakeAt - L) + ')');
+  w.runUntil(L + 2000); const L2 = w.toNextDraw(); w.runUntil(L2 + 25);
+  w.sb.deliver({ x: 1, y: 1, payload: { agentId: 'm' } });
+  A.ok(mate.wakeAt === L2 + 25, 'a crate delivered to a crew body: its wake ripple starts on the wall clock (+' + (mate.wakeAt - L2) + ' ms)');
+  w.runUntil(L2 + 2000); const L3 = w.toNextDraw(); w.runUntil(L3 + 21);
+  w.sb.spawn({ id: 'newbie', name: 'NEW' });
+  const nb = w.sb.crew.find(x => x.agentId === 'newbie');
+  A.ok(nb && nb.wakeAt === L3 + 21, 'a summoned body materializing between frames: its ripple starts on the wall clock (+' + (nb ? nb.wakeAt - L3 : '?') + ' ms)');
+  A.ok(/firstShipPulse = \{ at: \(typeof performance !== 'undefined'\) \? performance\.now\(\) : fnow, tiles: receipt\.tiles \};/.test(A.fnBody(code, 'function noteFirstShip(p)')),
+    "noteFirstShip's pulse starts on the wall clock (test/first-ship-receipt.test.js drives it)");
+}
+
+// ---- 5. a wake from outside the frame (input, a harness event, a World API call) lands on the next vsync ------------
+{
+  const w = makeWorld(60), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0);
+  w.runUntil(1000);
+  const L = w.toNextDraw();
+  w.at(L + 5, () => { b.state = 'walk'; w.W.motionWake(); });   // e.g. World.setActivity → the body walks, from outside the frame
+  w.runUntil(L + 100);
+  const next = w.env.draws.find(t => t > L);
+  A.ok(Math.abs(next - (L + 1000 / 60)) < 0.01, 'a wake 5 ms into a still interval is drawn on the very next vsync (+' + (next - L).toFixed(1) + ' ms)');
+  A.eq(w.W.st().stillWhy, 'body', '...and the floor stays at the normal pace while the body walks');
+
+  const w2 = makeWorld(60), b2 = body();
+  w2.sb.agent = b2; walkerScene(w2, b2);
+  w2.W.frame(0); w2.runUntil(1000);
+  const L2 = w2.toNextDraw();
+  w2.at(L2 + 3, () => w2.W.userActive());   // a pointermove on the window
+  w2.runUntil(L2 + 100);
+  const next2 = w2.env.draws.find(t => t > L2);
+  A.ok(Math.abs(next2 - (L2 + 1000 / 60)) < 0.01, 'a hand on the window wakes a still floor on the next vsync');
+  A.eq(w2.W.st().stillWhy, 'input', '...and holds the normal pace while the hand is there (hover tags, glances)');
+  w2.runUntil(L2 + w2.W.consts.INPUT_HOLD_MS + 300);
+  A.eq(w2.W.renderPace().mode, 'still', '...and the floor goes still again once the hand has been away INPUT_HOLD_MS');
+}
+
+// ---- 6. the caller cap and the budget keep their meaning ------------------------------------------------------------
+{
+  const w = makeWorld(60), b = body();
+  w.sb.agent = b; walkerScene(w, b);
+  w.W.frame(0); w.runUntil(1000);
+  w.sb.frameCapMs = 48;
+  A.eq(w.W.paceMs(w.env.now), 48, "a caller's frame cap (HUD widget) is its stated intent: the still tier never overrides it");
+  A.eq(w.W.renderPace().mode, 'capped', "...and renderPace says 'capped'");
+  w.sb.frameCapMs = 0;
+  for (let i = 0; i < 80; i++) w.W.noteDrawCost(40);
+  A.ok(Math.abs(w.W.paceMs(w.env.now) - 40 / 0.7) < 0.5, 'a slow floor stretches past the still pace by its budget (the budget still wins)');
+  A.eq(w.W.renderPace().mode, 'budget', "...and renderPace says 'budget'");
+  w.W.resetBudget();
+}
+
+// ---- 7. every motion source flips the still flag; ambient ones do not ---------------------------------------------------
+{
+  const w = makeWorld(60), sb = w.sb, W = w.W;
+  const hero = body({ id: 'hero' }), mate = body({ id: 'mate', px: 300 });
+  sb.agent = hero; sb.crew = [mate];
+  let now = 5000;
+  const verdict = (inFrame) => { W.stillBegin(); if (inFrame) inFrame(); W.stillVerdict(now); return W.st(); };
+  const settle = () => { verdict(); return verdict(); };
+  A.ok(settle().stillNow, 'a settled scene with two idle bodies is still');
+  const flip = (why, label, mutate, revert, inFrame) => {
+    mutate();
+    const s = verdict(inFrame);
+    A.ok(!s.stillNow && s.stillWhy === why, label + ' → not still (' + why + ')' + (s.stillWhy !== why ? ' [got ' + s.stillWhy + ']' : ''));
+    if (revert) revert();
+    now += 2000;   // past every hold window
+    A.ok(settle().stillNow, '...and still again once it stops (' + label + ')');
+  };
+  const calm = (label, mutate, revert) => {
+    mutate();
+    const s = settle();
+    A.ok(s.stillNow, label + ' → still (ambient)' + (s.stillNow ? '' : ' [got ' + s.stillWhy + ']'));
+    if (revert) revert();
+    settle();
+  };
+  // wake
+  flip('wake', 'motionWake during the frame (a bus event, a World API call)', () => {}, null, () => W.motionWake());
+  // camera
+  flip('camera', 'a pan', () => { sb.panX += 7; });
+  flip('camera', 'a zoom', () => { sb.scale *= 1.1; });
+  flip('camera', 'a focus ease running', () => { sb.camLerp = { scale: 3, panX: 0, panY: 0 }; }, () => { sb.camLerp = null; });
+  // the ease's own gate (frameBody: camLerp && !camAnim && !camLock): under a follow-lock a camLerp is dormant — it moves nothing
+  calm('a focus ease left dormant under a follow-lock (the lock owns the camera; the ease runs only once it lets go)',
+    () => { sb.camLerp = { scale: 3, panX: 0, panY: 0 }; sb.camLock = { id: 'hero', sc: 3, source: 'session' }; }, () => { sb.camLerp = null; sb.camLock = null; });
+  flip('camera', 'a scripted camera move', () => { sb.camAnim = { t: 0 }; }, () => { sb.camAnim = null; });
+  flip('camera', 'the hand hold after a drag', () => { sb.performance.now = () => now; W.cameraMoved(); }, null);
+  // input
+  flip('input', 'a hand on the window', () => { W.userActive(); }, null);
+  flip('input', "the hero's mic listening", () => { sb.Voice = { isListening: () => true, isSpeaking: () => false }; }, () => { delete sb.Voice; });
+  flip('speech', "the hero's voice speaking", () => { sb.Voice = { isListening: () => false, isSpeaking: () => true }; }, () => { delete sb.Voice; });
+  // bodies (hero and crew alike)
+  flip('body', 'a body walking', () => { mate.state = 'walk'; }, () => { mate.state = 'idle'; });
+  flip('body', 'a body moved', () => { hero.px += 1; });
+  flip('body', 'a body turned', () => { mate.dir = 'west'; });
+  flip('body', 'a body changed pose (a blink)', () => { hero._pose = 'set.blink.south'; });
+  flip('body', 'a body changed drawn frame', () => { mate._renderFrame = 1; });
+  flip('body', 'a body pivoting', () => { hero._rW = 3; }, () => { hero._rW = 0; });
+  flip('body', 'a pose dissolving', () => { mate._renderPoseFade = 0.4; }, () => { mate._renderPoseFade = null; });
+  flip('body', 'a body working (typing; its desk shows the run)', () => { hero.working = true; }, () => { hero.working = false; });
+  flip('body', 'a body speaking', () => { mate.speaking = true; }, () => { mate.speaking = false; });
+  flip('body', 'a body talking (silent exchange)', () => { mate.talking = true; }, () => { mate.talking = false; });
+  flip('body', 'a wake ripple', () => { mate.wakeAt = now; });
+  flip('body', 'a level-up surge', () => { mate.levelUpAt = now; });
+  flip('body', 'a summoned worker glowing', () => { mate.workUntil = now + 900; });
+  flip('body', "a body's drawn geometry moving on the clock (the idle bob, the speech accent easing out: _renderLive)", () => { mate._renderLive = true; }, () => { mate._renderLive = false; });
+  flip('body', 'a decision: the goal changed (what it starts shows next tick)', () => { mate.goal = 'inspect'; });
+  flip('body', 'a decision: the state changed', () => { hero.state = 'social'; }, () => { hero.state = 'idle'; });
+  flip('body', 'a body holding a walk target (about to step)', () => { mate.target = { x: 1, y: 1 }; }, () => { mate.target = null; });
+  flip('body', 'a social plan still to walk (stepSocial paths it next tick)', () => { mate.social = { phase: 'walk' }; }, () => { mate.social = null; });
+  flip('body', 'a gather plan still to walk (stepGather paths it next tick)', () => { mate.gather = { arrived: false }; }, () => { mate.gather = null; });
+  flip('body', 'a chase due to repath toward the cursor', () => { mate.chase = { phase: 'pursue', repathAt: now - 1 }; }, () => { mate.chase = null; });
+  flip('body', "the hero's glance roll pending (maybeGlance rolls every tick once glanceCd lapses)", () => { hero.glanceCd = now - 1; }, () => { hero.glanceCd = Infinity; });
+  flip('body', "the hero at a prop with its fidget lapsed", () => { hero.goal = 'use'; hero.glanceCd = 0; hero.nextFidget = now - 1; }, () => { hero.goal = null; hero.glanceCd = Infinity; hero.nextFidget = 0; });
+  flip('speech', 'a peer-chatter line', () => { mate.chatter = { until: now + 800 }; }, () => { mate.chatter = null; });
+  // a canvas-clamped overlay follows its body (review 10-21): drawBubble / drawNameplate clamp to the canvas and track the head
+  const offWalk = (over) => () => { Object.assign(mate, { px: -400, py: 100 }, over); mate.px -= 3; };   // off the left edge, and it moved this frame
+  const homeMate = () => { Object.assign(mate, { px: 300, py: 150, say: null, state: 'idle' }); sb.hoverAgent = null; };
+  flip('speech', 'a body walking OFF screen with its speech bubble up (the bubble slides along the canvas edge)', offWalk({ state: 'walk', say: { text: 'working…', until: now + 4200 } }), homeMate);
+  flip('speech', 'the hero walking off screen with its bubble up', () => {
+    Object.assign(hero, { px: -400, py: 100, say: { text: 'on my way', until: now + 3000 } }); hero.px -= 3;
+  }, () => { Object.assign(hero, { px: 200, py: 150, say: null }); });
+  flip('speech', 'the hovered body walking off screen (its nameplate is clamped to the canvas too)', () => { offWalk({ state: 'walk' })(); sb.hoverAgent = mate; }, homeMate);
+  flip('speech', 'an off-screen body with its bubble up whose drawn geometry bobs (_renderLive)', () => { Object.assign(mate, { px: -400, py: 100, say: { text: 'hm', until: now + 3000 }, _renderLive: true }); verdict(); }, () => { mate._renderLive = false; homeMate(); });
+  flip('speech', "a planted body breathing under its bubble (the bubble rounds to whole px: _renderDrift)", () => { mate.say = { text: 'ok', until: now + 3000 }; mate._renderDrift = true; }, () => { mate._renderDrift = false; mate.say = null; });
+  flip('speech', 'the hovered body breathing under its nameplate', () => { sb.hoverAgent = mate; mate._renderDrift = true; }, () => { mate._renderDrift = false; sb.hoverAgent = null; });
+  // the floor's movers
+  flip('crate', 'a crate riding', () => { sb.convey = { boxCount: () => 1 }; }, () => { sb.convey = null; });
+  flip('crate', 'a ghost projection riding', () => { sb.geo = { belts: [] }; sb.ghost = { nextChange: n => n }; }, () => { sb.ghost = null; sb.geo = null; });
+  flip('crate', 'a hand-off box in flight', () => { sb.handoffBoxes.push({}); }, () => { sb.handoffBoxes.length = 0; });
+  flip('crate', 'a SEND TO crate in flight', () => { sb.sendCrates.push({ t0: now, born: now - 100 }); }, () => { sb.sendCrates.length = 0; });
+  flip('crate', 'a queue jam bobbing (drawQueueJam)', () => {}, null, () => W.stillMove('crate'));
+  flip('prop', 'a prop with live content (the prop pass)', () => {}, null, () => W.stillMove('prop'));
+  flip('prop', "a drawn prop whose art moves on its clock (PropSprites.clockNext: a native draw, fish, a screen's sweep)", () => { sb.PropSprites = { clockNext: () => now }; }, () => { delete sb.PropSprites; });
+  flip('prop', 'a harness pulse decaying (a tool-fire surge, a connector packet: PropSprites.pulsing)', () => { sb.PropSprites = { pulsing: () => true, clockNext: () => Infinity }; }, () => { delete sb.PropSprites; });
+  flip('sky', 'a meteor crossing the sky (SpaceBG.nextChange)', () => { sb.SpaceBG = { nextChange: n => n }; }, () => { delete sb.SpaceBG; });
+  flip('belt', 'an energized belt in frame (no plan: every tile live)', () => { sb.geo = { belts: [{ x: 4, y: 4 }] }; sb.beltLiveSet = null; }, () => { sb.geo = null; });
+  flip('belt', 'an energized belt in frame (on the compiled live route)', () => { sb.geo = { belts: [{ x: 4, y: 4 }, { x: 5, y: 4 }] }; sb.beltLiveSet = { '5,4': true }; }, () => { sb.geo = null; sb.beltLiveSet = null; });
+  // canvas overlays and ceremonies
+  flip('fx', 'the CRT roll bar sweeping (drawCRT)', () => {}, null, () => W.stillMove('fx'));
+  flip('fx', 'a desk flash', () => { sb.deskFlash.set('a', { at: now }); }, () => sb.deskFlash.clear());
+  flip('fx', 'a dock flash', () => { sb.dockFlashes.set('p', now); }, () => sb.dockFlashes.clear());
+  flip('fx', 'the pin flourish', () => { sb.pinFlourishAt = now; });
+  flip('fx', 'the FIRST SHIP pulse', () => { sb.firstShipPulse = { at: now }; }, () => { sb.firstShipPulse = null; });
+  flip('fx', "a SHIPPED pallet's newest crate popping in (drawPallet's 900 ms lift and glint)", () => { sb.palletPopAt = now - 850; });
+  flip('fx', 'the awakening', () => { sb.awakeFrozen = true; }, () => { sb.awakeFrozen = false; });
+  flip('fx', 'the arrival', () => { sb.arrivalScene = {}; }, () => { sb.arrivalScene = null; });
+  flip('fx', 'the kindling', () => { sb.kindleArmed = true; }, () => { sb.kindleArmed = false; });
+  flip('fx', 'the flood', () => { sb.floodAt = now; }, () => { sb.floodAt = 0; });
+  flip('fx', 'the dawn veil easing', () => { sb.wakeDark = 0.4; }, () => { sb.wakeDark = 0; });
+  flip('fx', 'the dawn bloom', () => { sb.dawnAt = now; });
+  flip('fx', 'the ignition spark', () => { sb.sparkAt = now; });
+  flip('fx', 'color-into-being', () => { sb.bornAt = now; });
+  flip('fx', 'a truth flare', () => { sb.truthPulseAt = now; });
+  flip('fx', "the hero's wake ripple", () => { sb.wakeAt = now; });
+  flip('fx', "the hero's level surge", () => { sb.levelUpAt = now; });
+  // ambient — none of these is motion
+  calm('a body nudged by float dust (< 0.01 px)', () => { hero.px += 0.001; });
+  calm('a body walking OFF screen', () => { mate.px = -5000; mate.state = 'walk'; }, () => { mate.state = 'idle'; mate.px = 300; });
+  calm('a cold belt (not on the live route)', () => { sb.geo = { belts: [{ x: 4, y: 4 }] }; sb.beltLiveSet = { '9,9': true }; }, () => { sb.geo = null; sb.beltLiveSet = null; });
+  calm('an energized belt out of frame', () => { sb.geo = { belts: [{ x: 400, y: 400 }] }; sb.beltLiveSet = null; }, () => { sb.geo = null; });
+  calm('a ghost waiting to spawn', () => { sb.geo = { belts: [] }; sb.ghost = { nextChange: () => now + 2500 }; }, () => { sb.ghost = null; sb.geo = null; });
+  calm('a desk flash that has run its course (its pass skipped: overlays off)', () => { sb.deskFlash.set('a', { at: now - 5000 }); sb.dockFlashes.set('p', now - 5000); sb.firstShipPulse = { at: now - 5000 }; }, () => { sb.deskFlash.clear(); sb.dockFlashes.clear(); sb.firstShipPulse = null; });
+  calm('a static speech bubble', () => { hero.say = { text: 'hello', until: now + 3000 }; }, () => { hero.say = null; });
+  calm("a planted body's breath (_renderDrift: a sub-pixel swell every still frame draws at its true phase)", () => { hero._renderDrift = true; mate._renderDrift = true; }, () => { hero._renderDrift = false; mate._renderDrift = false; });
+  calm('a static speech bubble over a body standing off screen (clamped, but nothing moves it)', () => { Object.assign(mate, { px: -400, py: 100, say: { text: 'hm', until: now + 3000 } }); }, () => { Object.assign(mate, { px: 300, py: 150, say: null }); });
+  calm('a body walking off screen whose bubble has run its time', () => { Object.assign(mate, { px: -5000, state: 'walk', say: { text: 'bye', until: now - 10 } }); }, () => { Object.assign(mate, { px: 300, state: 'idle', say: null }); });
+  calm('a bubble over a walker off screen with overlays off (the HUD widget shows only the world)', () => { sb.overlaysOn = false; Object.assign(mate, { px: -5000, state: 'walk', say: { text: 'hm', until: now + 3000 } }); }, () => { sb.overlaysOn = true; Object.assign(mate, { px: 300, state: 'idle', say: null }); });
+  calm('a pallet pop that has run its course', () => { sb.palletPopAt = now - 5000; }, () => { sb.palletPopAt = -1e9; });
+  calm('every drawn prop static, alpha-only glow or frozen (clockNext Infinity, no pulse)', () => { sb.PropSprites = { clockNext: () => Infinity, pulsing: () => false }; }, () => { delete sb.PropSprites; });
+  calm('a sky with nothing crossing (drift and twinkle are ambient)', () => { sb.SpaceBG = { nextChange: () => Infinity }; }, () => { delete sb.SpaceBG; });
+  calm('a meteor on a LANDED station (no sky is drawn there)', () => { sb.SpaceBG = { nextChange: n => n }; sb.Terrain = { active: () => true }; }, () => { delete sb.SpaceBG; delete sb.Terrain; });
+  calm('a meteor during a still render (no sky in it)', () => { sb.SpaceBG = { nextChange: n => n }; sb.stillPass = { fill: '#000' }; }, () => { delete sb.SpaceBG; sb.stillPass = null; });
+  calm("an asleep hero with its glance cooldown lapsed (maybeGlance skips sleep)", () => { hero.goal = 'sleep'; hero.glanceCd = 0; }, () => { hero.goal = null; hero.glanceCd = Infinity; });
+  calm('a crew body with its glance cooldown lapsed (crew have no maybeGlance)', () => { mate.glanceCd = 0; }, () => { mate.glanceCd = Infinity; });
+  calm('a talk encounter in the silence between turns', () => {
+    sb.socialBeat = { startedAt: now - K.TALK_SPEAK_MS - 100, until: now + 1e6, lastArrivalAt: now - 5000 };
+    mate.social = { phase: 'hold', kind: 'huddle', holdAt: now - 5000, holdLen: 1e6 };
+  }, () => { sb.socialBeat = null; mate.social = null; });
+
+  // ---- the changes the frame can see coming: stillDue -------------------------------------------------------------
+  const due = (label, mutate, at, revert, inFrame) => {
+    mutate();
+    verdict(inFrame); const s = verdict(inFrame);
+    A.ok(s.stillNow && Math.abs(s.stillDue - at) < 1e-6, label + ' sets stillDue (+' + (s.stillDue - now).toFixed(0) + ' ms' + (s.stillNow ? '' : ', got motion: ' + s.stillWhy) + ')');
+    if (revert) revert();
+    settle();
+  };
+  due("an idle body's next decision (idleUntil)", () => { mate.idleUntil = now + 700; }, now + 700, () => { mate.idleUntil = Infinity; });
+  due('a glance cooldown ending (glanceCd)', () => { hero.glanceCd = now + 450; }, now + 450, () => { hero.glanceCd = Infinity; });
+  due("a glance turning back", () => { hero.glance = { until: now + 380, dir: 'west' }; }, now + 380, () => { hero.glance = null; });
+  due("a body's next fidget (nextFidget)", () => { mate.nextFidget = now + 640; }, now + 640, () => { mate.nextFidget = 0; });
+  due("the hero at a prop: its fidget, not its lapsed glance cooldown", () => { hero.goal = 'use'; hero.glanceCd = 0; hero.nextFidget = now + 820; }, now + 820, () => { hero.goal = null; hero.glanceCd = Infinity; hero.nextFidget = 0; });
+  due("the hero watching a belt: THE LOOK-UP's floor (lookCd), not its lapsed glance cooldown", () => { hero.goal = 'watch'; hero.glanceCd = 0; hero.lookCd = now + 930; }, now + 930, () => { hero.goal = null; hero.glanceCd = Infinity; hero.lookCd = 0; });
+  due("the next blink / clock-driven pose frame (drawBody's _renderNextAt)", () => { mate._renderNextAt = now + 120; }, now + 120, () => { mate._renderNextAt = 0; });
+  due('a speech bubble vanishing', () => { mate.say = { text: 'ok', until: now + 2600 }; }, now + 2600, () => { mate.say = null; });
+  due('an encounter hold ending (from the last arrival)', () => {
+    sb.socialBeat = { until: now + 1e6, lastArrivalAt: now - 100 };
+    mate.social = { phase: 'hold', kind: 'watch', holdAt: now - 400, holdLen: 900 };
+  }, now + 800, () => { sb.socialBeat = null; mate.social = null; });
+  due('the next talk turn opening (talkTurn slots)', () => {
+    const s0 = now - K.TALK_SLOT_MS - (K.TALK_SPEAK_MS + 150);   // slot 1, past its mouth time: slot 2 opens next
+    sb.socialBeat = { startedAt: s0, until: now + 1e6, lastArrivalAt: s0 };
+    mate.social = { phase: 'hold', kind: 'huddle', holdAt: s0, holdLen: 1e6 };
+  }, now + K.TALK_SLOT_MS - K.TALK_SPEAK_MS - 150, () => { sb.socialBeat = null; mate.social = null; });
+  due('a chase stare ending', () => { mate.chase = { phase: 'stare', until: now + 900, endAt: now - 1, hardUntil: now + 5000, repathAt: now - 1 }; }, now + 900, () => { mate.chase = null; });
+  due('a chase between repaths', () => { mate.chase = { phase: 'pursue', endAt: now + 3000, hardUntil: now + 9000, repathAt: now + 600 }; }, now + 600, () => { mate.chase = null; });
+  due('the cursor going stale under a chase', () => { sb.lastCursor = { wx: 0, wy: 0, t: now - K.CURSOR_FRESH_MS + 300 }; mate.chase = { phase: 'pursue', endAt: now + 3000, hardUntil: now + 9000, repathAt: now + 600 }; }, now + 300, () => { mate.chase = null; sb.lastCursor = { wx: 0, wy: 0, t: -1e9 }; });
+  due('a mimic ending', () => { mate.mimic = { until: now + 450 }; }, now + 450, () => { mate.mimic = null; });
+  due('a held SEND TO crate releasing at its grace', () => { sb.sendCrates.push({ t0: 0, born: now - 1000 }); }, now + 7000, () => { sb.sendCrates.length = 0; });
+  due('a ghost spawn', () => { sb.geo = { belts: [] }; sb.ghost = { nextChange: () => now + 2500 }; }, now + 2500, () => { sb.ghost = null; sb.geo = null; });
+  due("a drawn prop's next stepped frame (an occupied screen's beam)", () => { sb.PropSprites = { clockNext: () => now + 210 }; }, now + 210, () => { delete sb.PropSprites; });
+  due('the next meteor', () => { sb.SpaceBG = { nextChange: () => now + 2222 }; }, now + 2222, () => { delete sb.SpaceBG; });
+  due("a draw pass's own due change (drawCRT: the static grain's next step)", () => {}, now + 66, null, () => W.noteDue(now + 66, now));
+  due('the cinecam re-cast', () => { sb.camLock = { id: 'a', source: 'cine' }; sb.cineHoldUntil = now + 900; }, now + 900, () => { sb.camLock = null; });
+  due("the cinecam's 3 s still-subject grace", () => { sb.cineWalkAt = now - 1000; }, now + 2000, () => { sb.cineWalkAt = -1e9; });
+  due('an encounter ending', () => { sb.socialBeat = { until: now + 1500 }; }, now + 1500, () => { sb.socialBeat = null; });
+  due('an assembly converging', () => { sb.gathering = { phase: 'converge', convergeUntil: now + 700, until: now + 1e6 }; }, now + 700, () => { sb.gathering = null; });
+  due("the overseer's next line (an assembly holding, between lines)", () => {
+    sb.gathering = { phase: 'hold', holdFrom: now - K.GATHER_SPEAK_MS - 400, holdLen: 1e6, until: now + 1e6 };
+  }, now + K.GATHER_GAP_MS - 400, () => { sb.gathering = null; });
+  due('an assembly breaking up (the overseer leaves last)', () => { sb.gathering = { phase: 'breaking', scatterAt: now - 100, until: now + 1e6 }; }, now + K.OVERSEER_BREAK_MS - 100, () => { sb.gathering = null; });
+  due('the next gathering roll (maybeGather, every tick)', () => { sb.gatherRollAt = now + 1234; }, now + 1234, () => { sb.gatherRollAt = -1e9; });
+  due('the station going quiet long enough to gather', () => { sb.stationBusyAt = now - K.GATHER_QUIET_MS + 500; }, now + 500, () => { sb.stationBusyAt = -1e9; });
+  due('the COMMS stare going cold', () => { sb.chatFocusId = 'hero'; sb.chatWarmUntil = now + 1500; }, now + 1500, () => { sb.chatFocusId = null; sb.chatWarmUntil = -1e9; });
+  due('the link going stale (LINK DOWN)', () => { sb.lastSseEventAt = now - K.LINK_STALE_MS + 777; }, now + 777, () => { sb.lastSseEventAt = 0; });
+  // an off-screen body's DECISION clock is due too (review 10-21): it can decide for an on-screen partner (a huddle within
+  // SOCIAL_NEAR_RADIUS, a border meeting in the next room, a mutual glance) — its own drawn-frame and blink edges are not
+  due("an off-screen body's next decision (an initiator past the edge decides for an on-screen partner too)", () => { mate.px = -5000; mate.idleUntil = now + 300; }, now + 300, () => { mate.px = 300; mate.idleUntil = Infinity; });
+  due("an off-screen body's cooldown lapsing (neighborGlanceCd: a mutual glance turns an on-screen neighbour)", () => { mate.px = -5000; mate.neighborGlanceCd = now + 410; }, now + 410, () => { mate.px = 300; mate.neighborGlanceCd = 0; });
+  calm("an off-screen body's drawn-frame edge (a blink nobody can see)", () => { mate.px = -5000; mate._renderNextAt = now + 120; }, () => { mate.px = 300; mate._renderNextAt = 0; });
+  {
+    mate.px = -5000; mate._renderNextAt = now + 120; settle();
+    const s = settle();
+    A.ok(s.stillNow && Math.abs(s.stillDue - (now + 120)) > 1e-6, "...it books nothing: an off-screen body's blink / pose frame is never due");
+    mate.px = 300; mate._renderNextAt = 0; settle();
+  }
+  calm('gathering gates under reduced motion (no assembly ever rolls)', () => { sb.rmOn = true; sb.gatherRollAt = now + 50; }, () => { sb.rmOn = false; sb.gatherRollAt = -1e9; });
+  A.ok(settle().stillDue === Infinity || settle().stillDue > now, 'past clocks are never due');
+}
+
+{
+  const gate = (A.fnBody(code, 'function frameBody(now)').match(/if \((camLerp && !camAnim && !camLock)\) \{/) || [])[1];
+  A.ok(!!gate && A.fnBody(code, 'function stillVerdict(now)').includes('(' + gate + ')'), "the verdict's focus-ease term is the ease's own gate in frameBody (" + gate + ')');
+}
+
+// ---- 7b. THE PROP LOOP: a body resting on a prop leaves its art as drawn; a body working one is motion (final fixes 10-21) ----
+// The real lines of drawScene's prop pass (who holds which prop, its `work`, its `live`, the STILL mark), run per prop on the
+// real REST_USE / restingOn, with each prop's use kind read from the real catalog in propsprites.js.
+{
+  const sceneSrc = A.fnBody(code, 'function drawScene(now, dt, slices)');
+  const lp = sceneSrc.indexOf('const leisureProps = new Set();'), lpEnd = sceneSrc.indexOf('\n', sceneSrc.indexOf('for (const body of [agent, ...crew])', lp));
+  const wk = sceneSrc.indexOf('const work = ('), wkEnd = sceneSrc.indexOf("stillMove('prop');", wk) + "stillMove('prop');".length;
+  A.ok(lp > 0 && lpEnd > lp && wk > lpEnd && wkEnd > wk && wkEnd - wk < 1600, '(the prop pass lines are found in drawScene)');
+  const extra = `var outboxLit = false, scanningTiles = new Set();
+function bayLit() { return false; } function workstationLit() { return false; } function isWorkstationProp() { return false; }
+function heatFor() { return 0; } function deskProgFor() { return null; } function workstationOccupied() { return false; }
+function propOnScreen() { return true; }
+function propPass(now) { ${sceneSrc.slice(lp, lpEnd)}
+  for (const p of (geo && geo.props) || []) { ${sceneSrc.slice(wk, wkEnd)} } }
+this.propPass = propPass;`;
+  const ps = fs.readFileSync(path.join(root, 'frontend/app/propsprites.js'), 'utf8');
+  const kindOf = id => { const m = ps.match(new RegExp('\\{ id: "' + id + '",[^\\n]*?use: \\{ kind: \'(\\w+)\'')); return m ? m[1] : null; };
+  const w = makeWorld(60, { extra }), sb = w.sb, W = w.W;
+  const hero = body({ id: 'hero' }), mate = body({ id: 'mate', px: 300 });
+  sb.agent = hero; sb.crew = [mate];
+  const now = 5000;
+  const verdict = () => { W.stillBegin(); sb.propPass(now); W.stillVerdict(now); return W.st(); };
+  const holding = (id, label, want) => {
+    const kind = kindOf(id);
+    A.ok(!!kind, '(' + id + ' is in the catalog, use kind ' + kind + ')');
+    sb.geo = { props: [{ id: 'p_' + id, t: id, x: 10, y: 10, w: 1, h: 1, use: { kind } }] };
+    mate.usingProp = 'p_' + id; verdict();
+    const s = verdict();
+    A.ok(want ? s.stillWhy === want : s.stillNow, label + ' → ' + (want || 'still') + (s.stillNow ? '' : ' [got ' + s.stillWhy + ']'));
+    mate.usingProp = null; sb.geo = null; verdict();
+  };
+  holding('bunk', 'a body napping in a bunk (kind bed: the quilt breath is the prop clock\'s due edge)', null);
+  holding('beanbag', 'a body lounging on a beanbag', null);
+  holding('couch', 'a body on a couch', null);
+  holding('stool', 'a body perched on a stool', null);
+  holding('benchpress', 'a body on the bench press (static art)', null);
+  holding('punchbag', 'a body boxing the heavy bag (kind bag: active punching, the bag swings)', 'prop');
+  holding('tv', 'a body using the TV (its screen plays)', 'prop');
+  A.ok(verdict().stillNow, '...and with no prop held the floor is still');
+}
+
+// ---- 8. the wiring in the real world.js ---------------------------------------------------------------------------
+const bodySrc = A.fnBody(code, 'function frameBody(now)');
+A.ok(/^\s*function frameBody\(now\) \{\s*stillBegin\(\);/.test(bodySrc), 'frameBody judges itself: stillBegin() is its first act');
+A.ok(/drawScene\(now, dt, slices\);\s*stillVerdict\(now\);\s*\}$/.test(bodySrc.trim()), '...and stillVerdict(now) its last, after the scene drew');
+A.ok(/if \(!cache\) \{[\s\S]{0,400}return;/.test(bodySrc) && bodySrc.indexOf('stillBegin()') < bodySrc.indexOf('if (!cache)'),
+  'a frame with no bake (the early return) is never judged still');
+A.ok(/function stillBegin\(\) \{[^}]*stillDueAcc = Infinity;/.test(code) && !/function stillVerdict\(now\) \{[\s\S]*?stillDueAcc = Infinity/.test(A.fnBody(code, 'function stillVerdict(now)')),
+  "the due accumulator is cleared at the TOP of the frame, so a draw pass's noteDue survives to the verdict");
+const sceneSrc = A.fnBody(code, 'function drawScene(now, dt, slices)');
+A.ok(/^function drawScene\(now, dt, slices\) \{\s*if \(!slices\) slices = \[\[dt, now\]\];\s*if \(typeof PropSprites !== 'undefined' && PropSprites\.clockBegin\) PropSprites\.clockBegin\(\);/.test(sceneSrc),
+  "every scene pass starts the props' clock readout afresh (PropSprites.clockBegin)");
+A.ok(/if \(!stillMark && \(\(work && !\(leisureProps\.has\(p\.id\) && restingOn\(p\)\)\) \|\| \(live && \(live\.heat > 0 \|\| live\.prog != null \|\| live\.scanning\)\)\)\s*&& propOnScreen\(p\)\) stillMove\('prop'\);/.test(sceneSrc),
+  'the prop pass marks an on-screen prop with live content (work, heat, a progress strip, a scan) as motion');
+A.ok(/stillMove\('crate'\);[^\n]*\n\s*for \(let i = 0; i < shown; i\+\+\) drawWaitCrate/.test(A.fnBody(code, 'function drawQueueJam(now)')), 'a standing queue jam (its crates bob) marks the frame moving');
+{
+  const crt = A.fnBody(code, 'function drawCRT(now)');
+  A.ok(/const PER = 16800, SWEEP = 2600, t = now % PER;\s*if \(t < SWEEP\) stillMove\('fx'\); else noteDue\(now - t \+ PER, now\);/.test(crt), "the CRT roll bar is motion while it sweeps, and its next sweep is due");
+  A.ok(/const fi = reduceMotion\(\) \? 0 : Math\.floor\(now \/ 66\);\s*if \(!reduceMotion\(\)\) noteDue\(\(fi \+ 1\) \* 66, now\);/.test(crt), "the CRT static's next 66 ms step is due (it lands on its own vsync)");
+}
+A.ok(/if \(!geom && !\(typeof SPRITES !== 'undefined' && SPRITES\.loading\)\) drawFallback\(now, who\);\s*if \(!geom\) who\._renderLive = !who\.sitting;/.test(A.fnBody(code, 'function drawAgent(now, who)')),
+  'a procedural fallback body (it bobs while it stands) reports itself live');
+A.ok(/if \(now - pinCheckAt < 400\) \{ if \(\(count \| 0\) > pinnedCount\) noteDue\(pinCheckAt \+ 400, now\); return; \}/.test(A.fnBody(code, 'function maybePinProposal(now, count)')),
+  "a pin walk waiting on maybePinProposal's 400 ms re-check is due at it");
+A.ok(/if \(typeof U\.bus\.tap === 'function'\) U\.bus\.tap\(motionWake\);/.test(A.fnBody(code, 'function connectChannelBridge()')), 'every harness event on U.bus wakes a still floor');
+A.ok(/function setActivityFor\(agentId, kind\) \{\s*motionWake\(\);/.test(code), 'a body summoned or released by the floor itself (a reconcile, the TTL sweep) wakes it');
+A.ok(/return wakeOnCall\(\{ init, rebake,/.test(code), 'the World API is returned through the STILL WAKE wrapper');
+{
+  const m = world.match(/const WAKE_API = new Set\(\[([\s\S]*?)\]\);/);
+  const names = m ? m[1].match(/'[^']+'/g).map(s => s.slice(1, -1)) : [];
+  const api = code.slice(code.indexOf('return wakeOnCall({'));
+  const missing = names.filter(n => !new RegExp('[{,\\s]' + n + '\\s*[,:(]').test(api));
+  A.ok(names.length > 30 && !missing.length, 'every WAKE_API name is a real export (' + names.length + ' names' + (missing.length ? '; missing: ' + missing.join(', ') : '') + ')');
+  for (const n of ['say', 'setActivity', 'setActivityFor', 'focusAgent', 'focusBody', 'lockBody', 'spawnAgent', 'despawnAgent', 'pulseLevelUp', 'loadStation'])
+    A.ok(names.includes(n), 'World.' + n + ' wakes a still floor');
+  for (const n of ['renderPace', 'cameraState', 'cameraDbg', 'dbg', 'getActivity', 'crewFrames', 'planStatus'])
+    A.ok(!names.includes(n), 'World.' + n + ' is a read: polling it never keeps a still floor at full pace');
+  A.ok(names.includes('frameReviewRoom') && names.includes('init'), 'World.frameReviewRoom (the builder\'s camera cut, from a timer) and World.init (its resize re-anchors the pan) wake a still floor');
+
+  // THE CAMERA RATCHET (final fixes 10-21): every exported World function that writes the camera — scale, panX, panY, camLock,
+  // camLerp or camAnim, itself or through any world.js function it reaches — is wrapped by wakeOnCall, so a camera API added
+  // later can never leave its move waiting out a still interval. Reached = named anywhere in its body (a call, or a value
+  // handed on: a callback, a timer); writes inside the frame itself (frame / frameBody / drawScene) are that frame's own,
+  // judged by its verdict. EXEMPT names say why.
+  const CAM = ['scale', 'panX', 'panY', 'camLock', 'camLerp', 'camAnim'];
+  const writeRe = v => new RegExp('(^|[^.\\w$])' + v + '\\s*(?:=(?!=)|\\+=|-=|\\*=|\\/=)', 'g');
+  const localRe = v => new RegExp('\\b(?:let|const|var)\\s+(?:[\\w$]+\\s*=[^;,]*,\\s*)*' + v + '\\b|function\\s*[\\w$]*\\s*\\([^)]*\\b' + v + '\\b[^)]*\\)|\\(\\s*\\{[^}]*\\b' + v + '\\b[^}]*\\}\\s*\\)\\s*=>');
+  const writes = src => CAM.filter(v => writeRe(v).test(src) && !localRe(v).test(src));
+  const decl = {}, range = [];
+  for (const m of code.matchAll(/\bfunction ([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (decl[m[1]]) continue;
+    decl[m[1]] = A.fnBody(code.slice(m.index), 'function ' + m[1] + '(');
+    range.push([m.index, m.index + decl[m[1]].length]);
+  }
+  const big = Object.keys(decl).filter(n => decl[n].length > code.length / 4);
+  A.ok(Object.keys(decl).length > 500 && !big.length, '(the ratchet indexed ' + Object.keys(decl).length + ' world.js functions, none mis-scanned long' + (big.length ? ': ' + big.join(', ') : '') + ')');
+  const FRAME = new Set(['frame', 'frameBody', 'drawScene']);
+  const refs = src => [...new Set([...src.matchAll(/(?:^|[^.\w$])([A-Za-z_$][\w$]*)(?![\w$])(?!\s*:)/g)].map(m => m[1]))].filter(n => decl[n] && !FRAME.has(n));
+  const Wr = {}, Ed = {};
+  for (const n of Object.keys(decl)) { Wr[n] = new Set(writes(decl[n])); Ed[n] = refs(decl[n]).filter(x => x !== n); }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const n of Object.keys(decl)) for (const g of Ed[n]) for (const v of Wr[g]) if (!Wr[n].has(v)) { Wr[n].add(v); changed = true; }
+  }
+  // the export object, split at its top-level commas
+  const at = code.indexOf('return wakeOnCall({');
+  const obj = A.fnBody(code.slice(at), 'return wakeOnCall(');
+  const inner = obj.slice(obj.indexOf('{') + 1, obj.lastIndexOf('}'));
+  const props = [];
+  { let depth = 0, cur = '';
+    for (let i = 0; i < inner.length; i++) {
+      const c = inner[i];
+      if (c === '"' || c === "'" || c === '`') { let j = i + 1; for (; j < inner.length; j++) { if (inner[j] === '\\') { j++; continue; } if (inner[j] === c) break; } cur += inner.slice(i, j + 1); i = j; continue; }
+      if ('([{'.includes(c)) depth++; else if (')]}'.includes(c)) depth--;
+      if (c === ',' && depth === 0) { props.push(cur.trim()); cur = ''; continue; }
+      cur += c;
+    }
+    if (cur.trim()) props.push(cur.trim()); }
+  const exportWrites = {};
+  const bad = [];
+  for (const p of props) {
+    const m = p.match(/^([A-Za-z_$][\w$]*)\s*(?::\s*([\s\S]*))?$/);
+    if (!m) { bad.push(p.slice(0, 40)); continue; }
+    const key = m[1], val = (m[2] == null ? key : m[2]).trim(), bare = /^[A-Za-z_$][\w$]*$/.test(val);
+    const s = new Set(bare ? (Wr[val] || []) : writes(val));
+    if (!bare) for (const g of refs(val)) for (const v of Wr[g]) s.add(v);
+    exportWrites[key] = [...s];
+  }
+  A.ok(props.length > 120 && !bad.length, '(the ratchet read ' + props.length + ' World exports' + (bad.length ? '; unparsed: ' + bad.join(' | ') : '') + ')');
+  // coverage: every write to a camera variable sits in a function the ratchet indexed, or in the export object itself
+  const lineAt = i => code.slice(code.lastIndexOf('\n', i) + 1, code.indexOf('\n', i));
+  const orphan = [];
+  for (const v of CAM) for (const m of code.matchAll(writeRe(v))) {
+    const i = m.index + m[1].length;
+    if (/^\s*let\b/.test(lineAt(i)) && !range.some(([a, b]) => i > a && i < b)) continue;   // the module's own declaration
+    if ((i >= at && i < at + obj.length) || range.some(([a, b]) => i > a && i < b)) continue;
+    orphan.push(v + ': ' + lineAt(i).trim().slice(0, 60));
+  }
+  A.ok(!orphan.length, 'every camera write in world.js is inside a function the ratchet reads' + (orphan.length ? ' — not: ' + orphan.join(' | ') : ''));
+  const CAM_EXEMPT = {
+    renderStill: 'a still render: it swaps in its own canvas and camera and puts the live ones back in finally — the floor\'s view never changes',
+    renderStillOfTiles: 'renderStill, cropped',
+    stop: 'stops the loop (running = false): nothing is drawn after it, and start() draws at once',
+  };
+  const writers = Object.keys(exportWrites).filter(k => exportWrites[k].length);
+  A.ok(writers.length >= 15, '(the ratchet finds ' + writers.length + ' camera-writing exports: ' + writers.join(', ') + ')');
+  const unwrapped = writers.filter(k => !names.includes(k) && !k.startsWith('_dbg') && !CAM_EXEMPT[k]);
+  A.ok(!unwrapped.length, 'every World export that writes the camera wakes a still floor (WAKE_API)' + (unwrapped.length ? ' — not wrapped: ' + unwrapped.map(k => k + ' [' + exportWrites[k].join(',') + ']').join(', ') : ''));
+  const staleEx = Object.keys(CAM_EXEMPT).filter(k => !writers.includes(k) || names.includes(k));
+  A.ok(!staleEx.length, 'every camera exemption is a real camera writer left unwrapped on purpose' + (staleEx.length ? ' — stale: ' + staleEx.join(', ') : ''));
+  A.ok(/const keep = \{ cv, ctx, scale, panX, panY, overlaysOn \};[\s\S]*finally \{[\s\S]*cv = keep\.cv; ctx = keep\.ctx; scale = keep\.scale; panX = keep\.panX; panY = keep\.panY;/.test(A.fnBody(code, 'function renderStill(maxPx, opts)')),
+    '(renderStill really does restore the live camera in finally)');
+  for (const k of ['frameReviewRoom', 'restoreCamera', 'lockBody', 'focusBody', 'focusAgent', 'camPushIn', 'init'])
+    A.ok(writers.includes(k), '(the ratchet sees World.' + k + ' write the camera)');
+}
+
+// ---- 8b. THE CLOCK RATCHET: every clock the frame clock is compared against in world.js is due in the verdict, or exempt for
+// a stated reason. A gate the verdict does not know is up to 33 ms of latency on every change it gates — so a NEW one fails
+// here until it is classified. Gates are `now|fnow <op> X` and `X <op> now|fnow` (X a field path, `X || 0` included), and
+// object-qualified: a body field (agent/self/b/body/me/other/who/obs) reads as `body.<field>`, a nested one as `<obj>.<field>`.
+{
+  const vsrc = strip(world.slice(vFrom, vTo));
+  let gcode = world;
+  for (const [a, b] of [['  const PACE_VISIBLE_MS', '  function renderPace()'], ['  /* STILL VERDICT', '  // ---- end STILL VERDICT']]) {
+    const i = gcode.indexOf(a), j = gcode.indexOf(b, i); gcode = gcode.slice(0, i) + gcode.slice(j);
+  }
+  gcode = strip(gcode);
+  const PATHRE = '[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*|\\.get\\([^)]*\\))*', OPRE = '(?:>=|<=|<|>)';
+  const BODY = /^(agent|self|b|body|me|other|who|obs|to)$/;
+  const keys = new Set();
+  const add = p => {
+    if (/^(now|fnow|t|Math|Infinity)$/.test(p)) return;
+    const parts = p.replace(/\.get\([^)]*\)/g, '.get').split('.');
+    if (parts.length === 1) { keys.add(parts[0]); return; }
+    const obj = parts[parts.length - 2], f = parts[parts.length - 1];
+    keys.add((BODY.test(obj) && parts.length === 2 ? 'body' : obj) + '.' + f);
+  };
+  for (const m of gcode.matchAll(new RegExp('\\b(?:now|fnow)\\s*' + OPRE + '\\s*\\(?\\s*(' + PATHRE + ')', 'g'))) add(m[1]);
+  for (const m of gcode.matchAll(new RegExp('(' + PATHRE + ')\\s*(?:\\|\\|\\s*0\\s*)?\\)?\\s*' + OPRE + '\\s*(?:now|fnow)\\b', 'g'))) add(m[1]);
+  const clocks = new Set(makeWorld(60).W.consts.BODY_CLOCKS);
+  // tracked: the verdict must name it (RegExp over the verdict's source)
+  const TRACKED = {
+    'glance.until': /b\.glance\.until/, 'say.until': /b\.say\.until/, 's.until': /b\.say\.until/, 'chatter.until': /b\.chatter\.until/,
+    'ch.until': /noteDue\(ch\.until, now\)|b\.chatter\.until/, 'pl.until': /noteDue\(ch\.until, now\)[\s\S]*noteDue\(b\.mimic\.until, now\)/,
+    'pl.endAt': /noteDue\(ch\.endAt, now\)/, 'pl.hardUntil': /noteDue\(ch\.hardUntil, now\)/, 'pl.repathAt': /ch\.repathAt > now[\s\S]*noteDue\(ch\.repathAt, now\)/,
+    'holdFrom': /socialBeat\.lastArrivalAt\) \|\| pl\.holdAt \|\| 0\) \+ \(pl\.holdLen \|\| 0\)/,
+    'socialBeat.until': /noteDue\(socialBeat\.until, now\)/, 'gathering.until': /noteDue\(gathering\.until, now\)/,
+    'gathering.convergeUntil': /noteDue\(gathering\.convergeUntil, now\)/, 'gathering.holdFrom': /noteDue\(h0 \+ \(gathering\.holdLen \|\| 0\), now\)/,
+    'gatherGateUntil': /noteDue\(gatherGateUntil, now\)/, 'gatherRollAt': /noteDue\(gatherRollAt, now\)/, 'chatWarmUntil': /noteDue\(chatWarmUntil, now\)/,
+    'cineHoldUntil': /noteDue\(cineHoldUntil, now\)/, 'motionUntil': /now < motionUntil/,
+  };
+  // exempt: why the verdict need not know it
+  const DECISION = 'read only inside a decision that a body clock (BODY_CLOCKS) or an event triggers — it starts nothing by itself';
+  const EXEMPT = {
+    'body.ackScanAt': 'the acknowledgement re-scan gap: it acts only on a body walking past in view — motion already',
+    'emote.until': 'a dev readout (World.bodies), never a gate', 'attn.until': DECISION, 'beltWatch.until': DECISION, 'socialPairCd.get': DECISION,
+    'socialGateUntil': DECISION, 'crewBeatGateUntil': DECISION, 'chaseGateUntil': DECISION, 'placeCd': DECISION, 'postCd': DECISION, 'lastUntil': DECISION,
+    'userReturnUntil': "raises THE LOOK-UP's chance inside maybeGlance, whose pending roll is motion (heroGlanceAt)",
+    'plan.until': 'a traffic plan for a body holding a walk target — motion already', 'trafficRetry.get': 'a traffic retry for a body holding a walk target — motion already',
+    'forgetAt': 'habituation decay: it changes later decisions, nothing drawn', 'mournCd': 'gates a grief beat that a prop edit queues (an input / World API wake)',
+    'dueWatch': "the DUE LEAD readout: frame() records how late the verdict's own due change drew — it gates nothing",
+  };
+  const unknown = [], stale = [];
+  for (const k of keys) {
+    if (k.startsWith('body.') && clocks.has(k.slice(5))) continue;
+    if (TRACKED[k]) { if (!TRACKED[k].test(vsrc)) stale.push(k); continue; }
+    if (EXEMPT[k]) continue;
+    unknown.push(k);
+  }
+  A.ok(keys.size > 60, 'the ratchet found the inner life\'s gates (' + keys.size + ' clocks)');
+  A.ok(!unknown.length, 'every clock world.js gates on is due in the verdict or exempt for a reason' + (unknown.length ? ' — unclassified: ' + unknown.sort().join(', ') : ''));
+  A.ok(!stale.length, 'every clock classified as tracked really is read by the verdict' + (stale.length ? ' — not found: ' + stale.join(', ') : ''));
+  const unused = Object.keys(EXEMPT).concat(Object.keys(TRACKED)).filter(k => !keys.has(k));
+  A.ok(!unused.length, 'the ratchet table names no clock world.js no longer has' + (unused.length ? ' — remove: ' + unused.join(', ') : ''));
+  const bodyUnused = [...clocks].filter(n => !keys.has('body.' + n) && !['hardUntil', 'convergeUntil', 'spokeUntil', 'lastFunUntil', 'barJoinUntil'].includes(n));
+  A.ok(!bodyUnused.length, 'every BODY_CLOCKS name is a body clock world.js gates on' + (bodyUnused.length ? ' — not gated: ' + bodyUnused.join(', ') : ''));
+}
+// ambient stays ambient: the verdict never reads the light map, dust, glows or the backdrop's draw — only the sky's
+// one allocation-free readout (SpaceBG.nextChange: a meteor, the bolide, the belt's shower)
+{
+  const vsrc = strip(world.slice(vFrom, vTo));
+  A.ok(!/drawDust|drawGlows|drawNavLights|cache\.flickers|sceneRenderer|drawAtmosphere|SpaceBG\.draw/.test(vsrc), 'the verdict never treats the starfield, glows, dust or nav lights as motion');
+  A.ok((vsrc.match(/SpaceBG\.\w+/g) || []).every(s => s === 'SpaceBG.nextChange'), '...and reads the sky only through SpaceBG.nextChange');
+  A.ok(!/getImageData|\.slice\(|\.map\(|\.filter\(|\[agent, \.\.\.crew\]|new (?:Map|Set|Array)\(/.test(vsrc.replace(/const BODY_CLOCKS[\s\S]*?\]\);/, '').replace(/const REST_USE[^\n]*/, '')),
+    'the verdict reads state, never pixels, and allocates nothing per frame');
+}
+
+// ---- 9. the readouts it reads (the prop / sky / remaster ones: test/render-still-readouts.test.js) ---------------------
+A.ok(/b\._renderNextAt = clockNext;/.test(assets), "SPRITES.drawBody publishes when a body's drawn frame next changes on the clock (_renderNextAt)");
+A.ok(/clockNext = Math\.min\(clockNext, nowMs \+ \(bt < 130 \? 130 - bt : 3300 - bt\)\)/.test(assets), '...the blink edge (eyes open / next shut)');
+A.ok(/const q = nowMs \/ \(1000 \/ fps\) \+ aph;\s*clockNext = Math\.min\(clockNext, nowMs \+ \(Math\.floor\(q\) \+ 1 - q\) \* \(1000 \/ fps\)\);/.test(assets),
+  '...and the next frame of a clock-driven track, from the same phase the frame index uses');
+A.ok(/idx = fixedIdx != null[\s\S]{0,500}: Math\.floor\(nowMs \/ \(1000 \/ fps\) \+ aph\);/.test(assets), '(the frame index really is floor(now / (1000 / fps) + aph))');
+{
+  // _renderLive: published right after the bob, the breath and the speech accent are final — the bob and the accent's ease are
+  // motion; the planted breath is _renderDrift (sub-pixel, drawn at its true phase every still frame: review 10-21, option b)
+  const i = assets.indexOf('b._renderLive = bob !== 0 || (planted && !reduced && (b._speechEase || 0) > 1e-3);');
+  const j = assets.indexOf('b._renderDrift = breath !== 0 || speech !== 0;');
+  A.ok(i > 0 && i > assets.indexOf('if (reduced || planted) bob = 0;') && i > assets.indexOf('const breath = planted && !reduced'),
+    "SPRITES.drawBody publishes _renderLive from the final bob and the speech accent's ease (a bobbing or still-mouthing body is motion)");
+  A.ok(j > i, '...and _renderDrift from the breath and the accent (an overlay over that head rounds to whole px: motion only under one)');
+  A.ok(/const breath = planted && !reduced \? Math\.sin\(nowMs \/ 1050 \+ aph\) \* 0\.12 - speech\*\.18 : 0;/.test(assets),
+    '(the breath really is a 0.12 world px sine of period 2π·1050 ms: under 0.004 x zoom device px per 33 ms still interval)');
+  const wcode = strip(world), vb = A.fnBody(wcode, 'function bodyStillWhy(b, now)');
+  A.ok(/if \(overlaysOn && \(moved \|\| b\._renderLive \|\| b\._renderDrift\) && \(b === hoverAgent \|\| bubbleShown\(b, now\)\)\) return 'speech';\s*if \(!bodyOnScreen\(b\)\) return '';/.test(vb),
+    'bodyStillWhy judges a body-anchored overlay BEFORE it drops an off-screen body (the bubble is clamped to the canvas)');
+  A.ok(vb.indexOf('noteDue(b[BODY_CLOCKS[i]], now)') < vb.indexOf('if (!bodyOnScreen(b))') && vb.indexOf('noteDue(b._renderNextAt, now)') > vb.indexOf('if (!bodyOnScreen(b))'),
+    "...books every placed body's decision clocks before it, and only an on-screen body's drawn-frame edge after it");
+  const bub = A.fnBody(wcode, 'function drawBubble(now, who)');
+  A.ok(/if \(!s\.text \|\| \(s\.until < now && !speakingNow\)\) \{ drawChatterBubble\(now, who\); return; \}/.test(bub)
+    && /const speakingNow = \(who === agent\) && typeof Voice !== 'undefined' && Voice\.isSpeaking && Voice\.isSpeaking\(\);/.test(bub),
+    "bubbleShown mirrors drawBubble's own test (a line, until its time, or past it while the hero's voice speaks)");
+}
+{
+  // ghostline.nextChange: the projection's motion and its next spawn, from its own clock
+  const sb = { console, Conveyor: undefined };
+  vm.createContext(sb);
+  vm.runInContext(ghostline + '\nthis.GL = GhostLine;', sb);
+  const g = sb.GL.create();
+  A.eq(g.nextChange(1000), Infinity, 'an idle ghost projection reports nothing due');
+  A.ok(/function nextChange\(nowMs\) \{\s*if \(\(engine && engine\.boxCount\(\) > 0\) \|\| notes\.length \|\| pendingChain\) return nowMs;\s*return cur && nextSpawnAt > 0 \? nextSpawnAt : Infinity;/.test(ghostline),
+    'a riding ghost, a fading caption or a pending chain is motion now; otherwise the next spawn is due');
+}
+{
+  // U.bus.tap: fires after an emit that reached a listener, never for one that reached nobody
+  const sb = { console, window: {}, document: {}, navigator: {}, setTimeout, clearTimeout };
+  vm.createContext(sb);
+  vm.runInContext(util + '\nthis.U = U;', sb);
+  const seen = [];
+  sb.U.bus.tap(ev => seen.push(ev));
+  sb.U.bus.on('agent.run.start', () => seen.push('handler'));
+  sb.U.bus.emit('agent.run.start', {});
+  sb.U.bus.emit('nobody.listens', {});
+  A.eq(seen.join(','), 'handler,agent.run.start', 'U.bus.tap runs after the listeners of an emitted event, and not for an event nobody hears');
+  sb.U.bus.tap(() => { throw new Error('tap boom'); });
+  const err = console.error; console.error = () => {};
+  try { A.notThrows(() => sb.U.bus.emit('agent.run.start', {}), 'a throwing tap never breaks the emit'); } finally { console.error = err; }
+}
+
+A.report('render still tier (Andrew 2026-10-21)');

@@ -58,6 +58,8 @@ function loadDock(opts) {
     getKey: () => '', getBaseUrl: () => '', listModels: async () => [],
     apiFetch: async url => {
       if (url === '/api/models/starnet') return new Response(JSON.stringify({ provider: 'starnet', models: opts.catalog || [] }), { status: 200 });
+      if (url === '/api/models/claude-cli' && opts.claudeCatalog) return new Response(JSON.stringify({ provider: 'claude-cli', models: opts.claudeCatalog }), { status: 200 });
+      if (url === '/api/credits?history=0') return opts.credits ? new Response(JSON.stringify(opts.credits), { status: 200 }) : new Response('{}', { status: 500 });
       return new Response(JSON.stringify({ models: [], error: 'not configured', connected: false }), { status: 200 });
     }
   };
@@ -146,6 +148,35 @@ module.exports = (async () => {
     } finally { t.restore(); }
   }
 
+  /* ---------- 5. an empty wallet sinks STARNET below the user's own sign-ins (2026-10-21 user reports) ---------- */
+  // A linked $0 station listed managed "Claude Opus" right above CLAUDE CODE's, so a mis-pick ran on managed credit.
+  for (const [credits, dry, label] of [
+    [{ configured: true, balanceUsd: -0.14 }, true, 'a negative balance'],
+    [{ configured: true, balanceUsd: 0 }, true, 'a $0 balance'],
+    [{ configured: true, balanceUsd: 12.5 }, false, 'a funded balance'],
+    [{ configured: true, balanceUsd: null }, false, 'an unreported balance'],
+    [null, false, 'a failed balance check']
+  ]) {
+    const t = loadDock({
+      provider: 'claude-cli', model: 'claude-opus-5-5', credits,
+      catalog: [{ id: 'anthropic/claude-opus-5', supported_parameters: ['tools'] }],
+      claudeCatalog: [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5' }]
+    });
+    try {
+      const rows = await t.dock.catalog({ force: true });
+      const order = rows.map(m => m.provider).filter((p, i, a) => a.indexOf(p) === i);
+      A.ok(order.includes('starnet') && order.includes('claude-cli'), label + ': both catalogs are listed');
+      A.eq(t.dock.starnetDry(), dry, label + ': starnetDry reads the reported balance only');
+      if (dry) A.eq(order[order.length - 1], 'starnet', label + ': STARNET sinks below every other provider');
+      else A.eq(order[0], 'starnet', label + ': STARNET keeps its place (an unknown balance never buries a funded account)');
+    } finally { t.restore(); }
+  }
+  {
+    const dock = read('frontend', 'app', 'modeldock.js');
+    A.ok(/starnetDry\(\)\) \{\s*\n\s*const dry = document\.createElement\('i'\);[\s\S]{0,120}' · NO CREDITS'/.test(dock), 'the dock labels a dry STARNET group NO CREDITS');
+    A.ok(/p === 'starnet' && M\.starnetDry && M\.starnetDry\(\)\) return M\.labels\.provider\(p\) \+ ' · NO CREDITS'/.test(read('frontend', 'app', 'modelpicker.js')), 'the per-agent picker labels it the same way');
+  }
+
   /* ---------- 3. desktop boot keeps the sidecar's starnet answer ---------- */
   {
     const harness = read('frontend', 'app', 'harness.js');
@@ -161,7 +192,7 @@ module.exports = (async () => {
       const fetched = [];
       const ctx = {
         DESKTOP: true, DEVMODE: false, Object, Array, Number, String, Promise, JSON,
-        ensureApiToken: async () => 't', syncEngineKeysOnBoot() {}, noteTokenWithheld() {}, bootNotices() {}, getProv: () => 'starnet', getBaseUrl: () => '', getKey: () => '',
+        ensureApiToken: async () => 't', syncEngineKeysOnBoot() {}, pushDesktopEndpoints() {}, noteTokenWithheld() {}, bootNotices() {}, getProv: () => 'starnet', getBaseUrl: () => '', getKey: () => '',
         providerNeedsKey: () => true,
         invoke: async cmd => {
           if (cmd === 'harness_provider_key_status') { if (!keychain) throw new Error('old build'); return [{ provider: 'openrouter', configured: false }, { provider: 'anthropic', configured: true }]; }

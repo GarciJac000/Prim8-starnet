@@ -234,8 +234,13 @@
 
   /* A terminal reason the user must be TOLD about, because the transcript alone looks like a normal stop.
      Returned as a plain sentence appended as a final agent message chunk. */
-  function endNote(reason, atBalance) {
+  function endNote(reason, atBalance, projected) {
     const r = str(reason);
+    // projected (agent.run.end budgetProjected): the run family's calls still in flight already took what was left, so
+    // the run stopped BEFORE its cap — never say it hit one it did not reach (bug d3a76db3 review)
+    if (r === 'budget' && projected === true) return atBalance === true
+      ? '\n\n(stopped: this run stopped before it would spend more than what is left on your StarNet balance — add credits in StarNet under SETTINGS → AI & MODELS.)'
+      : '\n\n(stopped: this run stopped before it would pass its per-run spend cap — raise it in StarNet under SETTINGS › SPENDING LIMITS.)';
     // a StarNet run whose ceiling admission clamped to the balance (agent.run.end budgetCapIsBalance): raising a cap
     // does nothing — the wallet ran out
     if (r === 'budget' && atBalance === true) return '\n\n(stopped: this run used what was left on your StarNet balance — add credits in StarNet under SETTINGS → AI & MODELS.)';
@@ -396,13 +401,14 @@
       let answer = '';
       let leadRunId = '';
       let stopAtBalance = false;   // this run's own budget stop was the StarNet balance (agent.run.end budgetCapIsBalance)
+      let stopProjected = false;   // ...and it stopped BEFORE the cap, on calls still in flight (agent.run.end budgetProjected)
       const seen = new Map();   // callId -> { name, args }
 
       const onEvent = (name, payload) => {
         const q = payload || {};
         if (name === 'agent.run.start') { runId = str(q.runId); if (!leadRunId) leadRunId = runId; return; }
         // only the LEAD's end speaks for this turn (a delegated worker's run.end rides the same stream)
-        if (name === 'agent.run.end') { if (leadRunId && str(q.runId) === leadRunId) stopAtBalance = q.budgetCapIsBalance === true; return; }
+        if (name === 'agent.run.end') { if (leadRunId && str(q.runId) === leadRunId) { stopAtBalance = q.budgetCapIsBalance === true; stopProjected = q.budgetProjected === true; } return; }
 
         if (name === 'agent.token') {
           const delta = str(q.delta);
@@ -514,7 +520,7 @@
         s.run = null;
       }
 
-      const note = endNote(reason, stopAtBalance);
+      const note = endNote(reason, stopAtBalance, stopProjected);
       if (note) messageChunk(sessionId, note);
       if (answer.trim()) s.messages.push({ role: 'assistant', content: answer });
       if (s.messages.length > MAX_TURNS_KEPT) s.messages = s.messages.slice(-MAX_TURNS_KEPT);

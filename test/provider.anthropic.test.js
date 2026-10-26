@@ -247,6 +247,8 @@ async function collect(provider, req) { const out = []; for await (const e of pr
     const p1 = makeAnthropicProvider({ fetch: fetchImpl, key: 'k' });
     await collect(p1, { model: 'claude-unknown', messages: [{ role: 'user', content: 'hi' }] });
     A.eq(captured.body.max_tokens, 32000, 'cold catalog + no explicit -> 32000 fallback (not 4096)');
+    // outputLimit (bug d3a76db3: the run's spend pool prices a call's output by it) is exactly what the adapter sends
+    A.eq(p1.outputLimit('claude-unknown'), 32000, 'outputLimit: the max_tokens a cold catalog sends (32000)');
 
     // E2: explicit per-request max_tokens still wins unchanged.
     captured = null;
@@ -259,12 +261,14 @@ async function collect(provider, req) { const out = []; for await (const e of pr
     captured = null;
     await collect(p2, { model: 'claude-cap', messages: [{ role: 'user', content: 'hi' }] });
     A.eq(captured.body.max_tokens, 8192, "warm catalog -> the model's real max_output_tokens");
+    A.eq(p2.outputLimit('claude-cap'), 8192, "outputLimit: the warm catalog's max_output_tokens, the max_tokens it sends");
 
     // E4: opts.maxTokens override applies when no explicit/catalog value is available.
     const p3 = makeAnthropicProvider({ fetch: async (url, init) => { if (/\/models$/.test(url)) return new Response('{"data":[]}', { status: 200 }); captured = { body: JSON.parse(init.body) }; return new Response([line({ type: 'message_stop' }), ''].join('\n'), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }); }, key: 'k', maxTokens: 16000 });
     captured = null;
     await collect(p3, { model: 'claude-unknown', messages: [{ role: 'user', content: 'hi' }] });
     A.eq(captured.body.max_tokens, 16000, 'opts.maxTokens override applied when no explicit/catalog ceiling');
+    A.eq(p3.outputLimit('claude-unknown'), 16000, 'outputLimit: the configured max_tokens it sends');
   }
 
   // F. USER ATTACHMENTS: a user message with image_url parts maps to native Anthropic image blocks (base64 +

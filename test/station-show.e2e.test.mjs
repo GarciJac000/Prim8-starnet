@@ -148,7 +148,8 @@ try {
   await evalJS(cdp, `(() => { const t = document.getElementById('chat-input'); t.value = ${JSON.stringify(MARK + '-AGAIN show me my deliverables again')}; t.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('chat-send').click(); return true; })()`);
   for (let i = 0; i < 360 && mock.results.length < 1; i++) await sleep(500);
   const top = ((await evalJS(cdp, SCREEN)) || []).sort((a, b) => b.z - a.z)[0];
-  check('a buried DELIVERABLES is raised to the top', !!top && isDlv(top), JSON.stringify(top));
+  // the answer rides along: a refusal here (the call beat its own run.start to the page, 2026-10-22) names its cause
+  check('a buried DELIVERABLES is raised to the top', !!top && isDlv(top), JSON.stringify(top) + ' :: ' + String(mock.results[0] || '').slice(0, 160));
   const count = ((await evalJS(cdp, SCREEN)) || []).filter(w => /^MY WORK/.test(w.title)).length;
   check('raised, not duplicated', count === 1, count + ' DELIVERABLES windows');
 

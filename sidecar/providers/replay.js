@@ -39,6 +39,8 @@
 
     function listModels() { return models.map(m => Object.assign({}, m)); }
     function contextLimit(id) { const m = models.find(x => x.id === id); return m ? m.context_length : 8000; }
+    // the catalog row's max output (provider.js outputLimit); 0 = the row names none
+    function outputLimit(id) { const m = models.find(x => x.id === id); return (m && Number(m.max_completion_tokens)) || 0; }
     function priceOf(id) {
       const m = models.find(x => x.id === id);
       if (!m || !m.pricing) return null;
@@ -46,7 +48,7 @@
       return (isFinite(i) && isFinite(o)) ? { in: i, out: o } : null;
     }
 
-    return { stream, listModels, contextLimit, priceOf, callCount: () => calls, reset() { cursor = 0; calls = 0; } };
+    return { stream, listModels, contextLimit, outputLimit, priceOf, callCount: () => calls, reset() { cursor = 0; calls = 0; } };
   }
 
   return { makeReplayProvider };

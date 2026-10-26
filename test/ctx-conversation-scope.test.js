@@ -46,6 +46,7 @@ const sandbox = {
   console: { warn() {}, log() {} },
   getModel: () => ACTIVE_MODEL,
   contextLimitOf: id => LIMITS[id] || 0,
+  runWindowOf: () => 0,   // contextState reads the run's window too (final-polish 10-23); 0 = the catalog did not say
   localStorage: {
     getItem: k => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => { store.set(k, String(v)); },

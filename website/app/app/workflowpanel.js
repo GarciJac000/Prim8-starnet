@@ -875,7 +875,7 @@ const WorkflowPanel = (() => {
     const tr = tryInfo(f, p);
     body.innerHTML = '<section class="wf-sec"><h3><span class="n">BAY ' + (f ? f.order.indexOf(p.id) + 1 : 1) + '</span>Who works here?</h3>'
       + (ri ? '<p class="wf-help">Suggested role: <b>' + esc(p.role) + '</b> — ' + esc(ri.desc) + '.</p>' : '')
-      + (agents.length > 8 ? '<input id="wf-agent-find" class="refit-input wf-find" type="search" placeholder="Find an agent…" aria-label="Find an agent" />' : '')
+      + (agents.length > 8 ? '<input id="wf-agent-find" class="refit-input wf-find" type="search" placeholder="Find an agent" aria-label="Find an agent" />' : '')
       + '<div class="wf-agents" id="wf-agents">' + (agents.length || canSummon ? rows : '<p class="wf-help">No agents yet — recruit one from CREW.</p>') + '</div>'
       + '<details class="wf-more"><summary>Assign by agent ID</summary><div class="wf-row"><input id="wf-aid" class="refit-input" type="text" maxlength="40" placeholder="agent id" value="' + esc(cur) + '" />'
       + '<button type="button" class="bb sm" id="wf-aid-ok">▸ ASSIGN</button><button type="button" class="bb sm" id="wf-aid-clear">UNASSIGN</button></div><div class="refit-error" id="wf-aid-err">unknown agent — pick one above, or check the id</div></details>'

@@ -9,6 +9,9 @@
 function runRouteFailure(res, err, redact) {
   const message = 'sidecar failure: ' + ((err && err.message) || err);
   const safe = typeof redact === 'function' ? redact(message) : message;
+  // Already answered and ended — a run on the page's shared stream (run-streams.js) answers its POST at once. Nothing more
+  // can travel on this response, and an http response written after end() emits an 'error' nobody catches.
+  if (res && res.writableEnded) return;
   try {
     if (!res.headersSent) {
       res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });

@@ -96,4 +96,24 @@ A.eq(u.byModel[0].model, '(unknown)', 'a model-less run folds under (unknown)');
   A.eq(y.byAgent.find(a => a.agentId === 'a').spendUnknownRuns, 1, 'interrupted: byAgent names it');
 }
 
+// a run STOPPED mid-answer after booking $0.40 over earlier calls (80de2a75): the known $0.40 and its tokens stay in every
+// total, as a floor (usageMissing) — never zeroed like an unsettled interrupted run, never called unpriced
+{
+  const rows3 = [
+    { reason: 'done', usd: 0.10, tokens: 100, model: 'm1', agentId: 'a', ts: 1000 },
+    { reason: 'cancelled', usd: 0.40, tokens: 30000, usageMissing: true, model: 'm1', agentId: 'a', ts: 1000 }
+  ];
+  const z = foldInsights(rows3, { nowMs: 1000 + 3600000, bucketMs: 3600000, buckets: 2 });
+  A.ok(Math.abs(z.totalUsd - 0.50) < 1e-9, 'stopped mid-answer: its booked $ stays in the total (got ' + z.totalUsd + ')');
+  A.eq(z.totalTokens, 30100, 'stopped mid-answer: its booked tokens stay in the total');
+  A.eq(z.spendUnknownRuns, 0, 'stopped mid-answer with booked spend: not a spend-unknown run');
+  A.eq(z.unpricedRuns, 0, 'stopped mid-answer: not an unpriced run');
+  A.eq(z.usageMissingRuns, 1, 'stopped mid-answer: named as a floor');
+  A.eq(z.meteredRuns, 2, 'stopped mid-answer: still a metered run');
+  const zm = z.byModel.find(m => m.model === 'm1');
+  A.ok(Math.abs(zm.usd - 0.50) < 1e-9 && zm.usageMissingRuns === 1, 'stopped mid-answer: byModel keeps the $ and names the floor');
+  A.ok(/at least/.test(zm.spendLabel) && !/unpriced|no published price/.test(zm.spendLabel), 'stopped mid-answer: byModel says "at least", never "unpriced": ' + zm.spendLabel);
+  A.ok(Math.abs(z.byAgent.find(a => a.agentId === 'a').usd - 0.50) < 1e-9, 'stopped mid-answer: byAgent keeps the $');
+}
+
 A.report('insights.test');

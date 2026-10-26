@@ -54,7 +54,8 @@
     const top = below ? (anchor.top + anchor.height + GAP) : roomAbove;
     // the arrow tracks the anchor centre, but never past the card's own rounded corners
     const arrowX = Math.max(10, Math.min(centre - left, tip.width - 10));
-    return { left, top: Math.max(EDGE, top), below, arrowX };
+    // a tall anchor (the CREW rail's resize edge spans the rail) leaves no room above OR below: keep the card on screen
+    return { left, top: Math.max(EDGE, Math.min(top, viewport.height - tip.height - EDGE)), below, arrowX };
   }
 
   /* adopt(el) → the tip text, or '' if this element should not get one. Moves `title` into `data-tip`

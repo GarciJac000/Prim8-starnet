@@ -424,7 +424,7 @@ button.mkt-archive-head:focus-visible { outline: 2px solid var(--gold); outline-
 .mkt-r-cadhint b { color: var(--gold); }
 .mkt-r-live { display: flex; align-items: center; gap: 7px; font-size: 12px; letter-spacing: .3px; color: var(--gold);
   background: rgba(217,168,90,.09); border: 1px solid rgba(217,168,90,.35); border-radius: 5px; padding: 6px 10px; margin: 4px 0 8px; }
-.mkt-r-live-dot { animation: mktPulse 2s ease-in-out infinite; }
+.mkt-r-live-dot { animation: mktPulse 2s steps(9, jump-none) infinite; }
 /* the dossier's history line: what this recipe's LAST run actually did (read from the durable run log). */
 .mkt-r-lastrun { font-size: 11.5px; letter-spacing: .3px; color: var(--ph); background: rgba(0,0,0,.18);
   border-left: 3px solid var(--ph-dim); border-radius: 3px; padding: 6px 10px; margin: 4px 0 6px; }

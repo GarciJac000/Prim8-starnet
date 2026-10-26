@@ -315,6 +315,13 @@ const GhostLine = (() => {
     }
 
     function reset() { clearRide(); cur = null; projecting = false; pass = 0; }
+    /* the world's STILL pacer readout (world.js, 2026-10-21), allocation-free: nowMs while the projection is visibly moving
+       (a ghost riding or sinking, a WOULD-caption fading, a chained hand-off pending), else when its next ghost is due to spawn,
+       else Infinity (nothing projected). The clock is the caller's, like tick's. */
+    function nextChange(nowMs) {
+      if ((engine && engine.boxCount() > 0) || notes.length || pendingChain) return nowMs;
+      return cur && nextSpawnAt > 0 ? nextSpawnAt : Infinity;
+    }
     // readout for headless tests + CDP proof scripts — the EXACT state the projection runs on
     function peek() {
       return { projecting, lineKey: cur ? cur.key : null, pass,
@@ -324,7 +331,7 @@ const GhostLine = (() => {
         pending: !!cur && !projecting && nextSpawnAt > tnow,
         pendingChain: !!pendingChain, log: log.slice() };
     }
-    return { setContext, tick, draw, reset, peek };
+    return { setContext, tick, draw, reset, peek, nextChange };
   }
 
   /* ---------- ON THE STATION: where a WOULD-caption may sit (walk 10-14 #13, review 10-14) ----------

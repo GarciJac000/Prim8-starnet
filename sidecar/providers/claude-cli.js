@@ -946,11 +946,18 @@
       // The persistent child serves the agent loop (a turn that carries tools). A side call (summary, vision, wire test)
       // or a second request while the child is mid-turn runs its own one-shot child and never touches it.
       const persistent = persistOn && Array.isArray(req.tools) && req.tools.length > 0 && !(session && session.busy);
-      const turn = persistent ? persistentStream(req, cmd) : oneShotStream(req, cmd);
-      if (envOf('STARNET_CLAUDE_CLI_PERSIST_LOG') !== '1') { yield* turn; return; }
-      // the diagnostics switch also prints each turn's usage: what the prompt cache did (read vs written) per turn
+      const box = {};   // the turn's line reader (makeTurn), once the turn has one: what its init line said about billing
+      const turn = persistent ? persistentStream(req, cmd, box) : oneShotStream(req, cmd, box);
+      const logUsage = envOf('STARNET_CLAUDE_CLI_PERSIST_LOG') === '1';
+      /* A SUBSCRIPTION CALL BILLS NOTHING PER CALL (80de2a75 review). Before this turn's first event, a subscription
+         sign-in (init line apiKeySource 'none') says so as { type:'billing', perCall:false }: a Stop that cuts this
+         call off mid-stream then cost nothing, so the loop never flags the run's spend as a floor or unknown. An
+         API-key sign-in says nothing (its cut call IS billed). A turn that yields nothing yields no billing fact. */
+      let billingSaid = false;
       for await (const ev of turn) {
-        if (ev && ev.type === 'usage' && ev.usage) {
+        if (!billingSaid && box.turn && box.turn.apiKeySource === 'none') { billingSaid = true; yield { type: 'billing', perCall: false }; }
+        // the diagnostics switch also prints each turn's usage: what the prompt cache did (read vs written) per turn
+        if (logUsage && ev && ev.type === 'usage' && ev.usage) {
           const u = ev.usage, d = u.prompt_tokens_details || {};
           plog('usage ' + (persistent ? 'persistent' : 'one-shot') + ': in=' + u.prompt_tokens + ' cache_read=' + (d.cached_tokens || 0) + ' cache_write=' + (d.cache_creation_tokens || 0) + ' out=' + u.completion_tokens + (u.subscription ? ' subscription' : ''));
         }
@@ -960,7 +967,7 @@
 
     // ONE-SHOT: one `claude -p` child for one turn (STARNET_CLAUDE_CLI_PERSIST=0 runs every turn this way).
     const ONE_SHOT_EXIT_GRACE_MS = Number(opts.oneShotExitGraceMs) > 0 ? Number(opts.oneShotExitGraceMs) : 3000;   // after its result line a child normally exits by itself in ~2 s
-    async function* oneShotStream(req, cmd) {
+    async function* oneShotStream(req, cmd, box) {
       const signal = req.signal;
       const prompt = buildPrompt(req.messages, req.tools, req.cacheSystemPrefix);
       const turn = ++seq;
@@ -1010,6 +1017,7 @@
       try { child.stdin.end(prompt.input || ''); } catch (e) { failNote('claudecli.stdin', e); }
 
       const T = makeTurn(req, turn);
+      if (box) box.turn = T;
       let endedOnResult = false;
       try {
         for (;;) {
@@ -1241,7 +1249,7 @@
       return turn;
     }
 
-    async function* persistentStream(req, cmd) {
+    async function* persistentStream(req, cmd, box) {
       const signal = req.signal;
       const sp = splitPrompt(req.messages, req.tools, req.cacheSystemPrefix, PERSIST_TRANSCRIPT_NOTE);
       const key = sessionKey(req, sp.base);
@@ -1265,6 +1273,7 @@
       const turn = ++seq;
       const T = makeTurn(req, turn);
       T.apiKeySource = s.apiKeySource;   // init is session-scoped, not repeated for every user turn
+      if (box) box.turn = T;
       const queue = [];
       let wake = null, failure = null, clean = false, finished = false, idleTimer = null;
       const push = (item) => { queue.push(item); if (wake) { const w = wake; wake = null; w(); } };

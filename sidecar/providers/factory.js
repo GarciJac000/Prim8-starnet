@@ -196,8 +196,8 @@
         // an endpoint that relays to OpenRouter (the managed proxy) takes OpenRouter's cache breakpoints verbatim
         cacheControl: profile.explicitCache === 'openrouter' ? openrouter.applyCacheControl : null,
         // Local runtimes may need to load a model before returning headers. Hosted providers retain the
-        // shared 30s connect ceiling; only profiles that prove a different need override it.
-        connectTimeoutMs: wire.connectTimeoutMs,
+        // shared 30s connect ceiling; only profiles that prove a different need override it (an env override wins).
+        connectTimeoutMs: resolveMaxOutputTokens(wire, 'connectTimeoutMs') || undefined,
         // Output ceiling: only profiles that declare one (Ollama) send max_tokens; an env override wins.
         maxTokens: resolveMaxOutputTokens(wire),
         maxChatTokens: resolveMaxOutputTokens(wire, 'maxChatOutputTokens'),

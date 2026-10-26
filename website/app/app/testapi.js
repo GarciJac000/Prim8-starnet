@@ -80,7 +80,9 @@
       if (typeof CtxGauge === 'undefined' || typeof Harness === 'undefined') return null;
       const ref = (typeof Chat !== 'undefined' && Chat.contextRef) ? Chat.contextRef() : null;
       const cs = ref ? Harness.contextState(ref.agentId, ref.streamId, ref.messages) : Harness.contextState();
-      return CtxGauge.compute(cs.used, cs.limit, { measured: cs.measured !== false, projected: !!cs.projected });
+      // against the window a run works in, as the gauge does (stationui.js ctxTick, final-polish 10-23)
+      const tier = cs.runWindow > 0 && cs.limit > 0 && cs.runWindow < cs.limit;
+      return CtxGauge.compute(cs.used, tier ? cs.runWindow : cs.limit, { measured: cs.measured !== false, projected: !!cs.projected });
     } catch (_) { return null; }
   }
 

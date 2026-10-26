@@ -54,6 +54,12 @@
           cause: 'The agent ran ' + (turns ? 'all ' + turns + ' turns' : 'its full iteration budget') + ' but never closed out the task.',
           fix: 'Tighten the ask, or give its bay the tool it kept reaching for — a cabinet for files, a console for compute.' };
       case 'budget':
+        // PROJECTED (agent.run.end budgetProjected): a run and the workers it started share one PER RUN cap, and this
+        // run stopped BEFORE it — calls still in flight had taken what was left. It hit no cap (d3a76db3)
+        if (ctx.projected === true)
+          return { reason, title: 'stopped before the budget cap',
+            cause: 'The run stopped before its next call: calls already running under the same PER RUN cap (its run and the workers that run started) had taken what was left.',
+            fix: ctx.atBalance === true ? 'Add credits under SETTINGS → AI & MODELS to keep going, or split the work into smaller work-items.' : 'Raise PER RUN in SETTINGS › SPENDING LIMITS, or split the work into smaller work-items.' };
         // a StarNet run whose ceiling was the WALLET (agent.run.end budgetCapIsBalance — admission clamped it to the
         // reported balance): raising a budget buys nothing there, and COMMS already says "add credits" for the same stop
         if (ctx.atBalance === true)

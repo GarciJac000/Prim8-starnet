@@ -188,6 +188,8 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
       stationTrackRecordLines: () => [],
       threadsStore: { openThreads: () => [] },
       redact,
+      // the host's deleted-session test (session-tombstones.js via index.js sessionRunForgotten): nothing deleted by default
+      sessionRunForgotten: input.forgotten || (() => false),
       contextpack: { assemble: (data, opts) => { projections.push(data); return CP.assemble(data, opts); } }
     });
     return { pack, projected: projections[0], trustedProjected: projections[1], projectionCount: projections.length, requested };
@@ -238,6 +240,16 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
   A.eq(result.projected.chats.map(m => m.content), [clean.content, multiline.content],
     'only known-clean non-internal owner strings reach the pack; quotes are checked over full content before clipping');
   A.eq(result.pack.counts.runs, 2, 'real core excludes internal flags and streams from the accepted run rows');
+  /* A DELETED SESSION IS NOT RECENT ACTIVITY (qa/bugs/3e926b6a): the Commander deleted ws-deleted; its opening line rode
+     every later run's RECENT ACTIVITY. The real host projection asks the host's deleted-session test of every run row. */
+  const asked = [];
+  const afterDelete = host({
+    runs: [{ title: 'Deleted session opening line', ts: T, streamId: 'ws-deleted' }, { title: 'Live session run', ts: T, streamId: 'ws-main' }],
+    forgotten: r => { asked.push(r.streamId); return r.streamId === 'ws-deleted'; }
+  });
+  A.eq(afterDelete.projected.runs.map(r => r.title), ['Live session run'], 'a run of a deleted session never reaches the pack');
+  A.ok(afterDelete.pack.text.indexOf('Deleted session opening line') < 0 && afterDelete.pack.text.indexOf('Live session run') >= 0, 'the assembled activity carries the live run, never the deleted one');
+  A.eq(asked, ['ws-deleted', 'ws-main'], 'every run row is checked against the deleted-session ledger');
   A.eq(result.pack.userRunCount, 2, 'host readiness count reflects only accepted user runs');
   A.eq(result.pack.counts.chats, 2, 'real core excludes internal self-talk while preserving owner asks on the same stream');
   const surfaced = result.pack.text + '\n' + result.pack.activityLines.join('\n');
@@ -363,6 +375,7 @@ A.eq(CP.dayTag(0, T), '', 'undated → empty tag');
     const count = vm.runInNewContext(recentFn + '\n' + countFn + '\nnightshiftUserRunCount()', {
       Date: { now: () => T },
       TrustedLearning, redact, contextpack: CP,
+      sessionRunForgotten: () => false,
       runStore: { list: () => { reads.list++; return input.runs || []; }, all: refuse('runStore.all') },
       transcriptStore: { all: refuse('transcriptStore.all') },
       taskBriefStore: { list: refuse('taskBriefStore.list') },

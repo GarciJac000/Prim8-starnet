@@ -17,13 +17,16 @@ function lift(name) {
   return appjs.slice(start, end + 4);
 }
 const src = ['stationDefaultWire', 'savedStationProv', 'focusWire', 'applyWire'].map(lift).join('\n');
+// the wire-pin tracker is two module lines (a `let` + a one-line helper), lifted verbatim
+const pinDecl = (appjs.match(/\n  let wirePinOwner = '';\n  function noteWirePin\(a\) \{[^\n]*\}\n/) || [''])[0];
+A.ok(pinDecl.length > 0, 'the wire-pin tracker exists in app.js');
 function world(agentsList) {
   const agents = new Map(agentsList.map(a => [a.id, a]));
   const state = { prov: '', model: '', effort: '' };
   const Harness = {
     setProv: p => { state.prov = p; }, setModel: m => { state.model = m; }, setReasoningEffort: e => { state.effort = e; }
   };
-  const fns = new Function('agents', 'Harness', src + '\nreturn { stationDefaultWire, savedStationProv, focusWire, applyWire };')(agents, Harness);
+  const fns = new Function('agents', 'Harness', pinDecl + src + '\nreturn { stationDefaultWire, savedStationProv, focusWire, applyWire, noteWirePin };')(agents, Harness);
   return Object.assign(fns, { agents, state });
 }
 
@@ -84,6 +87,39 @@ A.eq((appjs.match(/Harness\.setProv\(savedStationProv\(saved\)\)/g) || []).lengt
   A.eq(calls, ['roster', 'persist'], 'unpinned roster rows and the save are rewritten');
   A.eq(f.setStationProvider('openrouter'), false, 'a repeat pick is a no-op');
 }
+// 2026-10-21 user report: an Overseer with NO model let an unpinned agent keep the last crew pin in the wire (a StarNet
+// slug), so runs went to managed credits or the dock cleared it to "no model selected for CLAUDE CODE".
+{
+  const bare = { id: 'agent', model: '', provider: 'claude-cli', reasoningEffort: '' };
+  const starPin = { id: 'custom1', model: 'openai/gpt-6-luna', provider: 'starnet', reasoningEffort: 'high' };
+  const free = { id: 'scout', model: null, provider: null, reasoningEffort: null };
+  const v = world([bare, starPin, free]);
+  v.applyWire(v.focusWire(starPin));
+  A.eq(v.state.model, 'openai/gpt-6-luna', 'a crew pin still drives the wire while that agent is focused');
+  v.applyWire(v.focusWire(free));
+  A.eq(v.state.model, '', 'an unpinned agent never inherits the last crew pin when the Overseer has no model');
+  A.eq(v.state.prov, 'claude-cli', 'it takes the station provider');
+  v.applyWire(v.focusWire(bare));
+  A.eq(v.state.model, '', 'the model-less Overseer does not resurrect the crew pin either');
+
+  // an older station keeps its model only in the wire (hero saved with no model): focusing must NOT wipe it
+  const L = world([{ id: 'agent', model: '', provider: 'codex' }, { id: 'r', model: null, provider: null }]);
+  L.state.model = 'gpt-6-luna';
+  L.applyWire(L.focusWire(L.agents.get('agent')));
+  L.applyWire(L.focusWire(L.agents.get('r')));
+  A.eq(L.state.model, 'gpt-6-luna', 'a station model that lives only in the wire survives focus changes');
+
+  // a pin written straight to the wire (dock pick / pin editor, not applyWire) is tracked too
+  const D = world([{ id: 'agent', model: '', provider: 'codex' }, { id: 'x', model: 'm-x', provider: 'starnet' }, { id: 'y', model: null }]);
+  D.state.model = 'm-x'; D.noteWirePin(D.agents.get('x'));
+  D.applyWire(D.focusWire(D.agents.get('y')));
+  A.eq(D.state.model, '', 'a crew pin set by the dock is cleared when an unpinned agent takes focus');
+  D.state.model = 'm-hero'; D.noteWirePin(D.agents.get('agent'));
+  D.applyWire(D.focusWire(D.agents.get('y')));
+  A.eq(D.state.model, 'm-hero', 'the Overseer is never a crew pin owner');
+}
+A.eq((appjs.match(/noteWirePin\((a|agent)\);/g) || []).length, 2, 'both direct pin writers (pin editor + dock) note the wire owner');
+
 const stationui = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'app', 'stationui.js'), 'utf8');
 A.ok(/h\.setProv\(p\);\s*\n\s*\/\/[^\n]*\n\s*if \(typeof App !== 'undefined' && App\.setStationProvider\) App\.setStationProvider\(p\);/.test(stationui),
   'the Settings provider card moves the station default too');

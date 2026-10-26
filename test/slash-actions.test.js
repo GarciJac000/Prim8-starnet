@@ -400,6 +400,11 @@ const mk = (over) => { const d = deps(over); return { S: makeSlashActions(d), ca
     const mixed = await makeSlashActions({ budget: { snapshot: async () => Object.assign({}, SNAP, { unpricedRuns: 2, unmeteredRuns: 3 }) } }).run('usage', '', {});
     A.ok(mixed.lines.some(l => /2 runs? .*no published price/.test(l) && /3 .*subscription/.test(l) && /not in these dollars/.test(l)), 'unpriced and subscription runs are named as outside the dollar figures (' + mixed.lines.join(' | ') + ')');
     A.ok(!r0usageHasCaveat(await makeSlashActions({ budget: { snapshot: async () => SNAP } }).run('usage', '', {})), 'a fully priced ledger carries no caveat line');
+    // a run STOPPED mid-answer (80de2a75) is on a priced model: its booked dollars are in the total, as a floor — never
+    // the "no published price" caveat
+    const cut = await makeSlashActions({ budget: { snapshot: async () => Object.assign({}, SNAP, { usageMissingRuns: 1 }) } }).run('usage', '', {});
+    A.ok(cut.lines.some(l => /^1 run stopped mid-answer/.test(l) && /at least/.test(l)), 'a stopped run says the dollars are a floor (' + cut.lines.join(' | ') + ')');
+    A.ok(!r0usageHasCaveat(cut), 'a stopped run on a priced model is never called unpriced or a subscription (' + cut.lines.join(' | ') + ')');
   }
   function r0usageHasCaveat(res) { return res.lines.some(l => /no published price|subscription/.test(l)); }
 

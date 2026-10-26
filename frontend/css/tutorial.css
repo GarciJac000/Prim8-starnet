@@ -80,7 +80,7 @@
   border: 2px solid var(--ph, #ffaa33);
   border-radius: 8px;
   box-shadow: 0 0 12px var(--ph-glow, rgba(255, 170, 51, 0.5));
-  animation: tutRingPulse 1.5s ease-in-out infinite;
+  animation: tutRingPulse 1.5s steps(8, jump-none) infinite;
 }
 .tut-ring.no-anim { animation: none; }
 
@@ -91,7 +91,7 @@
   position: relative;
   border-color: var(--ph, #ffaa33) !important;
   box-shadow: 0 0 10px var(--ph-glow, rgba(255, 170, 51, 0.45)), inset 0 0 6px var(--ph-glow, rgba(255, 170, 51, 0.25));
-  animation: dockGlowPulse 2.2s ease-in-out infinite;
+  animation: dockGlowPulse 2.2s steps(9, jump-none) infinite;
 }
 @media (prefers-reduced-motion: reduce) { .bb-grp.dock-glow, #bb-build.dock-glow { animation: none; } }
 @keyframes dockGlowPulse {

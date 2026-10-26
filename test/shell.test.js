@@ -59,6 +59,20 @@ const killedBy = (p) => p.then(r => { throw new Error('expected a killed command
     A.eq(shell._internals.escapesWorkspace('mkdir foo\\bar'), null, 'relative mkdir foo\\bar is NOT a floor escape');
     A.throws(() => tool.run({ cmd: 'type \\Users\\andro\\hosts' }, ctx()), 'drive-root path refused by the tool');
 
+    // FILES BEFORE THE SHELL (2026-10-25): a path refusal names the file tools as the way in ONLY when the host says this
+    // run carries them (ctx.fileToolsOnWire), and the cwd route only where cwd may leave the workspace (the local backend)
+    const refusalOf = (t, args, c) => { try { t.run(args, c); } catch (e) { return String(e && e.message); } return ''; };
+    const plainRefusal = refusalOf(tool, { cmd: 'type C:\\proj\\notes.md' }, ctx());
+    A.ok(/^refused: drive-absolute/.test(plainRefusal) && !/fs_read/.test(plainRefusal), 'no file tools on the wire: the refusal never names a tool the run lacks');
+    const hinted = refusalOf(tool, { cmd: 'type C:\\proj\\notes.md' }, ctx({ fileToolsOnWire: true }));
+    A.ok(/call fs_read \/ fs_list \/ fs_search with the full path instead/.test(hinted), 'file tools on the wire: the refusal names them as the way in');
+    A.ok(!/as cwd/.test(hinted), 'no execution environment: cwd cannot leave the jail, so the cwd route is not offered');
+    A.ok(/fs_read/.test(refusalOf(tool, { cmd: 'type ..\\notes.md' }, ctx({ fileToolsOnWire: true }))), 'a parent-directory refusal names the file tools too');
+    A.ok(!/fs_read/.test(refusalOf(tool, { cmd: 'cat .checkpoints/index.json' }, ctx({ fileToolsOnWire: true }))), 'a protected-file refusal never points at the file tools');
+    const localTool = makeShellTool({ environment: { backendIdFor: () => 'local', refusalFor: () => null } }).execTool;
+    const localRefusal = refusalOf(localTool, { cmd: 'powershell -NoProfile -Command "Get-Content \'C:\\proj\\notes.md\'"' }, ctx({ fileToolsOnWire: true }));
+    A.ok(/fs_read/.test(localRefusal) && /pass that folder as cwd/.test(localRefusal), 'local backend: the refusal names the file tools and the cwd route');
+
     // The paired Telegram owner is the person sitting at the machine: their shell may deliberately use a host
     // directory outside the agent workspace. Ordinary calls above remain jailed and screened.
     const checkpointRoots = [];

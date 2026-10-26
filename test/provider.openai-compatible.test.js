@@ -243,6 +243,27 @@ module.exports = (async () => {
     A.eq(models[0].id, 'local-model', 'catalog id parsed');
     A.eq(p.contextLimit('local-model'), 1234, 'context length from catalog');
     A.eq(p.supportsTools('local-model'), true, 'tool support from supported_parameters');
+    A.eq(p.outputLimit('local-model'), 0, 'no output ceiling in the catalog or the profile -> outputLimit 0 (unknown)');
+  }
+
+  // OUTPUT LIMIT (bug d3a76db3: the run's spend pool prices a call's output by it). An OpenRouter-shaped list — what the
+  // StarNet proxy relays — names the ceiling under top_provider; a profile's own max_tokens bounds it from below.
+  {
+    const list = { data: [
+      { id: 'anthropic/claude-sonnet-x', context_length: 200000, top_provider: { context_length: 200000, max_completion_tokens: 64000 } },
+      { id: 'flat', context_length: 8000, max_completion_tokens: 2048 }
+    ] };
+    const fetchImpl = async () => new Response(JSON.stringify(list), { status: 200 });
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://relay.example.test/v1' });
+    const models = await p.listModels();
+    A.eq(models.find(m => m.id === 'anthropic/claude-sonnet-x').max_completion_tokens, 64000, 'a relayed OpenRouter row keeps its top_provider output ceiling');
+    A.eq(p.outputLimit('anthropic/claude-sonnet-x'), 64000, 'outputLimit: the relayed row\'s 64k ceiling');
+    A.eq(p.outputLimit('flat'), 2048, 'outputLimit: a top-level max_completion_tokens');
+    A.eq(p.outputLimit('not-listed'), 0, 'outputLimit: a model the catalog does not list -> 0');
+    const capped = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://relay.example.test/v1', maxTokens: 4096 });
+    await capped.listModels();
+    A.eq(capped.outputLimit('anthropic/claude-sonnet-x'), 4096, 'outputLimit: the max_tokens the profile sends, when lower');
+    A.eq(capped.outputLimit('not-listed'), 4096, 'outputLimit: the profile\'s max_tokens alone when the catalog names none');
   }
 
   // provider profile paths can override the default /chat/completions and /models endpoints

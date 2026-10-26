@@ -115,6 +115,7 @@ const { makeStationControlTools } = require('../sidecar/tools/builtin/station-co
     grab(/const deniedResult = ev => [^\n]*\n/, 'the denied-result predicate'),
     grab(/function foldChipResult\(chip, ev\) \{[\s\S]*?\n  \}/, 'foldChipResult'),
     grab(/function runCallCount\(entry\) \{[\s\S]*?\n  \}/, 'runCallCount'),
+    grab(/const runWho = id => [^\n]*\n/, 'the run head\'s agent name'),   // telemetryRun's head names its agent (10-18)
     grab(/function telemetryRun\(entry, role, skipTools\) \{[\s\S]*?\n  \}/, 'telemetryRun')
   ].join('\n');
   const el = () => {

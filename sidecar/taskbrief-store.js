@@ -258,6 +258,24 @@ function makeTaskBriefStore(deps) {
     }).then(()=>out);
   }
 
+  /* SCRUB A SAVED KEY (keys.save, 2026-10-25): the brief captured the Commander's message — a pasted key included —
+     before the agent could store that key in KEYS. fn(text) -> text names it; every brief's directive, input and
+     answers pass through it. The store snapshots the PRIOR value to .bak on each write, so a changed store is written
+     twice: once scrubbed, once more so the .bak holds the scrubbed copy too. Resolves true iff anything changed. */
+  function scrubText(fn) {
+    let changed = false;
+    const pass = t => { const s = fn(String(t || '')); if (s !== String(t || '')) changed = true; return s; };
+    return durable.update(STORE_KEY, cur => {
+      const rec = normalize(cur);
+      for (const b of rec.briefs) {
+        b.originalDirective = pass(b.originalDirective);
+        b.currentInput = pass(b.currentInput);
+        for (const q of b.questions) q.answer = pass(q.answer);
+      }
+      return changed ? rec : undefined;
+    }).then(() => changed ? durable.update(STORE_KEY, cur => normalize(cur)).then(() => true) : false);
+  }
+
   function complete(id, runId, now, assumptions) {
     const key = String(id || ''); let out = null;
     return durable.update(STORE_KEY, cur => {
@@ -387,7 +405,7 @@ function makeTaskBriefStore(deps) {
       .map(t => t.dimension);
   }
 
-  return { read, list, active, prepare, reopenAnswer, ask, askMany, answerInTurn, updateContext, proceed, complete, patterns, groundedFor, dimensionDeferrals, deferredDimensions, fingerprintQuestion, _durable: durable };
+  return { read, list, active, prepare, reopenAnswer, ask, askMany, answerInTurn, updateContext, proceed, complete, scrubText, patterns, groundedFor, dimensionDeferrals, deferredDimensions, fingerprintQuestion, _durable: durable };
 }
 
 module.exports = { makeTaskBriefStore, normalize, normalizeBrief, normalizeQuestion, fingerprintQuestion };

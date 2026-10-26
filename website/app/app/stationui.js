@@ -3306,9 +3306,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       const nowBtn = wsLive.querySelector('#ag-ws-now');
       if (nowBtn) nowBtn.addEventListener('click', () => {
         nowBtn.disabled = true; nowBtn.textContent = 'building…';
-        Harness.api.post('/api/workshop/shift', { agentId: aid })
-          .then(({ j: res }) => {
-            const p = (res && res.payload) || res || {};
+        // the shift is a run: its lines ride the page's ONE run stream (Harness.streamPost) and its outcome is the
+        // workshop.shift.result line at the end — never a connection of its own held for the whole build
+        let shift = null;
+        Harness.streamPost('/api/workshop/shift', { agentId: aid }, { onEvent: (name, payload) => { if (name === 'workshop.shift.result') shift = payload; } })
+          .then(async r => { if (!r.ok) throw new Error((r.j && r.j.error) || 'http ' + r.status); await r.done; return shift; })
+          .then(res => {
+            const p = res || {};
             if (p.reason === 'built') notify('⚒ built — it’s waiting as a new session in your rail', 'gold');
             else if (p.reason === 'no-capability') notify('couldn’t build — no model/key available for unattended runs', 'bad');
             else if (p.reason === 'empty-backlog') notify('nothing queued to build', 'warn');
@@ -4594,6 +4598,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     '    { "id": "basic", "prompt": "Write brief.json for this week", "writablePaths": ["brief.json"],\n' +
     '      "checks": [{ "id": "title", "kind": "artifact_json_equal", "path": "brief.json", "expected": { "title": "Week 41" } }] },\n' +
     '    { "id": "held", "heldOut": true, "prompt": "…", "writablePaths": ["brief.json"], "checks": [ … ] } ] }';
+  // Share to market is a door to the community cloud: it is on the card only while communitymaps.js says sharing is
+  // open (CommunityMaps.live, its COMMUNITY_LIVE switch). Until then the key is not drawn at all.
+  const communityLive = () => typeof CommunityMaps !== 'undefined' && CommunityMaps.live === true;
   function renderAgentSkills(host, skills, agentId, review) {
     review = review || {};
     if (!skills.length && !(review.candidates || []).length && !review.error) {
@@ -4655,7 +4662,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
               heldBtn +
               packageButtons +
               '<button class="consent-btn" data-ag-act="edit">Edit</button>' +
-              (held || s.createdBy === 'community' || s.sourceUrl || s.sourceAuthor ? '' : '<button class="consent-btn" data-ag-act="market">Share to market</button>') +
+              (held || s.createdBy === 'community' || s.sourceUrl || s.sourceAuthor || !communityLive() ? '' : '<button class="consent-btn" data-ag-act="market">Share to market</button>') +
               '<button class="consent-btn" data-ag-act="sharing">Change sharing</button>' +
               '<button class="consent-btn" data-ag-act="archive">' + (s.state === 'archived' ? 'Restore' : 'Archive') + '</button>' +
             '</div>' +
@@ -4772,6 +4779,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   const MARKET_SHELVES = ['Communication', 'Creative', 'Engineering', 'Marketing', 'Planning', 'Productivity', 'Research', 'Writing'];
   const SHARE_CREDIT_KEY = 'starnet.communityMapCredit';   // one credit name for everything this Commander shares
   function shareSkillToMarket(card, skill, agentId) {
+    if (!communityLive()) return;
     const body = card.querySelector('.sk-body'); if (!body || body.dataset.sharing === '1' || body.dataset.editing === '1') return;
     body.dataset.sharing = '1';
     if (!card.classList.contains('open')) card.classList.add('open');
@@ -8072,7 +8080,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     const secNotifs =
       // NOTIFICATIONS — per-category on/off + a notification sound toggle (P1-8). Each is HONORED at emit time in
       // notify(): a muted category is dropped before it ever reaches the panel/toast (not decorative).
-      '<h4 class="ms-h">NOTIFICATIONS <span class="dim">— what pings you, and whether it chimes</span></h4>' +
+      '<h4 class="ms-h">NOTIFICATIONS</h4>' +
       '<p class="set-about">Choose which events appear in the notification panel and as pop-up alerts. Changes save immediately.</p>' +
       '<label class="set-row"><input type="checkbox" id="ntp-runComplete"' + (npf('runComplete') ? ' checked' : '') + '> RUN COMPLETE <span class="dim">— a run saved or made something</span></label>' +
       '<label class="set-row"><input type="checkbox" id="ntp-needsApproval"' + (npf('needsApproval') ? ' checked' : '') + '> NEEDS APPROVAL <span class="dim">— an agent is waiting on your yes/no</span></label>' +
@@ -8591,7 +8599,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         if (reachWrap) reachWrap.querySelectorAll('[data-reach]').forEach(x => x.classList.toggle('sel', sync.loaded && x.dataset.reach === a.reach));
         if (paceWrap) paceWrap.querySelectorAll('[data-pace]').forEach(x => x.classList.toggle('sel', sync.loaded && Number(x.dataset.pace) === a.leashPerDay));
         for (const wrap of [initWrap, reachWrap, paceWrap]) if (wrap) wrap.querySelectorAll('button').forEach(x => { x.disabled = sync.pending; });
-        if (autoDesc) { autoDesc.setAttribute('role', 'status'); autoDesc.textContent = sync.pending ? 'Confirming autonomy settings…' : (sync.error ? sync.error + (sync.loaded ? ' Current setting: ' + AutonomyStore.describe() : ' Reopen this panel to retry.') : sync.loaded ? AutonomyStore.describe() : 'Autonomy settings have not been confirmed.'); }
+        if (autoDesc) { autoDesc.setAttribute('role', 'status'); autoDesc.textContent = sync.pending ? 'Confirming autonomy settings…' : (sync.error ? sync.error.replace(/([^.!?…])s*$/, '$1.') + (sync.loaded ? ' Current setting: ' + AutonomyStore.describe() : ' Reopen this panel to retry.') : sync.loaded ? AutonomyStore.describe() : 'Autonomy settings have not been confirmed.'); }
         try { paintEarned(a); } catch (_) {}   // GROWTH Tier 3: the EARNED badge on an earned rung
         try { syncPerm(); } catch (_) {}   // keep the permissions level highlight + blurb in step with the dial
       };
@@ -9847,7 +9855,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<button type="button" data-nf-view="all" aria-pressed="' + (notifView === 'all') + '">All · ' + (rest.length + nWaiting) + '</button>' +
       '<button type="button" data-nf-view="unread" aria-pressed="' + (notifView === 'unread') + '">New · ' + (unread + nWaiting) + '</button></div>' +
       '<button class="bb sm" id="nf-clear"' + (!unread ? ' disabled' : '') + '>MARK ALL READ</button></div>' +
-      '<div class="nf-list">' + (rows.length ? rows.map(row).join('') : '<div class="empty-state"><span class="es-glyph">▮</span><b>' + (notifView === 'unread' ? 'You’re all caught up' : 'Nothing yet') + '</b><span>' + (notifView === 'unread' ? 'Switch to All to see earlier ones.' : 'When an agent needs your OK, or work finishes while you’re elsewhere, it lands here.') + '</span></div>') + '</div>';
+      '<div class="nf-list">' + (rows.length ? rows.map(row).join('') : '<div class="empty-state"><span class="es-glyph" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11zM6.5 14.5h3"/></svg></span><b>' + (notifView === 'unread' ? 'You’re all caught up' : 'Nothing yet') + '</b><span>' + (notifView === 'unread' ? 'Switch to All to see earlier ones.' : 'When an agent needs your OK, or work finishes while you’re elsewhere, it lands here.') + '</span></div>') + '</div>';
     body.querySelectorAll('[data-nf-view]').forEach(b => b.addEventListener('click', () => {
       notifView = b.dataset.nfView; buildNotifs(body);
       const selected = body.querySelector('[data-nf-view="' + notifView + '"]'); if (selected) selected.focus();
@@ -9922,7 +9930,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (typeof CtxGauge === 'undefined') return;
     const cs = access.context ? access.context() : ((typeof Harness !== 'undefined' && Harness.contextState) ? Harness.contextState() : null);
     if (!cs) return;
-    const s = CtxGauge.compute(cs.used, cs.limit, { measured: cs.measured !== false, projected: !!cs.projected });
+    // measured against the window a RUN works in (cs.runWindow: the model's window stopped at a long-context price tier,
+    // final-polish 10-23), the one a run folds in, as /compress does; never the 1M a 200k-tier run folds inside
+    const tier = cs.runWindow > 0 && cs.limit > 0 && cs.runWindow < cs.limit;
+    const s = CtxGauge.compute(cs.used, tier ? cs.runWindow : cs.limit, { measured: cs.measured !== false, projected: !!cs.projected });
     g.dataset.level = s.level;
     // ASCII cell bar (asciifx.js): the gauge ticks in whole ▮/▯ cells instead of sliding — deliberate,
     // chunky, CRT-honest. Same real numbers (CtxGauge.compute), only the presentation is quantized;
@@ -9974,7 +9985,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
          (s.projected
            ? ', estimated for this chat’s next message from a real measurement of this model. It becomes exact the moment the agent replies.'
            : ', measured on this chat’s last request.') +
-         ' How much of this conversation the model can still hold; when it fills, older turns are folded into a summary automatically.')
+         (tier
+           ? ' The model can hold ' + CtxGauge.fmtTokens(cs.limit) + ', but it bills a higher rate for a prompt over ' + CtxGauge.fmtTokens(cs.runWindow) + ' tokens, so a run works in ' + CtxGauge.fmtTokens(cs.runWindow) + '.'
+           : '') +
+         ' How much of this conversation a run can still hold; when it nears full, older turns are folded into a summary automatically.')
       : (s.limit ? 'measuring… send a message and this fills in' : 'measuring this model’s memory size…'));
     // This runs every second. Writing `title` here would recreate the OS tooltip after Tooltip.adopt()
     // removed it, while the pointer was already resting on the gauge (no second pointerover to re-adopt).
@@ -10057,22 +10071,91 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // flip the dot to a distinct amber/warn state + explain it in the title. NO new window, NO nag — just
   // an honest dot state. Never asserts durability the harness can't prove (truthful-telemetry law).
   let degradedNotified = false;   // ONE persistent notice per session for the degraded workspace (the dot carries the ongoing state)
+  let seededNotified = false;     // bug 5c019483: ONE notice when this window's copy re-seeded a missing station file
+  // PRESERVED SESSIONS AT BOOT (support report 2026-10-21): a window's refused save stays on the station after that window
+  // is gone. When the newest one still holds sessions this station lacks (the sidecar counts them), say so once and
+  // offer to bring them back. Nothing shows when the station cannot say, or when nothing would come back.
+  // NOT NOW STICKS (review 10-23 #3a, r2 #6): a watermark, the newest dismissed copy's time, kept in this page's UI store.
+  // No copy saved at or before it is offered again (an OLDER copy holding the very sessions just declined included); a copy
+  // written after it (a newer one, or the same file written again) is.
+  function dismissedPreservedAt() { const t = Number(store && store.preservedDismissedAt); return Number.isFinite(t) && t > 0 ? t : 0; }
+  function dismissPreserved(offer) {
+    store.preservedDismissedAt = Math.max(dismissedPreservedAt(), Math.floor(Number(offer.savedAt) || 0));
+    save();
+  }
+  // the station reads preserved copies under a time budget and says `more` when it stopped before finding one: ask again
+  // (a short pause between asks keeps the station free), until it finds one or has read them all
+  const preservedPause = ms => new Promise(r => (typeof setTimeout === 'function' ? setTimeout(r, ms) : r()));
+  async function offerPreservedSaves() {
+    if (typeof CloudSave === 'undefined' || !CloudSave.conflicts || document.getElementById('save-conflict-notice')) return;
+    let offer = null;
+    for (let ask = 0; ask < 25 && !offer; ask++) {
+      if (ask) await preservedPause(800);
+      const list = await CloudSave.conflicts(dismissedPreservedAt());
+      offer = list.find(c => c && c.file && Number(c.restorable) > 0) || null;
+      if (!list.more) break;
+    }
+    // a live conflict is offered on its own banner (Restore this window's sessions), even before that banner is drawn
+    const live = (() => { try { const h = CloudSave.health && CloudSave.health(); return !!(h && h.conflict); } catch (_) { return false; } })();
+    if (!offer || live || document.getElementById('save-conflict-notice') || document.getElementById('save-preserved-notice')) return;
+    const n = Number(offer.restorable);
+    const when = offer.savedAt ? new Date(offer.savedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'earlier';
+    const banner = document.createElement('div'); banner.id = 'save-preserved-notice'; banner.setAttribute('role', 'alert');
+    banner.style.cssText = 'position:fixed;top:8px;left:10%;right:10%;z-index:100000;padding:16px;background:#281e12;color:#fff;border:2px solid #e8b35c';
+    const label = document.createElement('p');
+    label.textContent = 'A window’s save preserved on the station (' + when + ') holds work in ' + n + (n === 1 ? ' session' : ' sessions') + ' that this station doesn’t have. Restoring brings it into the station; nothing in the station is removed, and the station file is copied aside first.';
+    const restore = document.createElement('button'); restore.className = 'bb'; restore.textContent = 'Restore ' + n + (n === 1 ? ' session' : ' sessions');
+    restore.onclick = async () => { restore.disabled = true; try { await CloudSave.restoreConflict(offer.file); } catch (e) { label.textContent = e.message; restore.disabled = false; } };
+    const later = document.createElement('button'); later.className = 'bb'; later.textContent = 'Not now'; later.onclick = () => { dismissPreserved(offer); banner.remove(); };
+    banner.append(label, restore, later); document.body.append(banner);
+  }
   function refreshSaveDurability(d) {
     d = d || $('#save-dot'); if (!d) return;
     let h = null;
     try { h = (typeof CloudSave !== 'undefined' && CloudSave.health) ? CloudSave.health() : null; } catch (_) { h = null; }
     d.classList.remove('stale', 'degraded');
+    if (h && h.seeded && !seededNotified) {
+      seededNotified = true;
+      try { notify('The station file on this computer was missing, so this window’s copy of your station was saved back to it.', 'warn'); } catch (_) {}
+    }
     if (h && h.conflict) {
       d.classList.add('degraded');
-      d.title = 'Another window saved newer station changes. Your work from this window was preserved separately on the station. Download a copy or reload the current station.';
+      // a reset refusal is NOT another window: this computer's station was erased or started fresh after the station this
+      // window holds was founded, so the station file stays empty and this window's copy was only set aside
+      const reset = h.conflict.reset === true;
+      // a re-seed refusal is not "newer" either: the station file went missing and ANOTHER window's copy was saved back
+      // first; which of the two copies holds more work is unknown, so neither is called newer
+      const reseeded = !reset && h.conflict.reseeded === true;
+      // this window's OWN copy re-seeded the missing station file and is still the station's newest save, but its
+      // acknowledgement never arrived, so its later saves are behind its own write (review 10-23 #6): never blamed on another
+      // window. Said without naming a cause the page cannot see (r2, proofE: no restart is implied)
+      const ownSeed = !reset && !reseeded && h.conflict.ownSeed === true;
+      // a copy from before this computer's station was reset, while the station is from after it: erased work, which the
+      // station refuses to restore, so no Restore key is offered (review 10-23 #5)
+      const erased = !reset && h.conflict.predatesReset === true;
+      d.title = reset
+        ? 'This computer’s station was reset (erased, or set aside for a fresh start) after the station in this window was founded, so it was not restored. This window’s copy was kept separately on the station. Download a copy or open the fresh station.'
+        : erased
+        ? 'This window holds a station from before this computer’s station was reset, so its changes were not saved into the current station. This window’s copy was kept separately on the station. Download a copy or reload the current station.'
+        : reseeded
+        ? 'The station file on this computer was missing, and another window’s copy of this station was saved back to it first. This window’s copy was kept separately on the station. Download a copy or reload the current station.'
+        : ownSeed
+        ? 'The station file on this computer was missing, and this window’s copy was saved back to it, but this window never heard back that it was. This window’s later changes were kept separately on the station. Download a copy or reload the current station.'
+        : 'Another window saved newer station changes. Your work from this window was preserved separately on the station. Download a copy or reload the current station.';
       if (!document.getElementById('save-conflict-notice')) {
         const banner = document.createElement('div'); banner.id = 'save-conflict-notice'; banner.setAttribute('role', 'alert');
         banner.style.cssText = 'position:fixed;top:8px;left:10%;right:10%;z-index:100000;padding:16px;background:#281e12;color:#fff;border:2px solid #e8b35c';
         const label = document.createElement('p'); label.textContent = d.title;
         const exportButton = document.createElement('button'); exportButton.className = 'bb'; exportButton.textContent = 'Download this window’s save';
         exportButton.onclick = () => { const blob = new Blob([JSON.stringify(CloudSave.localSnapshot() || {})], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'starnet-conflicting-save.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
-        const reload = document.createElement('button'); reload.className = 'bb'; reload.textContent = 'Reload current station'; reload.onclick = async () => { try { await CloudSave.reloadCurrent(); } catch (e) { label.textContent = e.message; } };
-        banner.append(label, exportButton, reload); document.body.append(banner);
+        const reload = document.createElement('button'); reload.className = 'bb'; reload.textContent = reset ? 'Open the fresh station' : 'Reload current station'; reload.onclick = async () => { try { await CloudSave.reloadCurrent(); } catch (e) { label.textContent = e.message; } };
+        // the preserved copy's sessions go INTO the station (added, never removing any), then this window reloads onto it
+        // never after a RESET, and never for erased work: the station was erased on purpose, and this copy is from before it
+        // (the station refuses that restore, so the key is never shown for it)
+        const file = h.conflict.recovery;
+        const restore = document.createElement('button'); restore.className = 'bb'; restore.textContent = 'Restore this window’s sessions';
+        restore.onclick = async () => { restore.disabled = true; try { await CloudSave.restoreConflict(file); } catch (e) { label.textContent = e.message; restore.disabled = false; } };
+        banner.append(label); if (file && !reset && !erased && CloudSave.restoreConflict) banner.append(restore); banner.append(exportButton, reload); document.body.append(banner);
       }
       return;
     }
@@ -12359,7 +12442,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // GROWTH Tier 3: repaint the Settings AUTONOMY panel's EARNED badge if it is open (no-op otherwise — the paint fn
   // queries its own (possibly detached) host nodes, so a closed panel costs nothing). Called after a trust accept.
   const repaintAutonomy = () => { try { if (repaintAutonomyDial) repaintAutonomyDial(); } catch (_) {} };
-  return { init, enter, setRoster, leave, clearRunning, runningCount: () => runningAgents.size, isAgentRunning: (id) => agentLive(id), notify, warnIfStationLacksKey, settleNotifs, waitingNotifKeys, seenSession, storedWaits, settleStoredWait, flashSave, refreshSave: () => refreshSaveDurability(), openAgent, refreshCrew: () => crewTick(), openArcade, toggleTerm, openTerm, focusProvider, showTerm, showAgent, notifsMarkRead, notifsClear, badges, openDesk, closeTerm, rerender, refreshBoard: refreshBoardLive, pokeQuests, setTheme, getTheme, setLook, lookNow, lookOptions, repaintAutonomy, initiativeLabel, refreshSystems, toggleFamily, familyOf, registerWindow, h, motionRestState, reseatToasts };
+  return { init, enter, setRoster, leave, clearRunning, runningCount: () => runningAgents.size, isAgentRunning: (id) => agentLive(id), notify, warnIfStationLacksKey, settleNotifs, waitingNotifKeys, seenSession, storedWaits, settleStoredWait, flashSave, refreshSave: () => refreshSaveDurability(), offerPreservedSaves, openAgent, refreshCrew: () => crewTick(), openArcade, toggleTerm, openTerm, focusProvider, showTerm, showAgent, notifsMarkRead, notifsClear, badges, openDesk, closeTerm, rerender, refreshBoard: refreshBoardLive, pokeQuests, setTheme, getTheme, setLook, lookNow, lookOptions, repaintAutonomy, initiativeLabel, refreshSystems, toggleFamily, familyOf, registerWindow, h, motionRestState, reseatToasts };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { visibleTerminalRect, clampTerminalSize };

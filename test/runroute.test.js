@@ -61,4 +61,15 @@ function mockRes(headersSent) {
   A.ok(/plain string reason/.test(body.error), 'non-Error reason carried');
 }
 
-console.log('runroute.test: OK (13 assertions)');
+// a response already answered AND ended (a run on the page's shared stream answers its POST at once) takes no write:
+// an http response written after end() emits an 'error' nothing catches
+{
+  const res = mockRes(true);
+  res.writableEnded = true;
+  res.write = () => { throw new Error('write after end'); };
+  res.end = () => { throw new Error('end after end'); };
+  A.doesNotThrow(() => runRouteFailure(res, new Error('late failure'), redact), 'an ended response is left alone');
+  A.strictEqual(res.chunks.length, 0, 'nothing written after end');
+}
+
+console.log('runroute.test: OK (15 assertions)');

@@ -9,7 +9,9 @@
    B. the ONE-ON-ONE choice card (chat.js clarifyRow, executed): who asks on its own line, the question at reading size,
       the reason folded, a hint that says what ★ means, the suggested answer as the lit key, the hint gone once answered.
    C. the presence line names the request in the card's words, never a raw tool id; the header never shows the pause;
-      LET'S SHAPE THIS folds its reason and draft; the CSS keeps the sizes, the 5px matte card and the 45% strip. */
+      LET'S SHAPE THIS folds its reason and draft; the CSS keeps the sizes, the 5px matte card and the 45% strip.
+   D. the glass layer's Pip-Boy register (pipglass.css, Andrew 10-18): every COMMS card a 2px box, a waiting card framed in
+      gold until answered, one terminal key (bright phosphor, the lit one gold), the working line at 15px on a calm meter. */
 'use strict';
 const A = require('./_assert.js');
 const fs = require('node:fs');
@@ -243,5 +245,24 @@ const byClass = (root, c) => all(root).filter(e => e._cls && e._cls.has(c));
   A.ok(/\[data-clarify-prompt\] \.cq-text \{[^}]*font-size: var\(--sn-type-prose\)[^}]*-webkit-line-clamp: 3/.test(beat), 'one-on-one card: the question at reading size, three lines');
   A.ok(/body #chat-panel \{ font-variant-ligatures: none; \}/.test(beat), 'no broken fi ligature ("frst") in COMMS');
   A.ok(!/\.consent-btn\.danger \{[^}]*border-color/.test(beat), 'Full access never wears the suggested key\'s gold edge');
+  /* ---- D. the Pip-Boy card register (Andrew 10-18: "audit and polish the COMMS cards … in the same way") ---- */
+  const pip = read('frontend/css/pipglass.css');
+  const pipCards = pip.slice(pip.indexOf('PIP-BOY COMMS CARDS'));
+  A.ok(pip.indexOf('PIP-BOY COMMS CARDS') > 0, 'pipglass.css carries the COMMS cards section');
+  A.ok(/:is\(\.cmsg\.turnin, \.cmsg\.nudge, \.cmsg\.consent, #chat-log > \.dg-line, #gc-questions \.gc-question, #gc-states \.gc-state\) \{ border-radius: 2px; \}/.test(pipCards),
+    'every COMMS card is the 2px box (were 5px decision cards, a 10px DELEGATED card, a 4px working line in one transcript)');
+  A.ok(/\.cmsg\.consent\[data-live-ask\] \{\s*border-color: rgba\(var\(--gold-rgb\), \.45\);/.test(pipCards) && /function releaseCard\(el\) \{\s*if \(!el\) return;\s*if \(el\.dataset\) delete el\.dataset\.liveAsk;/.test(chat),
+    'a card that waits on you is framed in gold all round (a 2px left edge drew one device pixel at TEXT SIZE 90), and the frame leaves with the answer');
+  A.ok(/text-transform: uppercase;\s*color: var\(--ph-bright\); border: 1px solid rgba\(var\(--ph-rgb\), \.4\);/.test(pipCards),
+    'a plain key reads in the BRIGHT phosphor: in a red theme the phosphor is the fault colour\'s twin and ALWAYS read as a second DENY');
+  A.ok(/\.consent-btn:not\(\.thumb\):is\(\.primary, \.ws-openit, \.ws-primary, \.consent-confirm\),[\s\S]{0,400}\{\s*color: var\(--gold\); border-color: rgba\(var\(--gold-rgb\), \.75\);/.test(pipCards), 'the lit key is the NEEDS YOU key\'s gold');
+  A.ok(!/\.cmsg\.consent(?:, \.dg-inspect)?\) \.consent-btn(?!:not\(\.thumb\))/.test(pipCards),
+    'the RATE row\'s thumbs (a turn-in\'s .consent-btn.thumb.primary) keep their own slim look: no card key rule reaches them');
+  A.ok(/\.tc-shortcut\[aria-pressed=true\],\s*body[^{]*\.gc-q-choice:is\(\[aria-pressed=true\], \.chosen\) \{\s*color: var\(--ph-bright\); border-color: var\(--ph\);/.test(pipCards),
+    'a picked answer stays visibly pressed over the card key');
+  A.ok(/#comms-presence:not\(\.resolved\) \.cp-dot,[\s\S]{0,200}font-size: 0; color: transparent; text-shadow: none; animation: none;/.test(pipCards) && /@keyframes pip-meter-cp /.test(pipCards),
+    'the working line drops the blinking block caret for the CREW rail\'s calm meter');
+  A.ok(/#comms-presence:not\(\.resolved\) :is\(\.cp-verb, \.cp-tool, \.cp-time\) \{ font-size: var\(--sn-type-meta\);/.test(pipCards), 'the working line reads at the floor, 16px (its tool name and time were 12px and dim, then 15)');
+  A.ok(/#comms-presence\.paused:not\(\.resolved\) \.cp-dot::after,[\s\S]{0,140}\{ content: none; \}/.test(pipCards), 'a run waiting on you shows one steady lamp, no meter (the CREW rail hides its meter then too)');
   A.report('ask-cards-readable.test');
 })().catch(e => { console.error(e); process.exitCode = 1; });

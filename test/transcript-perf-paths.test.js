@@ -41,7 +41,8 @@ function briefingFrom(transcriptStore, runs) {
     runStore: { list: () => runs.map(r => Object.assign({}, r)) }, AwayBriefing: require('../sidecar/away-briefing.js'), transcriptStore,
     failNote: () => {}, workshopAgentIds: () => [], workshopStore: { read: () => ({ backlog: [] }) }, validateWorkshopManifest: async () => null,
     workshopBuiltAtOf: () => 0, nightshiftDrafts: [], cronJobs: [], loopJobs: [], currentInitiative: () => 'off', nightFocusState: null,
-    overseer: { threads: () => [] }
+    overseer: { threads: () => [] },
+    sessionRunForgotten: () => false   // the host's deleted-session test (qa/bugs/3e926b6a): nothing deleted here
   };
   const names = Object.keys(deps);
   return new Function(...names, "'use strict';\n" + briefingSrc + '\nreturn awayBriefingInputs;')(...names.map(n => deps[n]));

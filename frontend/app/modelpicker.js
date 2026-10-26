@@ -45,6 +45,7 @@ const ModelPicker = (() => {
     const M = md(); if (!M) return 'MODELS';
     const p = norm(item.provider);
     if (p === 'openrouter') return 'OPENROUTER · ' + M.labels.orGroup(item);
+    if (p === 'starnet' && M.starnetDry && M.starnetDry()) return M.labels.provider(p) + ' · NO CREDITS';   // same reported-balance truth as the dock
     return M.labels.provider(p);
   }
   function optValue(item) { return norm(item.provider) + SEP + String(item.id || ''); }

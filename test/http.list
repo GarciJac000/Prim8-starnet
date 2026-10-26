@@ -1,5 +1,6 @@
 # Sidecar/HTTP integration gate. Run in order by scripts/run-test-list.mjs; one isolated Node process per line.
 test/provider-recovery.e2e.test.js
+test/context.price-tier.e2e.test.js
 test/computer-control.http.test.js
 test/memory-corrections.http.test.js
 test/memory-truth.http.test.js
@@ -42,6 +43,8 @@ test/auxmodel.e2e.test.js
 test/failreview.e2e.test.js
 test/learning-pause-midflight.e2e.test.js
 test/failreview-budget.e2e.test.js
+test/failreview-provider-refusal.e2e.test.js
+test/run-cap-bounds-spawn.e2e.test.js
 test/questrefresh.e2e.test.js
 test/e2e.run.test.js
 test/image-task.e2e.test.js
@@ -50,6 +53,7 @@ test/e2e.workspace-lease.test.js
 test/e2e.attachments.test.js
 test/e2e.summon.test.js
 test/e2e.dispatch-session.test.js
+test/selftalk-transcript.http.test.js
 test/station-layout.e2e.test.mjs
 test/station-control.e2e.test.mjs
 test/station-show.e2e.test.mjs
@@ -62,6 +66,7 @@ test/e2e.trigger-fullaccess-taint.test.js
 test/e2e.pathtrust.test.js
 test/e2e.subagent-background.test.js
 test/e2e.approval-lifecycle.test.js
+test/e2e.run-stream-pool.test.js
 test/e2e.run-truth-1017.test.js
 test/google-signin.e2e.test.js
 test/google-files.e2e.test.js
@@ -77,8 +82,10 @@ test/e2e.connector-readback.test.js
 test/recipe-drift.http.test.js
 test/cron.api.test.js
 test/cron.run-now.e2e.test.js
+test/desktop-endpoint-handover.e2e.test.js
 test/routine-keys.e2e.test.js
 test/cancel-host-run.e2e.test.js
+test/cancel-spend-unknown.http.test.js
 test/cron.station-default.e2e.test.js
 test/cron.degraded.e2e.test.js
 test/cron.interrupted-settlement.http.test.js
@@ -100,6 +107,7 @@ test/workspace-view.e2e.test.js
 test/nightshift-act.e2e.test.js
 test/nightshift-grant.e2e.test.js
 test/nightshift-contextpack.e2e.test.js
+test/session-delete-forgets.e2e.test.js
 test/nightshift-focus.e2e.test.js
 test/nightshift-halt.e2e.test.js
 test/nightshift-beat-halt.e2e.test.js
@@ -120,6 +128,7 @@ test/channels.telegram.buttons.e2e.test.js
 test/webhook-replay.e2e.test.js
 test/channels.relay-owner.e2e.test.js
 test/channels.telegram.group-allow.e2e.test.js
+test/channels.telegram.chat-truth.e2e.test.js
 test/cron.arm.test.js
 test/lifecycle-armed.http.test.js
 test/checkpoint-store.test.js
@@ -136,6 +145,7 @@ test/browser-mac-keys.e2e.test.js
 test/browser-minimized-window.e2e.test.js
 test/browser.stepin.e2e.test.js
 test/servicekeys.http.test.js
+test/keys-save.http.test.js
 test/servicekeys.shell.e2e.test.js
 test/servicekeys-1password.http.test.js
 test/skills.gate.http.test.js
@@ -165,6 +175,7 @@ test/routing.sample-stop.e2e.test.js
 test/routing.steptest.e2e.test.js
 test/routing.triggers.e2e.test.js
 test/routing.handoff.e2e.test.js
+test/routing.saved-station-grants.e2e.test.js
 test/station-template-example.e2e.test.js
 test/route-honesty.e2e.test.js
 test/effective-toolsets.e2e.test.js
@@ -202,6 +213,10 @@ test/connector-storage-start-fresh.http.test.js
 test/project-workspace.http.test.js
 test/autonomy-confirmation.http.test.js
 test/cli.e2e.test.js
+test/observer.e2e.test.js
+test/cli-agent-routes.e2e.test.js
+test/cli-station.e2e.test.js
+test/cli-app-launch.e2e.test.js
 test/interrupted-run-in-history.test.js
 test/procledger.windows-orphan.test.js
 test/toolsearch.connectors-deferred.test.js
@@ -242,5 +257,6 @@ test/lean-prompt.e2e.test.js
 test/host-notes.strict-template.e2e.test.js
 test/cross-run-cache.e2e.test.js
 test/cron.channel-media.e2e.test.js
+test/cron.upgrade-backlog.e2e.test.js
 test/cron.images-grant.e2e.test.js
 test/unpriced-run-label.e2e.test.js

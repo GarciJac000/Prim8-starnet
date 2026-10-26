@@ -671,7 +671,8 @@ const World = (() => {
        builder lays. WorldModel already marks the edits that leave the bake alone (staticBakeUnchanged; airlocks never
        are), exactly as BUILD mode reads them, so the floor now re-bakes only for an edit that changes the bake — or when
        the derived floor's size or origin moved (the bake is drawn in that frame). */
-    if (station && station.onChange) unsub = station.onChange(p => { geoDirty = true; if (!p || !p.staticBakeUnchanged || p.global) bakeEditPending = true; });
+    // STILL: a layout edit (often after an await: a builder step, a restyle, an undo) wakes a still floor — drawn on the next vsync
+    if (station && station.onChange) unsub = station.onChange(p => { geoDirty = true; if (!p || !p.staticBakeUnchanged || p.global) bakeEditPending = true; motionWake(); });
     rederive();
   }
 
@@ -1316,7 +1317,8 @@ const World = (() => {
   // proposal). Gated to a free, idle hero (never interrupts a task/talk/await/leisure walk) — the pin is a
   // projection, not a gate: if the agent is busy the card still shows on the board; the WALK just plays later.
   function maybePinProposal(now, count) {
-    if (now - pinCheckAt < 400) return; pinCheckAt = now;
+    if (now - pinCheckAt < 400) { if ((count | 0) > pinnedCount) noteDue(pinCheckAt + 400, now); return; }   // STILL: a waiting pin walk re-checks on its own vsync
+    pinCheckAt = now;
     if (!agent || agent.unplaced) return;
     if ((count | 0) <= pinnedCount) { if ((count | 0) < pinnedCount) pinnedCount = count | 0; return; }   // count dropped (accepted/declined) → lower the mark so a later re-propose re-pins
     // only launch the walk when the hero is genuinely free (idle, not seized, not already pinning)
@@ -1755,12 +1757,69 @@ const World = (() => {
      screen this should not happen", and the 30 fps cap made every camera move judder on his 239 Hz panel next to
      0.13.1's ~200 draws/s. The 5 fps unfocused tier is gone and the visible pace is 60: still ~4x under the uncapped
      240 Hz loop #69 measured, and the FRAME BUDGET below keeps a slow machine's UI alive either way.) A caller cap
-     (setFrameCap — the HUD widget's 48 ms) is that caller's stated intent and wins over the visible pace. */
+     (setFrameCap — the HUD widget's 48 ms) is that caller's stated intent and wins over the visible pace.
+     STILL (Andrew, 2026-10-21, approved: "draw 30/s while nothing on screen moves, snap back to 60 the instant anything
+     moves (144 while panning)"). What he was asked: a tier that applies only when nothing but background effects changed —
+     no body moved, no camera, crate, hover, input or run event — so the starfield drift, twinkle and light flicker step
+     half as often. The installed 0.13.5 idled at 178% of a core and 96% of it was DRAWING an unchanged station 60 times a
+     second. A frame whose verdict (stillVerdict, below renderPace) finds nothing on screen changed but those ambient
+     effects is redrawn at PACE_STILL_MS (30/s), waiting in a TIMER (no per-vsync rAF spin). It is only how often a still
+     scene is REDRAWN: nothing drawn changes, nothing that moves is slowed, a caller cap and a hidden page are untouched.
+     The verdict's own rule is "unsure is motion": a prop whose art moves on its clock, a bobbing body, a meteor all keep
+     the normal pace (its MOTION / AMBIENT lists name every source). Motion never waits on it:
+       · every source that starts motion from outside the frame wakes it (motionWake → paceWake): any input on the
+         window, a camera move, a harness event on U.bus, a World API call that changes a body, a bubble or the camera,
+         the hero's voice starting or stopping (voice.js → World.voiceChanged), and every async answer that rewrites what
+         the floor draws (the line plates and pallets, FIRST SHIP, the snapshot reconcile, feed truth, portals, a crate
+         the hand-off grace releases, the link going down or up);
+       · a change the frame can see coming lands on its own vsync: stillDue is the earliest one (an idle body's next
+         decision, a blink, the next frame of a clock-driven pose or prop, a talk turn, the next meteor, a cinecam cut);
+     and the frame that shows any motion is followed at the normal pace (60, or 144 while the hand moves the camera).
+     The 10-21 review of the tier found what it still slowed or delayed, all fixed the same evening: ANDROMEDA's meteor and
+     bolide had no sky readout (drawn at 30/s); a bubble or nameplate over a body walking OFF screen slides along the canvas
+     edge (now motion); an off-screen body's decision clocks were never due, though an initiator past the edge decides for
+     an on-screen partner (now due for every placed body); the voice and the async answers above never woke a still floor;
+     the SHIPPED pallet pop was not motion; NIGHT CITY's cars were classed as ambient, so a city floor drew them at 30/s
+     (they are motion now: a city sky with traffic driving never goes still). And the planted breath was counted as
+     motion, so a scene with a standing body never went still — the breath is now drift (see AMBIENT in the STILL VERDICT: sub-pixel, drawn at its true phase).
+     The final fixes (10-21): frameReviewRoom's camera cut (and init's resize) wake the floor, and every camera-writing export
+     is locked to the wrapper; a due change is met by rAF, never by a timer that can fire a Windows tick late (DUE LEAD); a
+     layout edit (station.onChange) wakes; animation start stamps set between frames read the wall clock; the ocean's plate
+     steps are due; a body napping in a bunk is rest and one boxing the heavy bag is motion; a dormant focus ease under a lock
+     is not camera motion; PropSprites.pulsing reads one stamp. */
   const PACE_VISIBLE_MS = 1000 / 60, PACE_MOTION_MS = 1000 / 144, PACE_MOTION_HOLD_MS = 1200;
-  const PACE_TIMER_MIN_MS = 100;   // pace intervals at/above this wait in a timer instead of spinning rAF
+  const PACE_STILL_MS = 1000 / 30, INPUT_HOLD_MS = 1200;   // still: 30 draws/s · input: a hand on the window holds the normal pace this long (hover tags, glances)
+  const PACE_TIMER_MIN_MS = 100;   // pace intervals at/above this wait in a timer instead of spinning rAF (the still pace does too)
   const SIM_SLICE_MS = 48, SIM_CATCHUP_MAX_MS = 1000;   // a slice stays under frameBody's 64 ms step clamp; past 1 s (a hidden page) the old freeze stands
   let paceTimer = 0, paceLowRate = false, motionUntil = 0, pacedDraws = 0, simMs = 0;   // simMs: total simulated time advanced (renderPace readout)
   let vsyncMs = 0, lastRafAt = 0;   // the display's own frame interval, learned from back-to-back rAF callbacks (rounds the pace to whole vsyncs)
+  // STILL state: the last verdict (still?), why not (the first motion source it found), the next known change, input stamp,
+  // and when a booked still timer fires (a verdict that finds an earlier change re-books)
+  let stillNow = false, stillWhy = 'boot', stillDue = Infinity, inputAt = -Infinity, paceTimerAt = 0, stillKick = false;
+  /* DUE LEAD (2026-10-21 final fixes): a timer is never trusted to hit a vsync. Windows (WebView2) timers can fire a whole
+     ~15.6 ms system tick late, so a timer booked 2 ms before a due change missed its vsync and the change drew a frame late.
+     The last vsync + 4 ms before a due change rides requestAnimationFrame (a skipped callback is cheap); the timer only
+     covers the long still wait before it. dueWatch is the change the last still verdict was waiting on: the draw that lands
+     it records how late it came (renderPace: dueDraws, dueLate — later than a vsync + 1 ms — dueLatMaxMs, dueLatAvgMs). */
+  const DUE_LEAD_SLACK_MS = 4;
+  let dueWatch = Infinity, dueDraws = 0, dueLate = 0, dueLatSum = 0, dueLatMax = 0;
+  function dueLeadMs() { return (vsyncMs || 17) + DUE_LEAD_SLACK_MS; }
+  function noteDueDraw(now) {
+    const l = now - dueWatch; dueWatch = Infinity;
+    dueDraws++; dueLatSum += l; if (l > dueLatMax) dueLatMax = l;
+    if (l > (vsyncMs || 17) + 1) dueLate++;
+  }
+  /* THE STILL TICK'S TIMER (Andrew: exactly 30/s while still). A still frame is drawn on the vsync frame()'s own rule picks
+     (the first one at least pace - half a vsync after the last draw). The timer wakes a hair after the vsync BEFORE that one
+     and rAF lands the draw, so a timer up to a vsync late (a Windows tick, ~15.6 ms at 60 Hz) still makes it, and an on-time
+     one books one rAF callback per still draw, as before. It used to aim 2 ms before the draw: a timer over 2 ms late missed
+     the vsync and the still pace fell to 20/s. */
+  const TICK_AFTER_VSYNC_MS = 0.5;
+  function drawSlackMs() { return Math.max(1, Math.min(vsyncMs || 2, 17) / 2); }   // frame()'s own slack: it draws on the vsync NEAREST the pace
+  function stillTickTimerAt(pace) {
+    const P = vsyncMs || 17, k = Math.max(1, Math.ceil((pace - drawSlackMs()) / P - 1e-9));
+    return lastDrawnAt + (k - 1) * P + TICK_AFTER_VSYNC_MS;
+  }
   function pageFocused() {
     try { return typeof document === 'undefined' || typeof document.hasFocus !== 'function' || document.hasFocus(); } catch (_) { return true; }
   }
@@ -1812,19 +1871,26 @@ const World = (() => {
     }
     if (strainDraws % STRAIN_PROBE_DRAWS === 0) strainProbe = true;   // the next draw measures full detail again
   }
+  // the still pace applies: the last verdict was still, no caller cap, no hand on the camera, and no known change is due yet
+  function stillPaced(now) { return stillNow && !frameCapMs && now >= motionUntil && now < stillDue; }
   function paceMs(now) {
-    const base = frameCapMs ? Math.max(frameCapMs, PACE_VISIBLE_MS) : now < motionUntil ? PACE_MOTION_MS : PACE_VISIBLE_MS;
+    const base = frameCapMs ? Math.max(frameCapMs, PACE_VISIBLE_MS) : now < motionUntil ? PACE_MOTION_MS : stillPaced(now) ? PACE_STILL_MS : PACE_VISIBLE_MS;
     return Math.max(base, budgetMs());
   }
   function cancelScheduled() {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
     if (paceTimer) { clearTimeout(paceTimer); paceTimer = 0; }
   }
-  // the ONE place the next frame is booked: rAF at a draw-rate pace, a timer then rAF at a low one
+  // the ONE place the next frame is booked: rAF at a draw-rate pace, a timer then rAF at a low one or the still pace. The
+  // still wait is a timer to just past the vsync before the still frame (THE STILL TICK'S TIMER) or a DUE LEAD before stillDue,
+  // then rAF (see DUE LEAD). A timer-booked callback is not a vsync sample: lastRafAt is cleared so a 33 ms gap can never be
+  // learned as the display's frame interval.
   function scheduleFrame(pace) {
     if (!running) return;
-    const wait = pace >= PACE_TIMER_MIN_MS ? lastDrawnAt + pace - performance.now() - 2 : 0;
-    if (wait > 0) paceTimer = setTimeout(() => { paceTimer = 0; if (running && !raf) raf = requestAnimationFrame(frame); }, wait);
+    const now = performance.now(), still = pace < PACE_TIMER_MIN_MS && stillPaced(now), lead = dueLeadMs();
+    const wait = pace >= PACE_TIMER_MIN_MS ? lastDrawnAt + pace - now - 2
+      : still && stillDue - now > lead ? Math.min(stillTickTimerAt(pace), stillDue - lead) - now : 0;
+    if (wait > 0) { lastRafAt = 0; paceTimerAt = still ? now + wait : 0; paceTimer = setTimeout(() => { paceTimer = 0; if (running && !raf) raf = requestAnimationFrame(frame); }, wait); }
     else raf = requestAnimationFrame(frame);
   }
   // focus / input / visible again: drop a pending low-rate wait and draw on the very next vsync
@@ -1833,11 +1899,14 @@ const World = (() => {
     clearTimeout(paceTimer); paceTimer = 0;
     if (!raf) raf = requestAnimationFrame(frame);
   }
+  // something started moving between frames: the scene is no longer known still, and a pending still wait is dropped, so the
+  // next vsync is drawn at the normal pace (that frame then judges itself). Called inside a frame it marks that frame moving.
+  function motionWake() { stillNow = false; stillKick = true; if (stillWhy === '') stillWhy = 'wake'; paceWake(); }
   // any hand on the window: you are here, so the idle auto-director stands down (it is for when you are AWAY, not while you
-  // type in COMMS) and a budget-throttled floor redraws now
-  function userActive() { camUserAt = performance.now(); paceWake(); }
+  // type in COMMS), a still or budget-throttled floor redraws now, and INPUT_HOLD_MS of normal pace follows (hover glances)
+  function userActive() { camUserAt = inputAt = performance.now(); motionWake(); }
   // you are moving the camera: draw up to PACE_MOTION_MS for a moment so a pan or zoom tracks the hand
-  function cameraMoved() { motionUntil = performance.now() + PACE_MOTION_HOLD_MS; paceWake(); }
+  function cameraMoved() { motionUntil = performance.now() + PACE_MOTION_HOLD_MS; motionWake(); }
   /* The simulation's step list for one drawn frame. At draw rate it is the old single step (dt clamped to 64 ms, so a
      long stall never teleports anyone). While the pacer holds a low rate it is the real elapsed time cut into
      <= SIM_SLICE_MS slices, so bodies and crates cover the same ground per wall-second as at 30 fps. */
@@ -1850,12 +1919,250 @@ const World = (() => {
   // a per-frame ease tuned at 60 Hz, held to the same WALL-CLOCK speed at any draw rate (the 30 fps pace, a 240 Hz panel)
   function easeK(k60, dt) { return dt > 0 ? 1 - Math.pow(1 - k60, dt / (1000 / 60)) : 0; }
   function renderPace() {
-    const now = performance.now(), pace = running ? paceMs(now) : 0;
+    const now = performance.now(), pace = running ? paceMs(now) : 0, still = running && stillPaced(now);
     return { running, focused: pageFocused(), motion: now < motionUntil, paceMs: +pace.toFixed(1), vsyncMs: +vsyncMs.toFixed(2),
-      mode: !running ? 'stopped' : frameCapMs ? 'capped' : pace > PACE_VISIBLE_MS + 0.5 ? 'budget' : pace < PACE_VISIBLE_MS - 0.5 ? 'motion' : 'visible',
+      mode: !running ? 'stopped' : frameCapMs ? 'capped' : pace < PACE_VISIBLE_MS - 0.5 ? 'motion' : still && pace < PACE_STILL_MS + 0.5 ? 'still'
+        : pace > PACE_VISIBLE_MS + 0.5 ? 'budget' : 'visible',
+      still: stillNow, stillWhy: stillWhy || null, stillDueMs: stillDue < Infinity ? Math.max(0, Math.round(stillDue - now)) : null,
+      stillFrames, stillWhyCounts: Object.assign({}, stillWhyN),   // cumulative: a bench window's still share and what kept it moving
+      // cumulative: the due changes a still floor waited on, how many drew later than a vsync (+1 ms), and how late (DUE LEAD)
+      dueDraws, dueLate, dueLatMaxMs: +dueLatMax.toFixed(1), dueLatAvgMs: dueDraws ? +(dueLatSum / dueDraws).toFixed(1) : null,
       drawCostMs: +drawCostMs.toFixed(2), budgetMs: +budgetMs().toFixed(1), strained, strainProbeMs: +strainProbeMs.toFixed(1),
       draws: pacedDraws, simMs: Math.round(simMs), timerWait: !!paceTimer };
   }
+  /* STILL VERDICT (the tier Andrew approved 2026-10-21 — see RENDER PACING). Runs once at the end of every drawn frame
+     (frameBody), on state that frame already computed — no extra scene pass, no allocation. A frame is STILL only when
+     nothing on screen changed but ambient effects; the first motion source found is kept as stillWhy (the renderPace
+     readout the bench proves it by). The rule it is written to: never slow or delay anything that moves — unsure is motion.
+       MOTION — the next frame keeps the normal pace:
+         wake   — motionWake ran during the frame (a harness event on U.bus, a World API call)
+         camera — pan or zoom moved since the last frame, a scripted move or a focus ease is running, the hand hold
+         input  — a hand on the window within INPUT_HOLD_MS (hover tags, nameplates, the gaze that follows the cursor),
+                  the hero's mic listening
+         body   — an on-screen body moved, turned, or changed pose, drawn frame, goal or state; is walking, holds a walk
+                  target, pivots or dissolves a pose; is working, speaking or talking; wears a wake ripple, level-up or
+                  working glow; or its drawn geometry moves on the clock (SPRITES.drawBody's _renderLive: the idle bob, the
+                  speech accent while it shows). Also a decision the very next tick acts on: a social or gather plan still
+                  to walk, a chase due to repath, the hero's glance roll pending (maybeGlance rolls every tick)
+         speech — a peer-chatter line is up (it rides a talking mouth and fades), or the hero's voice is speaking; or a
+                  canvas overlay that follows a body (its speech bubble, the hovered body's nameplate) while that body moves
+                  or its drawn head-top does — on screen or off, the overlay is clamped to the canvas edge (a bubble over a
+                  body that holds still is static while it is up: its vanishing is a due change, below)
+         crate  — a real or ghost crate riding or sinking, a queue jam bobbing, a hand-off or SEND TO crate in flight
+         prop   — an on-screen prop with live content (a worked or lit prop: run output, a progress strip, heat; a filter
+                  scanning; the OUTBOX flare; a lit bay; an arcade/TV/jukebox in use — a body resting on a couch is not);
+                  a drawn prop whose art moves on its own clock (PropSprites.clockNext: every native draw, an occupied
+                  screen's sweep, fish, wax, steam, plasma, a ripple, a wall screen's scan line); a harness pulse decaying
+                  (a tool-fire surge, a connector packet, a workbench flash: PropSprites.pulsing)
+         sky    — a meteor or the bolide crossing, the belt's ember shower or fireball, a city's cars driving (review 10-21:
+                  separate objects crossing the screen, never drift), the sky still baking (SpaceBG)
+         fx     — a canvas overlay animating: desk and dock flashes, the pin flourish, the FIRST SHIP pulse, a SHIPPED
+                  pallet's newest crate popping in, the hero's wake ripple and level surge, the awakening, arrival, kindling
+                  and flood, the dawn veil easing, a truth flare, the CRT roll bar sweeping
+         belt   — an ENERGIZED belt tile in frame (its rollers march; a cold line's rollers are parked)
+       AMBIENT — never motion, redrawn whole at the still pace: the sky's slow layers (star drift and twinkle, the gas
+         breathing, ocean swell, a city's clouds and beacons), light flicker (fixture and prop light modulation,
+         and the dust motes drifting in the light pools, under a device px per still frame), and alpha-only glow pulses
+         (the await tag and its caret, LINK DOWN, bay lamps, routing nags, a prop's lamp/heat/band/hologram/indicator
+         glow). Andrew's words named the starfield drift and twinkle, light flicker and glow pulses; the other skies'
+         slow layers and the light-pool dust motes are classed with them HERE, by this code, as the same kind of drift.
+         A planted body's breath is not motion either (review 10-21, the reviewer's option b): SPRITES.drawBody publishes it
+         as _renderDrift, not _renderLive. It is a 0.12 world px swell of the drawn height on a 6.6 s sine, smooth-sampled,
+         never snapped — its head-top moves under 0.004 x zoom device px between two still frames (0.023 px at MAXZ), and
+         every still frame draws it at its true phase, so 30 or 60 draws/s put the same picture on screen. Counting it
+         kept every scene with a standing body (the hero, in the default view) at 60/s: the tier never engaged. What
+         rounds to whole px on top of it — the bubble or nameplate over its head — stays motion (speech, above).
+     stillDue = the earliest change the frame can see coming: a placed body's inner-life decision clock (BODY_CLOCKS — every
+     body's, on screen or off: an off-screen initiator decides for an on-screen partner too); an on-screen body's glance,
+     meeting, talk turn, hold, chase or mimic beat ending, its next drawn-frame edge; a speech bubble vanishing, a prop's
+     next stepped frame, the next meteor or fireball, the CRT grain's next step, a cinecam cut, an encounter or assembly
+     beat (its hold, the overseer's next line, the next gathering roll), a ghost spawn: the pacer draws that vsync instead
+     of waiting out the tick. Draw passes add to it too (noteDue); stillBegin clears it at the top of the frame. */
+  const STILL_BODY_PAD = 48;      // world px past the canvas edge a body still counts as on screen (a walker is caught well before it shows)
+  const STILL_MOVE_EPS = 0.01;    // world px: a body nudged less than this has not moved (float dust from the separation pass)
+  // every timestamp the inner life re-decides at (the tick ladder's `now >= x` gates, *Until and *Cd): the earliest future one is due
+  const BODY_CLOCKS = Object.freeze(['idleUntil', 'thinkUntil', 'settleUntil', 'useUntil', 'studyUntil', 'pauseUntil', 'trackUntil',
+    'workUntil', 'workRetryAt', 'spokeUntil', 'chatTrackUntil', 'driveUntil', 'barJoinUntil', 'lastFunUntil', 'hardUntil', 'convergeUntil',
+    'glanceCd', 'lookCd', 'noticeCd', 'chatTrackCd', 'neighborGlanceCd', 'mimicCd', 'exploreCd', 'quirkCd', 'offbeatCd', 'ackCd',
+    'revisitCd', 'pauseCd', 'beltWatchCd', 'yieldCd', 'summonGlanceCd', 'roundsCd', 'napCd', 'lookBackCd', 'deskVisitCd',
+    'cursorGazeCd', 'barJoinCd', 'nextFidget']);
+  // a body resting on these leaves the prop's art as it was: a couch, a stool or chair, the bench press (static art), a
+  // beanbag, a bunk (the sleeper's quilt breath is the prop's own clock: PropSprites.clockNext). NOT the heavy bag ('bag'):
+  // a body boxing it is active punching, and the bag swings
+  const REST_USE = Object.freeze({ couch: 1, seat: 1, bench: 1, beanbag: 1, bed: 1 });
+  // the hero's maybeGlance, by goal (see heroGlanceAt): the idle TAIL re-rolls its glance on every tick until one fires; a
+  // BRANCH goal rolls once and re-arms glanceCd either way; NONE never glances
+  const GLANCE_TAIL = Object.freeze({ inspect: 1, tend: 1, gaze: 1, rounds: 1 });
+  const GLANCE_BRANCH = Object.freeze({ lounge: 1, stare: 1, mourn: 1, quirk: 1 });
+  const GLANCE_NONE = Object.freeze({ sleep: 1, firstwake: 1, mimic: 1, chase: 1 });
+  let stillMark = '', stillCamS = NaN, stillCamX = NaN, stillCamY = NaN, stillDueAcc = Infinity;
+  let stillFrames = 0;                         // drawn frames judged still (renderPace readout: a bench window's still share)
+  const stillWhyN = {};                        // drawn frames judged moving, by stillWhy (a dozen fixed keys: no growth)
+  let liveBeltOf = null, liveBeltFor = null, liveBeltBox = null;   // the energized tiles' bounding box (tile units), re-measured on a new layout or plan
+  // frameBody's first act: this frame judges itself, and its draw passes may add due changes (noteDue) from here on
+  function stillBegin() { stillNow = false; stillKick = false; stillMark = ''; stillDueAcc = Infinity; }
+  function stillMove(why) { if (!stillMark) stillMark = why; }                     // an in-draw motion source (the prop pass, the queue jam, the roll bar)
+  function noteDue(t, now) { if (t > now && t < stillDueAcc) stillDueAcc = t; }
+  function restingOn(p) { const u = propUse(p); return !u || !!REST_USE[u.kind]; }
+  function bodyOnScreen(b) {
+    if (!cv) return true;
+    const m = STILL_BODY_PAD * scale, x = bodyPosX(b) * scale + panX, y = bodyPosY(b) * scale + panY;
+    return x > -m && y > -m && x < cv.width + m && y < cv.height + m;
+  }
+  /* when the hero's maybeGlance (run every tick) next acts. <= now: it rolls on this very tick — and the idle tail rolls
+     again on every tick until a glance fires — so the next frame must come at the tick rate, or every failed roll would
+     wait out a still interval. Mirrors maybeGlance's own gates, in its order. */
+  function heroGlanceAt(b, now) {
+    if (activity === 'talk' || b.state === 'walk' || GLANCE_NONE[b.goal]) return Infinity;   // talk: listening glances ride the mic (input)
+    const t = Math.max(b.glance ? b.glance.until : 0, b.glanceCd || 0);
+    if (b.goal === 'use' || b.working) return Math.max(t, b.nextFidget || 0);
+    if (b.goal == null || GLANCE_TAIL[b.goal] || GLANCE_BRANCH[b.goal] || b.stilling) return t;
+    // any other goal: only THE LOOK-UP can act (revisit / watch, off task); a box to track is a crate, motion already
+    if ((b.goal === 'revisit' || b.goal === 'watch') && activity !== 'task' && !b.working) return Math.max(t, b.lookCd || 0);
+    return Infinity;
+  }
+  // drawBubble's own test: a line to say, up until its time — or past it while the hero's voice is still speaking it
+  function bubbleShown(b, now) {
+    if (!b.say || !b.say.text) return false;
+    if (now <= b.say.until) return true;
+    return b === agent && typeof Voice !== 'undefined' && !!Voice.isSpeaking && !!Voice.isSpeaking();
+  }
+  // '' or why this body is motion; its baseline (position, facing, pose, drawn frame, goal, state) is refreshed whenever it changed
+  function bodyStillWhy(b, now) {
+    if (!b || b.unplaced) return '';
+    const moved = !(Math.abs(b.px - b._stillX) <= STILL_MOVE_EPS && Math.abs(b.py - b._stillY) <= STILL_MOVE_EPS)
+      || b.dir !== b._stillDir || b._pose !== b._stillPose || b._renderFrame !== b._stillFrame
+      || b.goal !== b._stillGoal || b.state !== b._stillState;   // a decision: what it starts shows on the very next tick
+    if (moved) {
+      b._stillX = b.px; b._stillY = b.py; b._stillDir = b.dir; b._stillPose = b._pose; b._stillFrame = b._renderFrame;
+      b._stillGoal = b.goal; b._stillState = b.state;
+    }
+    // the inner life's decision clocks are due for EVERY placed body, on screen or off (review 10-21): an initiator just past
+    // the edge decides for its partner too — a huddle or watch within SOCIAL_NEAR_RADIUS (wider than the pad), a border meeting
+    // in the next room, a mutual glance — and what it starts on screen must land on the vsync it is decided on
+    for (let i = 0; i < BODY_CLOCKS.length; i++) noteDue(b[BODY_CLOCKS[i]], now);
+    // bubbles are clamped to the canvas, so they count even for a body off screen: a speech bubble on a body that holds still is
+    // static while up (its vanishing is a due change); a peer-chatter line rides a talking mouth and fades in and out
+    if (b.say && b.say.text) noteDue(b.say.until, now);
+    if (b.chatter && now <= b.chatter.until) return 'speech';
+    // a canvas overlay that follows its body — its speech bubble (held up while the hero's voice speaks) or the hovered body's
+    // nameplate — is anchored to the drawn head-top and clamped to the canvas: a body that moves, or whose drawn geometry moves
+    // (_renderLive; _renderDrift, the sub-pixel breath — the overlay rounds to whole px, so it can step), slides it, on screen
+    // or along the canvas edge from a body off screen (review 10-21: "a bubble that is visible and moving is motion")
+    if (overlaysOn && (moved || b._renderLive || b._renderDrift) && (b === hoverAgent || bubbleShown(b, now))) return 'speech';
+    if (!bodyOnScreen(b)) return '';   // off screen it changes nothing you can see; a walker re-enters through the pad
+    if (b.glance) noteDue(b.glance.until, now);
+    if (b.meet) noteDue(b.meet.until, now);
+    noteDue(b._renderNextAt, now);   // the next blink edge / clock-driven pose frame (SPRITES.drawBody)
+    if (moved || b.state === 'walk' || b.target || b.working || b.speaking || b.talking || b._renderLive
+      || (b._rW || 0) > 0.05 || b._renderPoseFade != null) return 'body';
+    if ((b.wakeAt && now - b.wakeAt < 1500) || (b.levelUpAt && now - b.levelUpAt < 1200) || (b.workUntil && now < b.workUntil)) return 'body';
+    // the inner life's beats: one the next tick acts on is motion now; one that holds is due at its next edge
+    const pl = b.social;
+    if (pl) {
+      if (pl.phase === 'walk') return 'body';                    // stepSocial paths it (or settles it) on the next tick
+      if (pl.phase === 'hold') {
+        noteDue(((socialBeat && socialBeat.lastArrivalAt) || pl.holdAt || 0) + (pl.holdLen || 0), now);   // the hold ends
+        if (isTalkKind(pl.kind) && socialBeat && socialBeat.startedAt) {   // a talk turn opens or closes (talkTurn's slots)
+          const s0 = socialBeat.startedAt, k = Math.floor((now - s0) / TALK_SLOT_MS);
+          noteDue(s0 + k * TALK_SLOT_MS + TALK_SPEAK_MS, now); noteDue(s0 + (k + 1) * TALK_SLOT_MS, now);
+        }
+      }
+    }
+    if (b.gather && !b.gather.arrived) return 'body';           // stepGather paths it to its assembly tile on the next tick
+    const ch = b.chase;
+    if (ch) {
+      if (ch.phase === 'pursue' && !(ch.repathAt > now)) return 'body';   // stepChase repaths toward the cursor on this tick
+      noteDue(ch.until, now); noteDue(ch.endAt, now); noteDue(ch.hardUntil, now); noteDue(ch.repathAt, now);
+      noteDue(lastCursor.t + CURSOR_FRESH_MS, now);              // the cursor goes stale: stop and stare
+    }
+    if (b.mimic) { noteDue(b.mimic.until, now); noteDue(lastCursor.t + CURSOR_FRESH_MS, now); }
+    if (b === agent) { const g = heroGlanceAt(b, now); if (g <= now) return 'body'; noteDue(g, now); }
+    return '';
+  }
+  // an energized belt in frame: its rollers march. No plan = every tile draws live (Conveyor's legacy default)
+  function liveBeltsInFrame() {
+    const belts = geo && geo.belts;
+    if (!belts || !belts.length || !cv) return false;
+    if (belts !== liveBeltOf || beltLiveSet !== liveBeltFor) {
+      liveBeltOf = belts; liveBeltFor = beltLiveSet;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const b of belts) if (!beltLiveSet || beltLiveSet[b.x + ',' + b.y]) { x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x); y1 = Math.max(y1, b.y); }
+      liveBeltBox = x0 <= x1 ? [x0, y0, x1 + 1, y1 + 1] : null;
+    }
+    const bb = liveBeltBox, k = T * scale;
+    return !!bb && bb[2] * k + panX >= 0 && bb[0] * k + panX <= cv.width && bb[3] * k + panY >= 0 && bb[1] * k + panY <= cv.height;
+  }
+  // the floor's own movers and canvas overlays (module state, no per-prop walk). Each is judged on its OWN clock, never on
+  // whether its draw pass has pruned it yet (a pass the overlays toggle skips would otherwise read as motion forever).
+  function fxStillWhy(now) {
+    if ((convey && convey.boxCount() > 0) || handoffBoxes.length) return 'crate';
+    for (let i = 0; i < sendCrates.length; i++) {   // a SEND TO crate flies once released; a held one waits (static) for its grace
+      const c = sendCrates[i];
+      if (c.t0) return 'crate';
+      noteDue(c.born + HANDOFF_GRACE_MS, now);
+    }
+    if (ghost && ghost.nextChange && geo && geo.belts) { const g = ghost.nextChange(now); if (g <= now) return 'crate'; noteDue(g, now); }   // ticked only where belts are (drawScene)
+    if (typeof PropSprites !== 'undefined') {
+      if (PropSprites.pulsing && PropSprites.pulsing(now)) return 'prop';   // a tool-fire surge / connector packet / workbench flash decaying
+      if (PropSprites.clockNext) { const c = PropSprites.clockNext(); if (c <= now) return 'prop'; noteDue(c, now); }   // this frame's drawn props
+    }
+    // the sky this frame drew (a landed station draws ground, a still render none): a meteor, the bolide, the belt's shower
+    if (!stillPass && typeof SpaceBG !== 'undefined' && SpaceBG.nextChange && !(typeof Terrain !== 'undefined' && Terrain.active())) {
+      const s = SpaceBG.nextChange(now); if (s <= now) return 'sky'; noteDue(s, now);
+    }
+    if (deskFlash.size) for (const f of deskFlash.values()) if (now - f.at < FLASH_MS) return 'fx';
+    if (dockFlashes.size) for (const t0 of dockFlashes.values()) if (now - t0 < 1100) return 'fx';
+    if (now - pinFlourishAt <= 900 || (firstShipPulse && now - firstShipPulse.at < 1500)) return 'fx';
+    // a SHIPPED pallet's newest crate pops in for 900 ms when its line's count rises (drawPallet: the lift steps down, the glint fades)
+    if (now - palletPopAt < 900) return 'fx';
+    if (camAnim || awakeFrozen || arrivalScene || kindleArmed || kindleP > 0 || floodAt || wakeDark !== wakeDarkTarget) return 'fx';
+    if ((dawnAt && now - dawnAt < 1300) || (sparkAt && now - sparkAt < 1200) || (bornAt && now - bornAt < 1000)
+      || (truthPulseAt && now - truthPulseAt < 360) || (wakeAt && now - wakeAt < 1500) || (levelUpAt && now - levelUpAt < 1200)) return 'fx';
+    return '';
+  }
+  function stillVerdict(now) {
+    let why = stillKick ? 'wake' : stillMark;
+    const camMoved = scale !== stillCamS || panX !== stillCamX || panY !== stillCamY;
+    stillCamS = scale; stillCamX = panX; stillCamY = panY;
+    // a focus ease counts only while it runs — under the ease's own gate: a camLerp left dormant under a follow-lock (or the
+    // scripted camera) moves nothing, and holding the tier off for it would draw a still floor at 60
+    if (!why && (camMoved || camAnim || (camLerp && !camAnim && !camLock) || now < motionUntil)) why = 'camera';
+    if (!why && now - inputAt < INPUT_HOLD_MS) why = 'input';
+    if (!why && typeof Voice !== 'undefined') {
+      if (Voice.isListening && Voice.isListening()) why = 'input';
+      else if (Voice.isSpeaking && Voice.isSpeaking()) why = 'speech';
+    }
+    // every body every frame, even once a source has decided: a baseline left stale reads as motion later (never as stillness)
+    if (agent) { const w = bodyStillWhy(agent, now); if (!why) why = w; }
+    for (let i = 0; i < crew.length; i++) { const w = bodyStillWhy(crew[i], now); if (!why) why = w; }
+    if (!why) why = fxStillWhy(now);
+    if (!why && liveBeltsInFrame()) why = 'belt';
+    // the cinecam's next cut (a hold ending, a still subject's 3 s grace, the hands-off takeover), an encounter or assembly beat
+    if (camLock && camLock.source === 'cine') noteDue(cineHoldUntil, now);
+    noteDue(cineWalkAt + 3000, now); noteDue(camUserAt + cineIdleMs, now);
+    if (socialBeat) noteDue(socialBeat.until, now);
+    if (gathering) {
+      noteDue(gathering.until, now);
+      if (gathering.phase === 'converge') noteDue(gathering.convergeUntil, now);
+      else if (gathering.phase === 'hold') {
+        const h0 = gathering.holdFrom, cyc = GATHER_SPEAK_MS + GATHER_GAP_MS, k = Math.floor((now - h0) / cyc);
+        noteDue(h0 + (gathering.holdLen || 0), now);                              // the assembly breaks
+        noteDue(h0 + k * cyc + GATHER_SPEAK_MS, now); noteDue(h0 + (k + 1) * cyc, now);   // the overseer's line ends / the next begins
+      } else if (gathering.phase === 'breaking') noteDue(gathering.scatterAt + OVERSEER_BREAK_MS, now);
+    } else if (!reduceMotion()) {   // maybeGather runs every tick: the roll comes the tick its last gate lapses
+      noteDue(gatherGateUntil, now); noteDue(stationBusyAt + GATHER_QUIET_MS, now); noteDue(gatherRollAt, now);
+    }
+    if (chatFocusId != null) noteDue(chatWarmUntil, now);   // the COMMS stare goes cold (chatStareHold)
+    if (!linkStaleDim && lastSseEventAt) noteDue(lastSseEventAt + LINK_STALE_MS, now);   // the link goes stale: LINK DOWN, telemetry dims
+    stillWhy = why; stillNow = !why; stillDue = stillDueAcc;
+    dueWatch = stillNow ? stillDue : Infinity;   // DUE LEAD: the draw that lands this change records how late it came
+    if (stillNow) stillFrames++; else stillWhyN[why] = (stillWhyN[why] || 0) + 1;
+    // the next frame was booked before this one ran: a STILL wait that must not stand (motion, or an earlier change: its
+    // timer must fire a DUE LEAD before it) re-books
+    if (paceTimer && paceTimerAt && (!stillNow || stillDue - dueLeadMs() < paceTimerAt - 0.5)) paceWake();   // (a budget-floor timer is left to the budget)
+  }
+  // ---- end STILL VERDICT
   /* OVERLAYS (HUD widget, 2026-09-30): the station's in-world readouts — run clocks, tool tickers, await tags,
      routing callouts, bay names/lamps/plates, hover glances, dock flashes, speech bubbles, nameplates and the
      working pulse at a worker's feet. A surface that says all of that itself (the HUD widget's rows) turns
@@ -1951,9 +2258,9 @@ const World = (() => {
     if (!agent) return;
     const side = (cache && agent.px > cache.W / 2) ? 'west' : 'east';
     setGlance(side, 650, performance.now());
-    setTimeout(() => { if (agent) agent.dir = side; }, 240);
-    setTimeout(() => { if (agent) setGlance('south', 700, performance.now()); }, 760);
-    setTimeout(() => { if (agent) agent.dir = 'south'; }, 1000);
+    setTimeout(() => { if (agent) agent.dir = side; motionWake(); }, 240);   // STILL: each beat of the Turn lands on the next vsync
+    setTimeout(() => { if (agent) setGlance('south', 700, performance.now()); motionWake(); }, 760);
+    setTimeout(() => { if (agent) agent.dir = 'south'; motionWake(); }, 1000);
   }
   function truthPulse() { truthPulseAt = performance.now(); }
   function endAwakening() { wakeDarkTarget = 0; dawnAt = performance.now(); wakeIn(); }   // DAWN: light floods + ripple fires (agent stays frozen/facing-you for the final line)
@@ -2172,7 +2479,7 @@ const World = (() => {
     return true;
   }
   function toCanvas(ev) {
-    const r = cv.getBoundingClientRect();
+    const r = U.pointerRect(cv);   // clientX's px, also on WebKit under TEXT SIZE (U.pointerRect)
     return { x: (ev.clientX - r.left) * (cv.width / r.width), y: (ev.clientY - r.top) * (cv.height / r.height) };
   }
   // Output pixel -> pre-CRT scene pixel. Match the renderer's six-step inverse,
@@ -6585,6 +6892,7 @@ const World = (() => {
     // RENDER PACING: not this vsync. Half a vsync of slack draws on the vsync NEAREST the pace (never a whole one late)
     if (force !== true && now - lastDrawnAt < pace - Math.max(1, Math.min(vsyncMs || 2, 17) / 2)) { scheduleFrame(pace); return; }
     lastDrawnAt = now; pacedDraws++;
+    if (dueWatch <= now) noteDueDraw(now);   // STILL: this draw lands the change the still floor waited on (DUE LEAD readout)
     scheduleFrame(pace);   // schedule next frame FIRST — a throw below can't kill the loop
     const drawStart = performance.now(), bakedBefore = cache;   // only rebake() (and loadStation) replace the bake
     const reviewStart=reviewPerformance.enabled?drawStart:0;
@@ -6727,6 +7035,7 @@ const World = (() => {
     if(n.root.getAttribute('data-feed')!==readout.state)n.root.setAttribute('data-feed',readout.state);
   }
   function frameBody(now) {
+    stillBegin();   // STILL: this frame judges itself (stillVerdict, after the scene) — a throw below leaves it not-still
     const gap = now - last, dt = Math.min(64, gap); last = now; fnow = now;
     const slices = simSlices(gap, now);   // RENDER PACING: one step at draw rate; real-time slices while the pacer holds a low rate
     linkStaleDim = linkDown(now);   // recompute the honest link state before any telemetry is drawn this frame
@@ -6801,6 +7110,7 @@ const World = (() => {
        exactly the "picture behind a picture" tell the parallax exists to kill. Still screen
        space, still under the identity transform, still first — nothing has drawn yet. */
     drawScene(now, dt, slices);
+    stillVerdict(now);   // STILL: did anything but ambient effects change? (sets the next frame's pace — see RENDER PACING)
   }
 
   /* THE SCENE PASS — the station drawn once onto whatever {cv, ctx, scale, panX, panY} currently are. The frame
@@ -6809,6 +7119,7 @@ const World = (() => {
      readout) is skipped for a still. */
   function drawScene(now, dt, slices) {
     if (!slices) slices = [[dt, now]];
+    if (typeof PropSprites !== 'undefined' && PropSprites.clockBegin) PropSprites.clockBegin();   // STILL: this pass's props report their clocks afresh
     if (stillPass) { ctx.fillStyle = stillPass.fill; ctx.fillRect(0, 0, cv.width, cv.height); }
     else drawBackdrop(now, { panX, panY, scale });
 
@@ -6895,6 +7206,10 @@ const World = (() => {
           occupied: workstationOccupied(p), still: reduceMotion()
         });
         if (p.t === 'filter') live = Object.assign({}, live, { scanning: scanningTiles.has(p.x + ':' + p.y), still: reduceMotion() });
+        // STILL: live content on screen — run output, a progress strip, heat, a scan, a flare, a cabinet in use — is motion
+        // (a body resting on a couch leaves the couch as drawn)
+        if (!stillMark && ((work && !(leisureProps.has(p.id) && restingOn(p))) || (live && (live.heat > 0 || live.prog != null || live.scanning)))
+          && propOnScreen(p)) stillMove('prop');
         // A stool/chair sorts just BEHIND its sitter; a couch sorts just IN FRONT so the tall sofa back
         // occludes the sitter's lower body. Beds/beanbags never set `seated` and never enter this branch.
         // A BODY IS IN THIS BED (lyingBed): the bed paints in TWO passes around it — frame + pillow under
@@ -7295,6 +7610,7 @@ const World = (() => {
        phase is derived from the clock so it needs no state. Steady under reduced motion. CRT.roll = strength. */
     if (CRT.roll > 0.001 && !reduceMotion()) {
       const PER = 16800, SWEEP = 2600, t = now % PER;
+      if (t < SWEEP) stillMove('fx'); else noteDue(now - t + PER, now);   // STILL: a sweeping band is motion; the next sweep is due
       if (t < SWEEP) {
         const y = (t / SWEEP) * (H + 80) - 40, hh = 34 * dpr;
         const g = ctx.createLinearGradient(0, y - hh, 0, y + hh);
@@ -7326,6 +7642,7 @@ const World = (() => {
       // almost nothing on this dark feed. Keep speckles at one CSS pixel so a
       // high-DPI display does not average them away into an invisible finish.
       const fi = reduceMotion() ? 0 : Math.floor(now / 66);
+      if (!reduceMotion()) noteDue((fi + 1) * 66, now);   // STILL: the static steps every 66 ms — each step lands on its own vsync
       const jx = (fi * 53) % GRAIN_S, jy = (fi * 97) % GRAIN_S;
       ctx.globalCompositeOperation = 'overlay';
       ctx.globalAlpha = Math.min(.65, grain);
@@ -7925,6 +8242,7 @@ const World = (() => {
       // Do not flash the cyan procedural body while the real default skin is actively loading.
       // A genuine load failure still clears `loading` and gets the honest fallback on the next frame.
       if (!geom && !(typeof SPRITES !== 'undefined' && SPRITES.loading)) drawFallback(now, who);
+      if (!geom) who._renderLive = !who.sitting;   // STILL: the procedural fallback body bobs while it stands (drawFallback)
       // remember the visible head-top (world px) so overlays (nameplate, speech bubble) anchor
       // above the ACTUAL drawn sprite — skins are taller than the old 15px assumption, which
       // parked bubbles over the face. Fallback bodies keep the legacy 15px estimate (null).
@@ -8628,7 +8946,7 @@ const World = (() => {
       const offSig = s => (s.offJobs || []).map(j => j.dockId + '|' + j.agentId).join(',');
       const changed = next.known !== feedState.known || next.fed !== feedState.fed || next.schedOff !== feedState.schedOff || offSig(next) !== offSig(feedState);
       feedState = next;
-      if (changed) routingNags = buildRoutingNags();   // feed truth changed → refresh the callouts
+      if (changed) { routingNags = buildRoutingNags(); motionWake(); }   // feed truth changed → refresh the callouts (STILL: drawn on the next vsync)
     });
   }
   /* hit-test: an INBOX (intake) on a floor with a COMPLETE line — an energized intake→bound-bay route exists
@@ -8910,6 +9228,7 @@ const World = (() => {
           const m = {};
           for (const x of j.jobs) if (x && x.streamId && x.line) m[x.streamId] = x.line;
           lineJobStream = m;
+          motionWake();   // STILL: a crate joined to its chute is drawn there on the next vsync
         }).catch(() => {});
     } catch (_) {}
   }
@@ -9689,9 +10008,12 @@ const World = (() => {
     // (multi-bay) the crate names its bay: flash THAT one, never the agent's other bay
     const dock = aid ? ((p.dockId && docks.find(d => d.propId === p.dockId && d.agentId === aid)) || docks.find(d => d.agentId === aid)) : docks[0];
     if (!dock) return;                                             // no (matching) bay → nothing to show (today's behavior)
-    dockFlashes.set(dock.propId, fnow);
+    // STILL: the wall clock, never the last frame's fnow (the deskFlash.set pattern): work lands between frames, and a still
+    // floor's fnow is up to 33 ms old — the flash and the ripple would start part-way through
+    const t0 = (typeof performance !== 'undefined') ? performance.now() : fnow;
+    dockFlashes.set(dock.propId, t0);
     const body = bodyForAgent(aid);
-    if (body && body !== agent) { body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
+    if (body && body !== agent) { body.wakeAt = t0; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
     else if (agent && !agent.unplaced) { wakeIn(); }
   }
   // the dock catching a delivery: a bright ring + rim flash over the bay, ~1.1s, additive (with the glows)
@@ -9768,6 +10090,7 @@ const World = (() => {
              panel's TODAY row stop showing the last ones — jobs and spend go on, so a kept number would freeze into a lie */
           lineStats = { known: false, byLine: {}, since: 0 };
           routingNags = buildRoutingNags();
+          motionWake();   // STILL: the plates and pallets go — drawn on the next vsync, never a still tick later
           return null;
         })
         .then(j => {
@@ -9777,6 +10100,7 @@ const World = (() => {
           lineStats = { known: true, byLine: by, since };
           routingNags = buildRoutingNags();
           const w = lineWatch(); if (w) w.seedOutcomes(j.docks);
+          motionWake();   // STILL: a risen SHIPPED count pops its pallet's newest crate on the frame that draws it — the next vsync
         }).catch(() => {});
     } catch (_) { /* offline: the plate keeps its last server answer */ }
   }
@@ -9791,7 +10115,7 @@ const World = (() => {
     try {
       fetch(apiUrl('/api/routing/steptest'), { cache: 'no-store' })
         .then(r => (r.ok ? r.json() : null))
-        .then(j => { if (j && j.ok === true) noteStepTest(j.session || null); })
+        .then(j => { if (j && j.ok === true) { noteStepTest(j.session || null); motionWake(); } })   // STILL: the PAUSED lamp, on the next vsync
         .catch(() => {});
     } catch (_) { /* the seam may be absent on an older sidecar — no lamp claims PAUSED then */ }
   }
@@ -10405,7 +10729,8 @@ const World = (() => {
       if (typeof now !== 'number' || !(now > 0)) return;   // unknown, or this job minted nothing: no claim
       const receipt = Build.noteLineShipped(p.outboxId, id);
       if (!receipt || !receipt.first) return;
-      firstShipPulse = { at: fnow, tiles: receipt.tiles };
+      firstShipPulse = { at: (typeof performance !== 'undefined') ? performance.now() : fnow, tiles: receipt.tiles };   // the wall clock: this answer lands between frames
+      motionWake();   // STILL: the FIRST SHIP pulse starts on the next vsync (this answer lands between frames)
       if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify('FIRST SHIP · ' + (lineNameOf(id) || receipt.name), 'gold');
       if (typeof SFX !== 'undefined' && SFX.milestone) SFX.milestone();
     });
@@ -10421,7 +10746,7 @@ const World = (() => {
     if (!convey) return;
     if (dockId && spec && !spec.dockId) spec.dockId = dockId;   // LINE WATCH: the bay it ships from (card route)
     const t = outboundBeltTile(aid, dockId);
-    if (t) convey.enqueueAt(t.x, t.y, spec);
+    if (t) { convey.enqueueAt(t.x, t.y, spec); motionWake(); }   // STILL: a crate released by the hand-off grace timer rides from the next vsync
   }
   function shipProductCrate(p) {
     if (!convey) return;
@@ -10652,7 +10977,7 @@ const World = (() => {
     }
     const f = geo ? workerFoot() : { x: 0, y: 0 };                        // pre-geo: parked at origin, re-footed on first syncCrewFromPlan
     const b = makeCrewBody(a.id, a.name || a.id, a.color || crewColor(a.id), f.x, f.y, a.skin);
-    b.summoned = true; b.wakeAt = fnow;                                   // a small materialize ripple
+    b.summoned = true; b.wakeAt = (typeof performance !== 'undefined') ? performance.now() : fnow;   // a small materialize ripple (the wall clock: a spawn lands between frames)
     b.idleUntil = fnow + U.irnd(1400, 3200);                              // hold a beat after materializing, then it strolls
     crew.push(b);
     greetNewcomer(b, fnow);                                               // somebody on the floor goes over to say hello
@@ -10731,6 +11056,7 @@ const World = (() => {
   // per-agent activity: the HERO routes to setActivity (byte-identical single-agent path); a summoned crew
   // body lights + takes the working pose while its run is live, and extinguishes when it ends.
   function setActivityFor(agentId, kind) {
+    motionWake();   // STILL: a body summoned or released (a poll's reconcile, the TTL sweep, a bus handler) moves on the next vsync
     const now0 = (typeof performance !== 'undefined') ? performance.now() : fnow;
     if (!agentId || (agent && agentId === agent.id)) {
       setActivity(kind);                                                  // HERO: byte-identical single-agent path (the seize itself is in tick)
@@ -10897,7 +11223,8 @@ const World = (() => {
     const landed = (routingPlan && routingPlan.bayTileToAgent) ? routingPlan.bayTileToAgent[bx.x + ',' + bx.y] : null;
     const aid = p.agentId || landed || ((typeof Pipeline !== 'undefined' && routingPlan) ? Pipeline.resolveTarget(routingPlan, { tag: p.tag }) : null);
     const body = bodyForAgent(aid);
-    if (body && body !== agent) { body.wakeAt = fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
+    // STILL: the ripple starts on the wall clock, as the hero's (wakeIn) does — never a still floor's stale fnow
+    if (body && body !== agent) { body.wakeAt = (typeof performance !== 'undefined') ? performance.now() : fnow; if (!(body.workUntil > fnow + 5000)) body.workUntil = fnow + 4000; }
     else { wakeIn(); }   // the hero (or an unrouted box)
   }
   /* ---------- the CAM-HUD ACTIVITY TICKER (stage narration) ----------
@@ -11007,6 +11334,9 @@ const World = (() => {
   function connectChannelBridge() {
     if (bridged || typeof U === 'undefined' || !U.bus) return;
     bridged = true;
+    // STILL: every harness event that reaches a listener (SSE-bridged or the in-app run stream) wakes a still floor, so what
+    // it starts — a body summoned, a crate placed, a desk lighting — is drawn on the next vsync
+    if (typeof U.bus.tap === 'function') U.bus.tap(motionWake);
     setupTicker();   // join the .cam-hud overlay (starts empty — no fake backfill)
     // ── CAM-HUD ACTIVITY TICKER: narrate the latest REAL harness event as one diegetic camera line. ──
     U.bus.on('agent.run.start', p => {
@@ -11164,7 +11494,7 @@ const World = (() => {
       if (r === 'error' && errText && typeof Friendly !== 'undefined' && Friendly.friendlyError) {
         try { const v = Friendly.friendlyError(new Error(errText)); error = v ? { kind: v.kind, msg: v.userMessage } : null; } catch (_) { error = null; }
       }
-      const diag = slaglog.record(r, { cacheFrac: lastCacheFrac, turns: p && p.turns, usd: p && p.usd, error, agentId: p && p.agentId, atBalance: !!(p && p.budgetCapIsBalance === true) });
+      const diag = slaglog.record(r, { cacheFrac: lastCacheFrac, turns: p && p.turns, usd: p && p.usd, error, agentId: p && p.agentId, atBalance: !!(p && p.budgetCapIsBalance === true), projected: !!(p && p.budgetProjected === true) });
       // an 'error' run has ALREADY announced itself (⚠ error row, its own toast, the RUN FAULT tick,
       // the desk strobe) — a simultaneous SLAG toast made ONE failure read as two (2026-07-31). The
       // post-mortem record + slag crate below still happen for every dead reason; only the duplicate
@@ -11361,6 +11691,7 @@ const World = (() => {
         // T3: a SUCCESSFUL poll is authoritative — drop any tracked portal absent from it so a removed/unbound
         // connector stops glowing green (a FAILED poll stays in .catch below and keeps the last-known state).
         if (PropSprites.reconcileConnectors) PropSprites.reconcileConnectors(connIds);
+        motionWake();   // STILL: a portal's new state is drawn on the next vsync
       }).catch(() => {});   // E4/E6f: on failure keep the last-known portal states — never blank them from an error body
     }
     // idle CPU piece 3 (2026-10-20): 5 s on screen, a 30 s floor while away, a catch-up on return (pauseBridge stops it)
@@ -11370,7 +11701,7 @@ const World = (() => {
     function pollSpotify() {
       if (typeof fetch === 'undefined' || typeof PropSprites === 'undefined' || !PropSprites.setSpotifyConnected) return;
       fetch(apiUrl('/api/spotify/status')).then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
-        .then(j => PropSprites.setSpotifyConnected(!!(j && j.connected)))
+        .then(j => { PropSprites.setSpotifyConnected(!!(j && j.connected)); motionWake(); })   // STILL: the jukebox wakes on the next vsync
         .catch(() => {});   // keep last-known on a failed poll (mirrors the connector contract)
     }
     spotifyPollFn = pollSpotify; pollSpotify(); spotifyPollTimer = (typeof PollGate !== 'undefined' && PollGate.every) ? PollGate.every(pollSpotify, { ms: 5000, immediate: false }) : setInterval(pollSpotify, 5000);
@@ -11460,7 +11791,7 @@ const World = (() => {
       } catch (_) { return; }
       const source = chanES;
       bridgeRecovering = true;
-      source.onopen = () => { if (chanES !== source) return; backoff = 1000; lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow; };
+      source.onopen = () => { if (chanES !== source) return; backoff = 1000; lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow; motionWake(); };   // STILL: the link state is drawn on the next vsync
       source.onmessage = ev => {
         if (chanES !== source || bridgePaused) return;
         lastSseEventAt = (typeof performance !== 'undefined') ? performance.now() : fnow;
@@ -11486,7 +11817,7 @@ const World = (() => {
           }
         } catch (_) {}
       };
-      source.onerror = () => { if (chanES !== source) return; try { source.close(); } catch (_) {} chanES = null; bridgeRecovering = true; if (bridgePaused) return; if (retryTimer) { try { clearTimeout(retryTimer); } catch (_) {} } retryTimer = setTimeout(() => { retryTimer = null; open(); }, backoff); backoff = Math.min(15000, backoff * 2); };
+      source.onerror = () => { if (chanES !== source) return; try { source.close(); } catch (_) {} chanES = null; bridgeRecovering = true; motionWake(); if (bridgePaused) return; if (retryTimer) { try { clearTimeout(retryTimer); } catch (_) {} } retryTimer = setTimeout(() => { retryTimer = null; open(); }, backoff); backoff = Math.min(15000, backoff * 2); };
     };
     connOpenFn = open;
     open();
@@ -11512,6 +11843,7 @@ const World = (() => {
         .then(snap => {
           if (!snap || source !== chanES || bridgePaused) return;
           try { reconcileFromSnapshot(snap); bridgeRecovering = false; } catch (_) {}
+          motionWake();   // STILL: run clocks, glyphs, queues and lit bodies the snapshot rewrote are drawn on the next vsync
           // a background worker's ask this page never heard (a reload, a dropped bridge) is filed from the same snapshot
           try { if (typeof Chat !== 'undefined' && Chat.reconcileBackgroundAsks) Chat.reconcileBackgroundAsks(snap); } catch (e) { console.warn('[bridge] background asks reconcile failed', e); }
         })
@@ -11567,6 +11899,7 @@ const World = (() => {
     const top = intake.y * T - 3;                          // crates climb upward off the intake's top edge
     ctx.save();
     if (linkStaleDim) ctx.globalAlpha = 0.3;   // E1: link down → this jam length is last-known, not live; dim it
+    stillMove('crate');   // STILL: waiting crates bob — the backlog is motion while it stands
     for (let i = 0; i < shown; i++) drawWaitCrate(cx, top - i * 6 + Math.sin(now / 360 + i * 0.7) * 0.6);   // gentle idle bob
     if (depth > MAXVIS) {
       ctx.fillStyle = '#e8c860'; ctx.font = "7px 'VT323','Courier New',monospace"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -11616,6 +11949,7 @@ const World = (() => {
     return shipStats.done;
   }
   const palletSeen = new Map();   // outbox propId -> { done, at }: the line's last drawn count (a rise pops the newest crate)
+  let palletPopAt = -1e9;         // the latest pop's start, any pallet (STILL: a crate popping in is motion for its 900 ms)
   function drawShippedPallet(now) {
     if (!lineStats.known || !routingPlan || !routingPlan.lineOfProp || !geo || !geo.props) return;
     for (const ob of geo.props) {
@@ -11626,7 +11960,11 @@ const World = (() => {
       if (s && s.shipped == null) continue;
       const done = s ? (s.shipped | 0) : 0;
       const seen = palletSeen.get(ob.id);
-      if (!seen || seen.done !== done) palletSeen.set(ob.id, { done, at: (seen && done > seen.done) ? now : -1e9 });
+      if (!seen || seen.done !== done) {
+        const rose = !!seen && done > seen.done;
+        palletSeen.set(ob.id, { done, at: rose ? now : -1e9 });
+        if (rose) palletPopAt = now;
+      }
       if (done > 0) drawPallet(ob, done, now - palletSeen.get(ob.id).at);
     }
   }
@@ -11716,7 +12054,7 @@ const World = (() => {
     const p = geo && geo.props && geo.props.find(q => q.t === t);
     if (!p || !cv) return null;
     const wx = (p.x + (p.w || 1) / 2) * T, wy = (p.y + (p.h || 1) / 2) * T;
-    const r = cv.getBoundingClientRect();
+    const r = U.pointerRect(cv);
     const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY });
     return {
       id: p.id,
@@ -11733,7 +12071,7 @@ const World = (() => {
     if (p) { const s = specOf(p.t) || {}; wx = (p.x + (p.w || s.w || 1) / 2) * T; wy = (p.y + (p.h || s.h || 1) / 2) * T; }
     else if (agent && aid === agent.id && desk && !deskPropId) { wx = (desk.tx + desk.w / 2) * T; wy = (desk.ty + desk.h / 2) * T; }
     else return null;
-    const r = cv.getBoundingClientRect();
+    const r = U.pointerRect(cv);
     const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY });
     return { propId: p ? p.id : null, clientX: r.left + c.x * (r.width / cv.width), clientY: r.top + c.y * (r.height / cv.height) };
   };
@@ -11828,7 +12166,31 @@ const World = (() => {
     pollFeed: () => pollFeedState(),
     pollShip: () => pollShipStats()
   });
-  return { init, rebake, invalidatePropShadows, frameReviewRoom, renderStill, renderStillOfTiles, crewFrames, crt: CRT, renderPace, slagLog: () => (slaglog ? slaglog.recent() : []),
+  /* STILL WAKE (2026-10-21): a call from outside that changes what the floor shows — a body's activity or skin, a bubble, a
+     camera move, a spawn, a ceremony beat, a debug drive — wakes a still floor after it runs, so it lands on the next vsync and
+     never waits out a 33 ms still interval. Reads (renderPace, cameraState, dbg, ...) stay unwrapped: a poll must not keep a
+     still floor at full pace. Every `_dbg*` hook is wrapped (dev only; a wake costs one draw). Every export that writes the
+     camera (scale, pan, a lock, an ease, a scripted move) is here — frameReviewRoom's cut (the builder frames what it built
+     from a timer) waited out a still interval until the final fixes; test/render-still.test.js walks the source and fails a
+     new camera API left out. */
+  const WAKE_API = new Set(['init', 'frameReviewRoom', 'loadStation', 'spawn', 'spawnAgent', 'despawnAgent', 'setSkin', 'relabel', 'setActivityFor', 'dropRun',
+    'focusBody', 'lockBody', 'restoreCamera', 'setOverlays', 'setChatFocus', 'chatFocusPing', 'setActivity', 'wakeIn',
+    'beginAwakening', 'playArrival', 'cancelArrival', 'setWakeProgress', 'igniteSpark', 'armKindle', 'kindleHold', 'camPushIn',
+    'camCreep', 'camPunch', 'camPullBack', 'awakenTurn', 'truthPulse', 'beginFlood', 'collapseFlood', 'endAwakening',
+    'releaseAwakening', 'say', 'focusAgent', 'refit', 'resumeBridge', 'rebake', 'invalidatePropShadows', 'setXp', 'pulseLevelUp',
+    'noteStepTest']);
+  function wakeOnCall(api) {
+    for (const k of Object.keys(api)) {
+      const f = api[k];
+      if (typeof f !== 'function' || !(WAKE_API.has(k) || k.startsWith('_dbg'))) continue;
+      api[k] = function () { try { return f.apply(this, arguments); } finally { motionWake(); } };
+    }
+    return api;
+  }
+  return wakeOnCall({ init, rebake, invalidatePropShadows, frameReviewRoom, renderStill, renderStillOfTiles, crewFrames, crt: CRT, renderPace, slagLog: () => (slaglog ? slaglog.recent() : []),
+    // STILL WAKE: voice.js flips Voice.isSpeaking / isListening from audio and STT callbacks between frames (the hero's talk
+    // track, the listening ring, a voice-held bubble) — it calls this on every flip so the change lands on the next vsync
+    voiceChanged: () => { motionWake(); },
     // LINE WATCH: the Workflow panel pushes the step-test session it polls; reads today's numbers for a line
     noteStepTest, lineStatsFor: id => (lineStats.known ? (lineStats.byLine[id] || null) : null), pollLineStats,
     // a bay's live state — the lamp's own fold (WORKING only once the sidecar confirmed the run), with how long it has held
@@ -12235,7 +12597,7 @@ const World = (() => {
       if (!cv || !geo || !geo.props) return null;
       const p = geo.props.find(q => q.t === t);
       if (!p) return null;
-      const r = cv.getBoundingClientRect();
+      const r = U.pointerRect(cv);
       const kx = r.width / cv.width, ky = r.height / cv.height;
       const toScr = (wx, wy) => { const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY }); return { x: r.left + c.x * kx, y: r.top + c.y * ky }; };
       const a = toScr(p.x * T, p.y * T), b = toScr((p.x + (p.w || 1)) * T, (p.y + (p.h || 1)) * T);
@@ -12288,5 +12650,5 @@ const World = (() => {
       }
       return out;
     }
-  };
+  });
 })();

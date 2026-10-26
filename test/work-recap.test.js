@@ -84,4 +84,10 @@ A.ok(/entry\.title/.test(recap) && /entry\.reason/.test(recap), 'the recap headl
 A.ok(/\.cmsg\.recap \.recap-line/.test(css), 'app.css styles the recap lines');
 A.ok(/\.cmsg\.recap \.recap-head \{[^}]*var\(--gold\)/.test(css), 'the recap headline uses the shared gold accent');
 
+// SAY IT ONCE (10-19): under a RUN COMPLETE footer whose telemetry already tells the run's time and model, the recap's foot
+// keeps only the cost ("RUN COMPLETE · 907ms · … · test/model" sat over "922ms · test/model")
+A.ok(/const said = !!\(log && Array\.from\(log\.querySelectorAll\('\.comms-presence\.resolved\[data-run-id\]'\)\)\.some\(c => c\.dataset\.runId === runId && c\.dataset\.telemetry === '1'\)\);/.test(chat)
+  && /!said && durMs > 0 \? fmtMs\(durMs\) : ''/.test(chat) && /!said && entry\.model && entry\.model !== '\(unknown\)' \? entry\.model : ''/.test(chat),
+  'the recap foot never repeats the time and model the RUN COMPLETE footer above it already tells');
+
 A.report('work-recap.test');

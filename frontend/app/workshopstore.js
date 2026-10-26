@@ -211,40 +211,24 @@ const WorkshopStore = (() => {
   }
 
   /* IMPLEMENT-AS-BUILD (2026-08-14) — POST /api/workshop/implement and run what a PLAN deliverable describes.
-     The response is an NDJSON run stream, not a JSON body, so Harness.api.post (which calls r.json() on the whole
-     body) cannot read it — every frame is parsed here instead. Each frame is re-emitted onto U.bus exactly like
-     harness.js's run reader, so the station animates the build LIVE (floor, COMMS beats, work item) rather than
-     the Commander staring at a frozen card for minutes. Resolves the final workshop.implement.result payload.
+     The build is a run, so its lines ride the page's ONE run stream (Harness.streamPost — never a connection of its
+     own held for minutes, 2026-10-21). Each line is re-emitted onto U.bus exactly like harness.js's run reader, so
+     the station animates the build LIVE (floor, COMMS beats, work item) rather than the Commander staring at a frozen
+     card for minutes. Resolves the final workshop.implement.result payload.
      Never throws: an unreachable station resolves { fired:false, reason:'unreachable' }. */
   async function implement(agentId, runId, note) {
     const body = { agentId: agentId || 'agent', runId: String(runId) };
     // what the Commander typed on the card — WHICH part of the plan to build. Rides into the build prompt, not
     // the chat stream (see chat.js: on a buildable card the box is a build steer, not a message).
     if (note != null && String(note).trim()) body.note = String(note).trim().slice(0, 2000);
-    let res;
-    try {
-      res = await fetch('/api/workshop/implement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    } catch (_) { return { fired: false, reason: 'unreachable' }; }
-    if (!res.ok || !res.body) return { fired: false, reason: 'http ' + res.status };
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '', result = null;
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const s = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!s) continue;
-          let ev; try { ev = JSON.parse(s); } catch (_) { continue; }
-          if (ev.name === 'workshop.implement.result') { result = ev.payload || {}; continue; }
-          if (typeof U !== 'undefined' && U.bus) { try { U.bus.emit(ev.name, ev.payload || {}); } catch (_) {} }
-        }
-      }
-    } catch (_) { /* a dropped stream mid-build: the run continues server-side; report what we latched */ }
+    if (typeof Harness === 'undefined' || !Harness.streamPost) return { fired: false, reason: 'unreachable' };
+    let result = null;
+    const r = await Harness.streamPost('/api/workshop/implement', body, { onEvent: (name, payload) => {
+      if (name === 'workshop.implement.result') { result = payload || {}; return; }
+      if (typeof U !== 'undefined' && U.bus) { try { U.bus.emit(name, payload || {}); } catch (_) {} }
+    } });
+    if (!r.ok) return { fired: false, reason: r.status ? 'http ' + r.status : 'unreachable' };
+    try { await r.done; } catch (_) { /* a dropped stream mid-build: the run continues server-side; report what we latched */ }
     return result || { fired: false, reason: 'no-result' };
   }
 

@@ -231,21 +231,23 @@ try {
     { name: 'station_power', args: { action: 'fullpower.set', args: { on: true } } }
   ];
   await evalJS(cdp, `(() => { const t = document.getElementById('chat-input'); t.value = ${JSON.stringify(MARK + ' please make my station blue, set my daily spending cap to $9 and turn on full power')}; t.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('chat-send').click(); return true; })()`);
-  const cards = [];
+  const cards = [], keys = [];
   const answers = ['Approve once', 'Approve once', 'Deny'];
   for (let i = 0; i < 240 && cards.length < answers.length; i++) {
     // the live approval card: a COMMS row marked .consent whose Approve/Deny buttons are still enabled
     const pick = answers[cards.length];
+    // the keys are read by their own labels (textContent): the Pip-Boy pass sets the card keys in caps
+    // (text-transform: uppercase), so innerText says "ALWAYS" / "FULL ACCESS" — a case-sensitive read of it saw no keys at all
     const seen = await evalJS(cdp, `(() => { const live = [...document.querySelectorAll('.consent')].filter(r => [...r.querySelectorAll('.consent-btns button')].some(b => !b.disabled));
-      if (!live.length) return null; const r = live[live.length - 1]; const b = [...r.querySelectorAll('.consent-btns button')].find(x => x.textContent.trim() === ${JSON.stringify(pick)});
-      const text = r.innerText.slice(0, 600); if (b) b.click(); return text; })()`);
-    if (seen) cards.push(seen);
+      if (!live.length) return null; const r = live[live.length - 1]; const all = [...r.querySelectorAll('.consent-btns button')]; const b = all.find(x => x.textContent.trim() === ${JSON.stringify(pick)});
+      const text = r.innerText.slice(0, 600), labels = all.map(x => x.textContent.trim()); if (b) b.click(); return { text, labels }; })()`);
+    if (seen) { cards.push(seen.text); keys.push(seen.labels); }
     await sleep(500);
   }
   check('three approval cards appeared in COMMS', cards.length === 3, cards.length + ' cards');
   check('card 1 names the look change in the station\'s own words', /NOVA wants to change the station's look/.test(cards[0] || ''), (cards[0] || '').slice(0, 300));
   check('card 2 names the new $9 daily cap', /wants to set your spending limits: perDay \$9/.test(cards[1] || ''), (cards[1] || '').slice(0, 300));
-  check('⛔ an escalation card offers Approve once / Deny only (no Always, no Full access)', [1, 2].every(i => !/\bAlways\b|Full access/.test(cards[i] || '')) && /\bAlways\b/.test(cards[0] || ''), JSON.stringify(cards.map(c => (c || '').slice(-60))));
+  check('⛔ an escalation card offers Approve once / Deny only (no Always, no Full access)', [1, 2].every(i => JSON.stringify(keys[i] || []) === JSON.stringify(['Approve once', 'Deny'])) && (keys[0] || []).indexOf('Always') >= 0 && (keys[0] || []).indexOf('Full access') >= 0, JSON.stringify(keys));
   check('card 3 names Full Power for what it is', /FULL POWER: every agent acts on this computer without asking/.test(cards[2] || ''), (cards[2] || '').slice(0, 300));
   for (let i = 0; i < 60 && mock.results.length < mock.script.length; i++) await sleep(500);
   check('the approved look landed', await evalJS(cdp, 'StationUI.getTheme()') === 'blue');

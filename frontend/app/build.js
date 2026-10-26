@@ -2890,6 +2890,9 @@ const Build = (() => {
       + '<span class="station-build-need">Next you choose who works ' + (steps.length === 1 ? 'its one step' : 'its ' + steps.length + ' steps') + ' (' + esc(steps.join(', ')) + '). One agent can work every step.'
       + (item.purpose === 'code' ? ' Point its Inbox at your project folder so the Builder works on your code.' : '') + '</span>';
   }
+  // community sharing is open only while communitymaps.js says so (CommunityMaps.live, its COMMUNITY_LIVE switch): until
+  // then SHARE TO COMMUNITY and the COMMUNITY MAPS gallery are not built at all, and the sheet never asks for the gallery
+  const communityLive = () => typeof CommunityMaps !== 'undefined' && CommunityMaps.live === true;
   function showStationBuilds() {
     if (!root || !station || typeof StationTemplates === 'undefined') return;
     cardCloseAll();
@@ -2899,8 +2902,8 @@ const Build = (() => {
     g.innerHTML = '<div class="refit-guide-box station-build-box"><div class="station-build-heading"><div><span class="station-build-eyebrow">BUILD MODE / STATION PRESETS</span><h2>A place for your work</h2></div><button class="bb sm" data-workflow-close>BACK TO BUILD</button></div>' +
       '<p class="station-build-intro">Pick a station for the kind of work you do, then make it yours. Every station includes your workstation and all five essentials.</p>' +
       '<div class="station-build-scroll">' + PRESET_GROUPS.map(([id, label, blurb]) => '<section class="station-build-section" data-build-section="' + id + '"><div class="station-build-section-head"><h3>' + label + '</h3><p>' + esc(blurb) + '</p></div><div class="station-build-grid" aria-label="' + esc(label.toLowerCase()) + '"></div></section>').join('') +
-      (typeof BuildShare !== 'undefined' ? '<section class="station-build-section" data-build-section="shared"><div class="station-build-section-head"><h3>SHARED BUILDS</h3><p>Save this layout as a file to share, or open one someone sent you. Only rooms, furniture and conveyors travel.</p><span class="station-build-share-keys"><button class="bb sm" type="button" data-export-build>EXPORT THIS STATION</button><button class="bb sm" type="button" data-import-build>IMPORT A BUILD…</button>' + (typeof CommunityMaps !== 'undefined' ? '<button class="bb sm" type="button" data-share-community>SHARE TO COMMUNITY</button>' : '') + '<input type="file" accept=".json,application/json" hidden data-import-file></span></div><div class="station-build-grid" aria-label="shared builds"></div></section>' : '') +
-      (typeof BuildShare !== 'undefined' && typeof CommunityMaps !== 'undefined' ? '<section class="station-build-section" data-build-section="community"><div class="station-build-section-head"><h3>COMMUNITY MAPS</h3><p>Stations other players built and shared. Only layouts travel: you choose who works them.</p><span class="station-build-community-note" role="status"></span></div><div class="station-build-grid" aria-label="community maps"></div></section>' : '') + '</div>' +
+      (typeof BuildShare !== 'undefined' ? '<section class="station-build-section" data-build-section="shared"><div class="station-build-section-head"><h3>SHARED BUILDS</h3><p>Save this layout as a file to share, or open one someone sent you. Only rooms, furniture and conveyors travel.</p><span class="station-build-share-keys"><button class="bb sm" type="button" data-export-build>EXPORT THIS STATION</button><button class="bb sm" type="button" data-import-build>IMPORT A BUILD…</button>' + (communityLive() ? '<button class="bb sm" type="button" data-share-community>SHARE TO COMMUNITY</button>' : '') + '<input type="file" accept=".json,application/json" hidden data-import-file></span></div><div class="station-build-grid" aria-label="shared builds"></div></section>' : '') +
+      (typeof BuildShare !== 'undefined' && communityLive() ? '<section class="station-build-section" data-build-section="community"><div class="station-build-section-head"><h3>COMMUNITY MAPS</h3><p>Stations other players built and shared. Only layouts travel: you choose who works them.</p><span class="station-build-community-note" role="status"></span></div><div class="station-build-grid" aria-label="community maps"></div></section>' : '') + '</div>' +
       '<div class="station-build-footer"><div class="station-build-status" role="status">Select a preset to see what it builds.</div>' +
       '<div class="station-build-actions"><button class="bb" data-restore-build>RESTORE PREVIOUS</button><button class="bb refit-primary" data-use-build disabled>CHOOSE A PRESET</button></div><small class="station-build-note">Applying replaces rooms, props and conveyors. Your current layout is backed up; agents and conversations stay.</small></div></div>';
     g.style.setProperty('--station-build-scale', typeof U.uiZoom === 'function' ? U.uiZoom() : 1);
@@ -3037,7 +3040,7 @@ const Build = (() => {
   function openShareToCommunity(g, status, shareKey) {
     const section = g.querySelector('[data-build-section="shared"]');
     const grid = section && section.querySelector('.station-build-grid');
-    if (!grid || typeof CommunityMaps === 'undefined') return;
+    if (!grid || !communityLive()) return;
     const open = section.querySelector('.station-build-sharepanel');
     if (open) { open.querySelector('#sbs-title')?.focus(); return; }
     const r = BuildShare.exportBuild(station.serialize(), WorldModel, { name: station.doc().meta.name });
@@ -3106,7 +3109,7 @@ const Build = (() => {
      it through BuildShare.readBuild, so it lands through the same confirm, backup and undo as a preset. */
   function wireCommunityMaps(g, status, addCard) {
     const section = g.querySelector('[data-build-section="community"]');
-    if (!section || typeof CommunityMaps === 'undefined') return;
+    if (!section || !communityLive()) return;
     const grid = section.querySelector('.station-build-grid'), note = section.querySelector('.station-build-community-note');
     note.textContent = 'Reading the community gallery…';
     CommunityMaps.load(true).then(c => {
@@ -4326,7 +4329,7 @@ const Build = (() => {
     return sendTestBoxes(e);
   }
   // a floor tile's centre in client px (the same mapping the dev hooks' _tileEvent uses) — where a tip about that tile is said
-  const tileClient = (tx, ty) => { const t = T(), r = cv.getBoundingClientRect(); return { clientX: r.left + ((tx + 0.5) * t * zoom + panX) * (r.width / cv.width), clientY: r.top + ((ty + 0.5) * t * zoom + panY) * (r.height / cv.height) }; };
+  const tileClient = (tx, ty) => { const t = T(), r = U.pointerRect(cv); return { clientX: r.left + ((tx + 0.5) * t * zoom + panX) * (r.width / cv.width), clientY: r.top + ((ty + 0.5) * t * zoom + panY) * (r.height / cv.height) }; };
   function sendTestBoxes(ev, auto, agentId) {
     if (!convey) return false;
     // reach-verified mouth first; the doc-order intake only for a MANUAL test on a floor where
@@ -5163,7 +5166,7 @@ const Build = (() => {
   }
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
   function toCanvas(ev) {
-    const r = cv.getBoundingClientRect();
+    const r = U.pointerRect(cv);   // clientX's px, also on WebKit under TEXT SIZE (U.pointerRect)
     return { x: (ev.clientX - r.left) * (cv.width / r.width), y: (ev.clientY - r.top) * (cv.height / r.height) };
   }
   function toWorldTile(ev) {
@@ -9735,7 +9738,7 @@ const Build = (() => {
     // client-pixel for a tile CENTER, inverting the live camera (screen = world*zoom + pan) so a
     // synthetic pointer lands exactly on [tx,ty] — same math toWorldTile uses, run backwards.
     _tileEvent: ([tx, ty], button) => {
-      const t = T(), r = cv.getBoundingClientRect();
+      const t = T(), r = U.pointerRect(cv);
       return { button: button == null ? 0 : button, pointerId: 1,
         clientX: r.left + ((tx + 0.5) * t * zoom + panX) * (r.width / cv.width),
         clientY: r.top + ((ty + 0.5) * t * zoom + panY) * (r.height / cv.height) };

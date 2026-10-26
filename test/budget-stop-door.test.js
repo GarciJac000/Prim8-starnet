@@ -21,7 +21,7 @@ A.ok(/\{ id: 'budget', label: 'SPENDING LIMITS'/.test(station), 'SETTINGS has a 
 // ---- COMMS: the stop line ----
 const chat = read('frontend/app/chat.js');
 const lineSrc = A.fnBody(chat, 'function budgetStopLine(');
-A.ok(lineSrc.length > 50 && lineSrc.length < 3000, 'budgetStopLine exists and is bounded');
+A.ok(lineSrc.length > 50 && lineSrc.length < 4000, 'budgetStopLine exists and is bounded');   // grew past 3,000 with the projected-stop line (d3a76db3)
 const budgetStopLine = new Function(lineSrc + '\nreturn budgetStopLine;')();
 for (const [scope, cap, want] of [
   ['run', 5, /^hit the \$5 per-run spend cap — raise it in /],
@@ -78,8 +78,30 @@ for (const [scope, cap, want] of [
   } finally { globalThis.StationUI = prevUI; }
   // the flag rides from the stream to the stop line and the door
   const harness = read('frontend/app/harness.js');
-  A.ok(/budgetCapIsBalance = payload\.budgetCapIsBalance === true;/.test(harness) && /budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens \};\n    return \{ text: full,[^\n]*budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens \};/.test(harness), 'Harness.chat latches the lead end\'s budgetCapIsBalance (and the unpriced ceiling) and returns them');
-  A.ok(/budgetStopLine\(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription\)/.test(chat) && /offerBudgetDoor\(budgetCapIsBalance\)/.test(chat), 'COMMS passes it to the stop line and the door');
+  A.ok(/budgetCapIsBalance = payload\.budgetCapIsBalance === true;/.test(harness) && /budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected \};\n    return \{ text: full,[^\n]*budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected \};/.test(harness), 'Harness.chat latches the lead end\'s budgetCapIsBalance (and the unpriced ceiling, and budgetProjected) and returns them');
+  A.ok(/budgetStopLine\(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription, budgetProjected\)/.test(chat) && /offerBudgetDoor\(budgetCapIsBalance\)/.test(chat), 'COMMS passes it to the stop line and the door');
+}
+
+// ---- a PROJECTED per-run stop (bug d3a76db3 review): the run and its workers share one PER RUN cap, and the run
+// stopped BEFORE it because the calls still in flight already took what was left (agent.run.end budgetProjected).
+// Every surface says "stopped before it would pass", never "hit" a cap that was not reached. ----
+{
+  A.eq(budgetStopLine('run', 0.5, false, null, null, true), 'stopped before it would pass the $0.50 per-run spend cap — raise it in SETTINGS › SPENDING LIMITS', 'COMMS: a projected stop names the cap it stopped short of');
+  A.ok(!/\bhit\b/.test(budgetStopLine('run', 0.5, false, null, null, true)), 'COMMS: a projected stop never says hit');
+  A.eq(budgetStopLine('run', 3, true, null, null, true), 'stopped before it would spend more than the $3 left on your StarNet balance — add credits under SETTINGS → AI & MODELS to keep going', 'COMMS: a projected stop at the balance names the balance');
+  A.ok(/^hit the \$0\.50 per-run spend cap/.test(budgetStopLine('run', 0.5, false, null, null, false)), 'COMMS: a real hit still says hit');
+  // the latch from the lead's agent.run.end, and the background notify line
+  const harness = read('frontend/app/harness.js');
+  A.ok(/budgetProjected = payload\.budgetProjected === true;/.test(harness), 'Harness.chat latches the lead end\'s budgetProjected');
+  A.ok(/budgetProjected === true \? \(budgetCapIsBalance === true \? 'stopped before it would spend the rest of your StarNet balance' : 'stopped before it would pass a spending limit'\)/.test(chat), 'a background session\'s notify says "stopped before", not "hit", for a projected stop');
+  const { endNote } = require('../sidecar/channels/hub.js');
+  A.eq(endNote('budget', { budgetScope: 'run', budgetCapUsd: 0.5, budgetProjected: true }), '\n\n(stopped before it would pass the $0.50 per-run spend cap — raise it in the app under SETTINGS › SPENDING LIMITS.)', 'channels: a projected stop names the cap it stopped short of');
+  A.ok(/stopped before it would spend more than the \$3 left on your StarNet balance/.test(endNote('budget', { budgetScope: 'run', budgetCapUsd: 3, budgetCapIsBalance: true, budgetProjected: true })), 'channels: a projected stop at the balance names the balance');
+  const hubSrc = read('sidecar/channels/hub.js');
+  A.ok(/state\.budgetProjected = p\.budgetProjected === true;/.test(hubSrc) && /budgetNote\(st\.budgetScope, st\.budgetCapUsd, !!st\.budgetCapIsBalance, st\.budgetProjected === true\)/.test(hubSrc), 'channels: the run end\'s budgetProjected is latched and reaches the note');
+  const acp = require('../sidecar/acp/core.js')._internals;
+  A.ok(/stopped before it would pass its per-run spend cap/.test(acp.endNote('budget', false, true)), 'ACP: a projected stop says it stopped before its cap');
+  A.ok(/StarNet balance/.test(acp.endNote('budget', true, true)) && !/used what was left/.test(acp.endNote('budget', true, true)), 'ACP: a projected balance stop never says the balance was used up');
 }
 
 // ---- the UNPRICED-model TOKEN ceiling is not a $ cap (2026-10-11) ----
@@ -132,8 +154,13 @@ for (const [scope, cap, want] of [
   A.ok(/^hit the budget cap — Raise the budget/.test(SlagLog.line(SlagLog.diagnose('budget', { atBalance: false }))), 'a stop at a chosen cap keeps its own post-mortem');
   A.ok(/cold cache/.test(SlagLog.diagnose('budget', { cacheFrac: 0.05 }).title), 'and the cold-cache lesson is unchanged for a cap stop');
   const world = read('frontend/app/world.js');
-  A.ok(/slaglog\.record\(r, \{ cacheFrac: lastCacheFrac, turns: p && p\.turns, usd: p && p\.usd, error, agentId: p && p\.agentId, atBalance: !!\(p && p\.budgetCapIsBalance === true\) \}\)/.test(world),
-    'the floor passes the run end\'s budgetCapIsBalance into the post-mortem');
+  A.ok(/slaglog\.record\(r, \{ cacheFrac: lastCacheFrac, turns: p && p\.turns, usd: p && p\.usd, error, agentId: p && p\.agentId, atBalance: !!\(p && p\.budgetCapIsBalance === true\), projected: !!\(p && p\.budgetProjected === true\) \}\)/.test(world),
+    'the floor passes the run end\'s budgetCapIsBalance and budgetProjected into the post-mortem');
+  // a PROJECTED stop (a forwarded worker end lands here too) hit no cap: its post-mortem never says it did
+  const proj = SlagLog.diagnose('budget', { projected: true, cacheFrac: 0.05 });
+  A.eq(proj.reason, 'budget', 'a projected stop is still a budget post-mortem');
+  A.ok(proj.title === 'stopped before the budget cap' && !/\bhit\b|reached its/i.test(SlagLog.line(proj)) && /SETTINGS › SPENDING LIMITS/.test(proj.fix), 'a projected stop toast says it stopped BEFORE the cap: ' + SlagLog.line(proj));
+  A.ok(/add credits under SETTINGS → AI & MODELS/i.test(SlagLog.diagnose('budget', { projected: true, atBalance: true }).fix), 'a projected stop at the balance names the top-up door');
 }
 
 // ---- messaging channels ----
@@ -174,6 +201,11 @@ async function acpLeadOnly() {
   A.ok(/StarNet balance/.test(lead), 'the lead\'s balance stop reaches the editor: ' + JSON.stringify(lead.slice(-160)));
   const worker = await turn([['agent.run.start', { runId: 'lead' }], ['agent.run.start', { runId: 'w1' }], ['agent.run.end', { runId: 'w1', reason: 'budget', budgetScope: 'run', budgetCapIsBalance: true }], ['agent.run.end', { runId: 'lead', reason: 'budget', budgetScope: 'run', budgetCapUsd: 3 }]]);
   A.ok(/SPENDING LIMITS/.test(worker) && !/StarNet balance/.test(worker), 'a worker\'s balance stop never speaks for the lead: ' + JSON.stringify(worker.slice(-160)));
+  // a PROJECTED lead stop (agent.run.end budgetProjected) reaches the editor as "stopped before", never "hit"
+  const projected = await turn([['agent.run.start', { runId: 'lead' }], ['agent.run.end', { runId: 'lead', reason: 'budget', budgetScope: 'run', budgetCapUsd: 3, budgetProjected: true }]]);
+  A.ok(/stopped before it would pass its per-run spend cap/.test(projected) && !/hit a spend cap/.test(projected), 'the lead\'s projected stop reaches the editor as "stopped before": ' + JSON.stringify(projected.slice(-160)));
+  const workerProjected = await turn([['agent.run.start', { runId: 'lead' }], ['agent.run.start', { runId: 'w1' }], ['agent.run.end', { runId: 'w1', reason: 'budget', budgetScope: 'run', budgetProjected: true }], ['agent.run.end', { runId: 'lead', reason: 'budget', budgetScope: 'run', budgetCapUsd: 3 }]]);
+  A.ok(/hit a spend cap/.test(workerProjected) && !/stopped before/.test(workerProjected), 'a worker\'s projected stop never speaks for the lead: ' + JSON.stringify(workerProjected.slice(-160)));
 }
 // ---- /usage ----
 (async () => {

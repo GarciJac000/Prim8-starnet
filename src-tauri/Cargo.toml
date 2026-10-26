@@ -1,6 +1,6 @@
 [package]
 name = "skynet-desktop"
-version = "0.13.5"
+version = "0.14.0"
 description = "StarNet native desktop shell for the gamified AI-agent harness"
 authors = ["StarNet"]
 edition = "2021"
@@ -26,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+# Redacting what the sidecar prints before it reaches sidecar.log (sidecar_output.rs). Already in the tree via tauri.
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging"] }

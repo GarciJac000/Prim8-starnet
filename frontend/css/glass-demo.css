@@ -283,7 +283,7 @@ body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.working { color: var(--ph-bright); overflow: hidden; }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.working::before {
   left: 2px; top: 1px; width: 6px; height: 2px; background: currentColor;
-  box-shadow: 0 -2px 0 color-mix(in srgb,currentColor 18%,transparent); animation: gd-session-scan 1.8s ease-in-out infinite;
+  box-shadow: 0 -2px 0 color-mix(in srgb,currentColor 18%,transparent); animation: gd-session-scan 1.8s steps(5, jump-none) infinite;
 }
 @keyframes gd-session-scan { 0%,100% { transform: translateY(1px); opacity: .6; } 50% { transform: translateY(5px); opacity: 1; } }
 /* Connecting: a small center point, distinct from the confirmed-work scan. */
@@ -293,7 +293,7 @@ body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.reply { color: var(--gold); }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.reply::before { left: 2px; top: 2px; width: 6px; height: 1px; background: currentColor; }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.reply::after { left: 2px; top: 6px; width: 4px; height: 1px; background: currentColor; }
-body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.approval { color: var(--bad); animation: gd-approval-pulse 1.6s ease-in-out infinite; }
+body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.approval { color: var(--bad); animation: gd-approval-pulse 1.6s steps(8, jump-none) infinite; }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.approval::before { left: 4px; top: 1px; width: 2px; height: 4px; background: currentColor; }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.approval::after { left: 4px; top: 7px; width: 2px; height: 1px; background: currentColor; }
 @keyframes gd-approval-pulse {
@@ -302,7 +302,7 @@ body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-
 }
 @keyframes gd-session-failure { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
 /* Failed: the crossed core flashes; its X stays distinct from the live approval exclamation. */
-body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.failed { color: var(--bad); animation: gd-session-failure 1.6s ease-in-out infinite; }
+body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.failed { color: var(--bad); animation: gd-session-failure 1.6s steps(8, jump-none) infinite; }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.failed::before,
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.failed::after { left: 1px; top: 4px; width: 8px; height: 1px; background: currentColor; transform: rotate(45deg); }
 body.glass-demo #left :is(#workstreams .ws-row,#projects .proj-sess-full) > .ws-dot.failed::after { transform: rotate(-45deg); }

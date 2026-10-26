@@ -90,6 +90,13 @@ debugging or claiming anything done. Companions: [BRAIN.md](BRAIN.md) · [DECISI
   blocks a successful call that returns evidence already seen); the hole was CROSS-run — each
   loop pass is a fresh run with a fresh guard. Still open: routines have no per-routine idle
   breaker (the day rail covers them).
+- **Never hold one HTTP connection per live run** (2026-10-21). A browser opens at most SIX
+  HTTP/1.1 connections to one host (Chromium, WebView2, WebKit alike). POST /api/run used to
+  stream each run on its own response, held through approval pauses: five paused conversations
+  + the SSE bridge filled the pool, and Approve/Deny, the next run and the NEEDS YOU feeds sat
+  queued in the browser behind the runs waiting on them. A page now holds ONE run stream
+  (`sidecar/run-streams.js`, `Harness.streamPost` / `chat()`); a new route that streams a run to
+  the page takes `pageRunSink` + `runLineWriter`, never its own long-lived response.
 - **`npm start` (:8787) is the app.** `npm run serve` is a dead UI-only path — using it
   "works" and then nothing real functions.
 - **Bare `require()` at module top for optional deps** crashes the single-process sidecar at

@@ -1357,7 +1357,8 @@ const Chat = (() => {
     wireCrewCapture(); // P3.2: record each dispatched worker's forwarded run-end spend so a 👍 on a crew run splits XP honestly (registers once)
     wireCuriosity();   // Commander Dossier: one gentle "tell me about X" nudge after a clean run (registers once)
     wireConnectorRequired();   // beginner seam Lane 1: a run that hit an unwired connector earns the ⇄ CONNECT chip
-    wireBgExit();      // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
+    wireKeySaved();    // keys.save: a key pasted into chat now lives in KEYS — its bubble + saved history show the placeholder (registers once)
+    wireBgExit();     // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
     wireSkillAside();  // A2: after a background review distills a skill, ONE quiet "distilled this run…" aside (registers once)
     wireIdBar();       // COMMS agent selector: a change switches to (or mints) a workstream bound to that agent (registers once)
     load(opts.ws);
@@ -3756,7 +3757,10 @@ const Chat = (() => {
       r.body.appendChild(more);
     }
     const foot = document.createElement('div'); foot.className = 'recap-line recap-foot';
-    foot.textContent = [fmtRecapCost(entry), durMs > 0 ? fmtMs(durMs) : '', (entry.model && entry.model !== '(unknown)') ? entry.model : ''].filter(Boolean).join(' · ');
+    // SAY IT ONCE (10-19): the RUN COMPLETE footer right above already tells this run's honest time and its model (its
+    // telemetry hydrates before this card): the foot keeps what the footer does not say, the cost ("907ms" over "922ms")
+    const said = !!(log && Array.from(log.querySelectorAll('.comms-presence.resolved[data-run-id]')).some(c => c.dataset.runId === runId && c.dataset.telemetry === '1'));
+    foot.textContent = [fmtRecapCost(entry), !said && durMs > 0 ? fmtMs(durMs) : '', !said && entry.model && entry.model !== '(unknown)' ? entry.model : ''].filter(Boolean).join(' · ');
     if (foot.textContent) r.body.appendChild(foot);
     autoscroll();
   }
@@ -3775,11 +3779,13 @@ const Chat = (() => {
      always the duplicate — but a fold without chips still gets the full listing rather than losing the
      record. (Do not read this as a reload guarantee: the fold and its telemetry are DOM-only and do not
      survive a reload or a stream switch at all — replayChannel rebuilds the chips, nothing rebuilds these.) */
+  // who ran a recorded run, by NAME (the record holds the id: the hero's is "agent")
+  const runWho = id => (id && typeof App !== 'undefined' && App.agentName && App.agentName(id)) || id || '';
   function telemetryRun(entry, role, skipTools) {
     const wrap = document.createElement('div'); wrap.className = 'rt-run';
     const calls = runCallCount(entry);
     const head = document.createElement('div'); head.className = 'rt-run-head';
-    head.textContent = [role, entry.agentId || '', entry.model && entry.model !== '(unknown)' ? entry.model : '', (entry.reasoningEffort && entry.reasoningEffort !== 'none') ? entry.reasoningEffort : '', Number(entry.durationMs) > 0 ? fmtMs(Number(entry.durationMs)) : '', calls + (calls === 1 ? ' call' : ' calls')].filter(Boolean).join(' · ');
+    head.textContent = [role, runWho(entry.agentId), entry.model && entry.model !== '(unknown)' ? entry.model : '', (entry.reasoningEffort && entry.reasoningEffort !== 'none') ? entry.reasoningEffort : '', Number(entry.durationMs) > 0 ? fmtMs(Number(entry.durationMs)) : '', Number(entry.waitedMs) > 0 ? fmtMs(Number(entry.waitedMs)) + ' waiting on you' : '', calls + (calls === 1 ? ' call' : ' calls')].filter(Boolean).join(' · ');
     wrap.appendChild(head);
     for (const t of (skipTools ? [] : (Array.isArray(entry.toolTrace) ? entry.toolTrace : []))) {
       // a call the Task Brief held did not run: "not run yet", never "failed" (TaskIntent.GATE_HELD on its record)
@@ -3800,12 +3806,12 @@ const Chat = (() => {
     const leadCalls = runCallCount(entry);
     const workerCalls = children.reduce((n, child) => n + runCallCount(child), 0);
     const sum = card.querySelector('.cp-sum');
+    // ONE run, ONE duration (live walkthrough 2026-10-13: "RUN COMPLETE · 89.1s" above a receipt reading 49.3s). The
+    // card shows machine time — approval waits excluded, the same number as the receipt — and names the wait apart.
+    const honest = Number(card.dataset.ms) || 0, wall = Number(entry.durationMs) || 0;
     if (sum) {
       const label = String(sum.textContent || '').split(' · ')[0];
       const bits = [];
-      // ONE run, ONE duration (live walkthrough 2026-10-13: "RUN COMPLETE · 89.1s" above a receipt reading 49.3s). The
-      // card shows machine time — approval waits excluded, the same number as the receipt — and names the wait apart.
-      const honest = Number(card.dataset.ms) || 0, wall = Number(entry.durationMs) || 0;
       if (honest > 0) {
         bits.push(fmtMs(honest));
         if (wall - honest > 1500) bits.push(fmtMs(wall - honest) + ' waiting on you');
@@ -3825,7 +3831,9 @@ const Chat = (() => {
     const detail = document.createElement('div'); detail.className = 'run-telemetry';
     // chips for THIS run already in the fold? then the lead's per-tool rows would just repeat them.
     const hasChips = !!fold.querySelector('.tool-chip');
-    detail.appendChild(telemetryRun(entry, 'lead', hasChips));
+    // the lead's line tells the footer's time (its record's durationMs is the wall clock, the approval waits inside it)
+    const leadRow = honest > 0 ? Object.assign({}, entry, { durationMs: honest, waitedMs: wall - honest > 1500 ? wall - honest : 0 }) : entry;
+    detail.appendChild(telemetryRun(leadRow, 'lead', hasChips));
     children.forEach(child => detail.appendChild(telemetryRun(child, 'worker')));
     fold.appendChild(detail);
     if (!card.querySelector('.cp-chev')) {
@@ -9074,6 +9082,97 @@ const Chat = (() => {
       if (CONNECTOR_NEEDED.size > 40) CONNECTOR_NEEDED.delete(CONNECTOR_NEEDED.keys().next().value);
     });
   }
+  /* A KEY PASTED INTO CHAT, SAVED (keys.save, 2026-10-25). The agent stored a key the Commander pasted here in KEYS. The
+     page holds the paste in two places the sidecar's redaction never reaches: the bubble on screen and this
+     workstream's history (the desk save, and what the next turn re-sends to the model). On keys.save's OK result (the
+     contract's own agent.tool_call + agent.tool_result, paired by callId — no new event) the sidecar swaps every saved
+     key for its placeholder (POST /api/servicekeys/scrub), and only a turn that came back changed is rewritten, so
+     nothing is claimed for a paste the sidecar did not find. */
+  const KEY_SAVE_CALLS = new Map();   // callId -> runId of an in-flight keys.save (bounded)
+  let keySavedWired = false;
+  function wireKeySaved() {
+    if (keySavedWired || typeof U === 'undefined' || !U.bus) return;
+    keySavedWired = true;
+    U.bus.on('agent.tool_call', p => {
+      if (!p || !p.callId || !p.runId || !/^keys[._]save$/.test(String(p.name || ''))) return;
+      KEY_SAVE_CALLS.set(p.callId, p.runId);
+      if (KEY_SAVE_CALLS.size > 40) KEY_SAVE_CALLS.delete(KEY_SAVE_CALLS.keys().next().value);
+    });
+    U.bus.on('agent.tool_result', p => {
+      const runId = p && p.callId ? KEY_SAVE_CALLS.get(p.callId) : null;
+      if (!runId) return;
+      KEY_SAVE_CALLS.delete(p.callId);
+      if (p.ok && !p.isError) scrubSavedKeys(runId).catch(() => {});
+    });
+  }
+  // returns how many of the Commander's turns now show the placeholder (the number aids testing)
+  async function scrubSavedKeys(runId) {
+    let ws = null;
+    if (typeof Workstreams !== 'undefined' && Workstreams.all) { try { ws = Workstreams.all().find(w => (w.runIds || []).indexOf(runId) >= 0) || null; } catch (_) {} }
+    ws = ws || activeWs;
+    const turns = ws && Array.isArray(ws.history) ? ws.history.filter(m => m && m.role === 'user' && typeof m.content === 'string' && m.content) : [];
+    if (!turns.length || typeof Harness === 'undefined' || !Harness.api) return 0;
+    const raw = turns.map(m => m.content);
+    const r = await Harness.api.post('/api/servicekeys/scrub', { texts: raw });
+    const out = r && r.ok && r.j && Array.isArray(r.j.texts) && r.j.texts.length === raw.length ? r.j.texts : null;
+    if (!out) return 0;
+    const keys = [];
+    out.forEach((t, i) => {
+      if (typeof t !== 'string' || t === raw[i]) return;
+      turns[i].content = t;
+      for (const k of swappedKeys(raw[i], t)) if (!keys.some(x => x.value === k.value)) keys.push(k);
+    });
+    if (!keys.length) return 0;
+    // the run's directive also rides RUN_META (the rate card's reference line) and may have titled the thread
+    for (const meta of RUN_META.values()) { if (meta && typeof meta.directive === 'string') meta.directive = nameKeys(meta.directive, keys); }
+    if (typeof ws.title === 'string') ws.title = nameKeys(ws.title, keys);
+    try { App.persist(); } catch (_) {}
+    if (log && isActiveWs(ws)) {
+      const walker = document.createTreeWalker(log, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.nodeType === 3) { const v = nameKeys(n.nodeValue, keys); if (v !== n.nodeValue) n.nodeValue = v; continue; }
+        for (const a of ['title', 'data-tip', 'aria-label']) {
+          const v = n.getAttribute(a);
+          if (v) { const s = nameKeys(v, keys); if (s !== v) n.setAttribute(a, s); }
+        }
+      }
+    }
+    return keys.length;
+  }
+  // The values the sidecar swapped, read back out of one (raw, scrubbed) pair: the scrubbed text is the raw text with
+  // each saved key replaced by its placeholder, so the raw text between the literal pieces IS the key. The page
+  // already held these values (the Commander typed them); nothing secret comes back from the sidecar. [] on any doubt.
+  function swappedKeys(raw, scrubbed) {
+    const re = /\[[A-Z][A-Z0-9_]* saved in KEYS\]/g;
+    const names = scrubbed.match(re) || [], parts = scrubbed.split(re), out = [];
+    let at = 0;
+    for (let i = 0; i < names.length; i++) {
+      const s = raw.indexOf(parts[i], at); if (s < 0) return [];
+      const start = s + parts[i].length;
+      const last = i === names.length - 1;
+      if (!last && !parts[i + 1]) return [];   // two placeholders side by side: no seam to cut at
+      const end = last && !parts[i + 1] ? raw.length : raw.indexOf(parts[i + 1], start);
+      if (end <= start) return [];
+      out.push({ value: raw.slice(start, end), placeholder: names[i] });
+      at = end;
+    }
+    return out;
+  }
+  // every whole saved key -> its placeholder; a key cut short by a clipped label ("4e7b2c9d1a0f…") too
+  function nameKeys(text, keys) {
+    let s = String(text == null ? '' : text);
+    for (const k of keys) {
+      if (k.value.length < 16) continue;
+      if (s.indexOf(k.value) >= 0) s = s.split(k.value).join(k.placeholder);
+      const head = k.value.slice(0, 12);
+      for (let at = s.indexOf(head); at >= 0; at = s.indexOf(head, at + 1)) {
+        let end = at + head.length;
+        while (end < s.length && k.value.charAt(end - at) === s.charAt(end)) end++;
+        if (s.charAt(end) === '…') { s = s.slice(0, at) + k.placeholder + s.slice(end); }
+      }
+    }
+    return s;
+  }
   // returns true iff a chip was rendered (the bool aids testing)
   function offerConnectorDoor(runId, originWs) {
     if (!runId) return false;
@@ -9185,7 +9284,7 @@ const Chat = (() => {
   // words — the old "reached this run's limit" read as a runtime setting and sent users hunting in the wrong
   // panel. Scope/cap ride the additive agent.run.end fields; an old sidecar omits them and gets the generic line.
   // Issue #135: the unpriced ceiling's own lever is its Runtime limits row; a save applies from the next run.
-  function budgetStopLine(scope, capUsd, atBalance, unpriced, subscription) {
+  function budgetStopLine(scope, capUsd, atBalance, unpriced, subscription, projected) {
     /* THE UNPRICED-MODEL TOKEN CEILING IS NOT A $ CAP (2026-10-11). A model with no known price is bounded per run in
        TOKENS (loop.js maxUnpricedTokens, 2,000,000 by default); the $ settings never read it, so "hit the per-run spend
        cap — raise it" sent the user to a lever that changes nothing. unpriced = { model, capTokens } from the additive
@@ -9201,6 +9300,12 @@ const Chat = (() => {
     }
     // only show the $ figure when it renders honestly at cent precision (a sub-cent test cap would read "$0.00")
     const cap = (typeof capUsd === 'number' && isFinite(capUsd) && capUsd >= 0.01) ? '$' + capUsd.toFixed(2).replace(/\.00$/, '') + ' ' : '';
+    // projected (agent.run.end budgetProjected): a run and its workers share one PER RUN cap; this run stopped BEFORE it
+    // (calls in flight took what was left) — never "hit" a cap it did not reach (d3a76db3)
+    if (scope === 'run' && projected === true) {
+      if (atBalance === true) return (cap ? 'stopped before it would spend more than the ' + cap + 'left on your StarNet balance' : 'stopped before it would spend more than what is left on your StarNet balance') + ' — add credits under SETTINGS → AI & MODELS to keep going';
+      return 'stopped before it would pass the ' + cap + 'per-run spend cap — raise it in SETTINGS › SPENDING LIMITS';
+    }
     // atBalance (agent.run.end budgetCapIsBalance, additive): admission clamped this StarNet run's ceiling to the
     // reported balance, so the run spent the wallet, not a cap the user chose — raising PER RUN would do nothing.
     if (scope === 'run' && atBalance === true) return (cap ? 'used the ' + cap + 'left on your StarNet balance' : 'used what was left on your StarNet balance') + ' — add credits under SETTINGS → AI & MODELS to keep going';
@@ -9867,8 +9972,15 @@ const Chat = (() => {
     // persistent server-side context to fold on demand between runs. Auto-compaction runs INSIDE a run when the
     // live prompt crosses the threshold. This is the honest status; see the slash-parity report for the rationale.
     if (cs && cs.limit) {
-      const pct = Math.round(((cs.used || 0) / cs.limit) * 100);
-      localLine('Chat memory: ' + (cs.used || 0) + ' / ' + cs.limit + ' tokens used (' + pct + '% — a token is roughly ¾ of a word). When it nears full, older turns are folded into a summary automatically during the next run; there is nothing you need to do.');
+      // a run on a model that bills a dearer rate past a prompt size works in a window stopped at it (the sidecar's
+      // runWindow, context-cost-1023): measure against THAT window, the one a run folds in, never the 1M it could hold
+      const run = (typeof Harness !== 'undefined' && Harness.runWindowOf) ? (Number(Harness.runWindowOf(cs.model)) || 0) : 0;
+      const tier = run > 0 && run < cs.limit;
+      const win = tier ? run : cs.limit;
+      const pct = Math.round(((cs.used || 0) / win) * 100);
+      localLine('Chat memory: ' + (cs.used || 0) + ' / ' + win + ' tokens used (' + pct + '% — a token is roughly ¾ of a word). '
+        + (tier ? 'The model can hold ' + cs.limit + ', but it bills a higher rate for a prompt over ' + run + ' tokens, so a run works in ' + run + '. ' : '')
+        + 'When it nears full, older turns are folded into a summary automatically during the next run; there is nothing you need to do.');
     } else {
       localLine('Chat memory is managed automatically: when a conversation grows past what the model can hold, older turns are folded into a summary during the next run. There is nothing you need to do.');
     }
@@ -9929,7 +10041,9 @@ const Chat = (() => {
         const models = Array.isArray(j.byModel) ? j.byModel.slice(0, 3).map(m => (m.model || '?') + ' (' + (m.spendLabel && !(m.usd > 0) ? m.spendLabel : U.usd(m.usd || 0) + (m.spendLabel ? ', ' + m.spendLabel : '')) + ')') : [];
         const succ = (j.successPct == null) ? '' : ', ' + j.successPct + '% completed';
         return localLine('Insights (lifetime run history for ' + agentId + '): ' + (j.totalRuns || 0) + ' run' + (j.totalRuns === 1 ? '' : 's')
-          + ', ' + U.usd(j.totalUsd || 0) + (j.unpricedRuns ? ' (+ ' + j.unpricedRuns + ' run' + (j.unpricedRuns === 1 ? '' : 's') + ' with no published price)' : '') + ', ' + (j.totalTokens || 0) + ' tokens'
+          + ', ' + (j.usageMissingRuns ? 'at least ' : '') + U.usd(j.totalUsd || 0) + (j.unpricedRuns ? ' (+ ' + j.unpricedRuns + ' run' + (j.unpricedRuns === 1 ? '' : 's') + ' with no published price)' : '')
+          + (j.usageMissingRuns ? ' (' + j.usageMissingRuns + ' run' + (j.usageMissingRuns === 1 ? '' : 's') + ' stopped mid-answer before usage arrived)' : '')
+          + (j.spendUnknownRuns ? ' (+ ' + j.spendUnknownRuns + ' run' + (j.spendUnknownRuns === 1 ? '' : 's') + ' with spend unknown)' : '') + ', ' + (j.totalTokens || 0) + ' tokens'
           + (j.avgUsdPerRun ? ', ' + U.usd(j.avgUsdPerRun) + '/run' : '') + succ
           + (models.length ? '. Top models: ' + models.join(', ') : '') + '.');
       }
@@ -11114,7 +11228,7 @@ const Chat = (() => {
         renderHistory(); syncStatus();
         activeLiveRow = streamingAgent(undefined, undefined, runRoot); historyRead.repaint = false;
       }
-      const { text: reply, error, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens } = await Harness.chat({
+      const { text: reply, error, endReason, finishReason, completionVerdict, effectVerdict, budgetScope, budgetCapUsd, budgetCapIsBalance, unpricedModel, unpricedCapTokens, subscriptionModel, subscriptionCapTokens, budgetProjected } = await Harness.chat({
         system: sys, messages: retry ? endOnUserTurn(historyWindow(ws)) : historyWindow(ws), agentId: ws.agentId || 'agent', isTask, recurring, signal: ac.signal, streamId: ws.id,
         // a SPOKEN reply may run on SETTINGS › Models › VOICE CHAT MODEL — never a live call's delegated work, which the
         // live voice layer already answers fast and hands to the agent's own model on purpose
@@ -11279,7 +11393,7 @@ const Chat = (() => {
           const unpriced = (endReason === 'budget' && unpricedModel) ? { model: unpricedModel, capTokens: unpricedCapTokens } : null;
           const subscription = (endReason === 'budget' && subscriptionModel) ? { model: subscriptionModel, capTokens: subscriptionCapTokens } : null;
           const stoppedBy = (endReason === 'cancelled' && interrupted.has(ws.id)) ? (stopSource.get(ws.id) || 'you') : null;
-          const stopLine = endReason === 'budget' ? budgetStopLine(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription)
+          const stopLine = endReason === 'budget' ? budgetStopLine(budgetScope, budgetCapUsd, budgetCapIsBalance, unpriced, subscription, budgetProjected)
             : stoppedBy ? stoppedByLine(stoppedBy)
             // toolsRan: this run's tool calls (callNames), so an empty end after real steps never reads "nothing was done"
             : (typeof Friendly !== 'undefined' && Friendly.stopLine) ? Friendly.stopLine(endReason, { cancelSource: runPressedEstop ? 'estop_by_run' : '', toolsRan: Object.keys(callNames).length })
@@ -11296,7 +11410,7 @@ const Chat = (() => {
           // The UNPRICED-model token ceiling is not a $ cap at all: its door is a different model (raising $ does nothing).
           if (isActiveWs(ws) && !(endReason === 'cancelled' && runPressedEstop)) { if (endReason === 'budget' && unpriced) offerUnpricedDoor(); else if (endReason === 'budget' && !subscription) offerBudgetDoor(budgetCapIsBalance); else offerTryAgain(); }
           if (typeof StationUI !== 'undefined') StationUI.notify(isActiveWs(ws) ? (stoppedBy ? 'stopped by you' : 'run stopped: ' + brief(stopLine || endReason))
-            : whoOf(ws) + ' stopped' + sessionNote(ws) + ' — ' + (endReason === 'budget' ? (unpriced ? 'hit the token ceiling for a model with no price' : subscription ? 'used its per-run Claude subscription ceiling; say "continue" to keep going' : budgetCapIsBalance === true ? 'used the rest of your StarNet balance' : 'hit a spending limit') : endReason === 'max_iters' ? 'reached the step limit; say "continue" to keep going' : brief(stopLine || endReason)),
+            : whoOf(ws) + ' stopped' + sessionNote(ws) + ' — ' + (endReason === 'budget' ? (unpriced ? 'hit the token ceiling for a model with no price' : subscription ? 'used its per-run Claude subscription ceiling; say "continue" to keep going' : budgetProjected === true ? (budgetCapIsBalance === true ? 'stopped before it would spend the rest of your StarNet balance' : 'stopped before it would pass a spending limit') : budgetCapIsBalance === true ? 'used the rest of your StarNet balance' : 'hit a spending limit') : endReason === 'max_iters' ? 'reached the step limit; say "continue" to keep going' : brief(stopLine || endReason)),
             'warn', undefined, isActiveWs(ws) || endReason === 'cancelled' ? undefined : { kind: 'alert', go: { ws: ws.id } });
         } else if (cutShort) {
           // distinct honest "cut short" recap: the reply is truncated/filtered, not a clean delivery.
@@ -11791,7 +11905,7 @@ const Chat = (() => {
   // only" gate maybeStandaloneRate uses — so a pure-chat run is never bottle-offered. Used by App.runBottleInfo (R5).
   function runDidWork(id) { const w = id ? runWork.get(id) : null; return !!(w && ((w.toolsOk || 0) >= 1 || (w.delivered || 0) >= 1)); }
 
-  return { init, load, paintTitle, deliverTurns, send, consentInspect, appendConsentDetails, revealHistory, revealAsk, copyText, continuityDiagnostics, refreshStarters, sendOrQueue, continueConnectorTask, stopActive, status, localLine, broadcast, renderProse, toolRailOf, openFile, answerConsent, consentPhrase: actionPhrase, reconcileBackgroundAsks, setSystem, getHistory, contextRef, abort, isBusy, beatBusy: skillBeatBusy, beginInterview, endInterview, echoUser, prefill, autoGrowInput, choices, clearChoices, retireDeskPrompt, typeLine, nudge, clearNudge, offerCuriosity, offerFork, planGoalPath, briefingReceipt, isComposerEngaged, canFocusSession, runMeta, runDidWork, awayDigest, awayReview, awayRate, sampleCard, workshopReturn, refreshIdBar: renderIdBar, refreshGroupControls: updateControls, refreshAgentIdentity, setRosterStatus, askBudgetSpent, spendAsk, clockLabel: fmtClock, breakLabel: fmtBreak, workspaceFileRefs, imageBlobUrl, readableUrl,
+  return { init, load, paintTitle, deliverTurns, send, consentInspect, appendConsentDetails, revealHistory, revealAsk, copyText, continuityDiagnostics, refreshStarters, sendOrQueue, continueConnectorTask, stopActive, status, localLine, broadcast, renderProse, toolRailOf, openFile, answerConsent, consentPhrase: actionPhrase, reconcileBackgroundAsks, setSystem, getHistory, contextRef, abort, isBusy, beatBusy: skillBeatBusy, beginInterview, endInterview, echoUser, prefill, rememberSent: recordSent, autoGrowInput, choices, clearChoices, retireDeskPrompt, typeLine, nudge, clearNudge, offerCuriosity, offerFork, planGoalPath, briefingReceipt, isComposerEngaged, canFocusSession, runMeta, runDidWork, awayDigest, awayReview, awayRate, sampleCard, workshopReturn, refreshIdBar: renderIdBar, refreshGroupControls: updateControls, refreshAgentIdentity, setRosterStatus, askBudgetSpent, spendAsk, clockLabel: fmtClock, breakLabel: fmtBreak, workspaceFileRefs, imageBlobUrl, readableUrl,
     // the COMMS '▤ saved' row's folder / copy-path keys and their path resolver, shared with MY WORK › DELIVERABLES' FILES rows (org pass 10-14, P24)
     folderButton, copyPathButton, fullSavedPath: absoluteArtifactPath };
 })();

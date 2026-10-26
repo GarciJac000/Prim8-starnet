@@ -198,10 +198,12 @@
     if (!a || !a.schedule || !a.schedule.jobId || refreshing.has(id)) return;
     refreshing.add(id); paintAll(id);
     try {
-      const r = await post('/api/cron/run', { id: a.schedule.jobId, detach: true });   // closing this window must not cancel it
-      if (!r.ok) { const j = await r.json().catch(() => ({})); notify(a.name + ': ' + ((j && (j.error || j.message)) || 'the refresh could not start'), 'warn'); return; }
+      // closing this window must not cancel it (detach). The run's lines ride the page's ONE run stream (Harness.streamPost),
+      // so a refresh no longer holds one of the browser's six connections to the station for its whole run.
+      const r = await Harness.streamPost('/api/cron/run', { id: a.schedule.jobId, detach: true });
+      if (!r.ok) { const j = r.j || {}; notify(a.name + ': ' + ((j && (j.error || j.message)) || 'the refresh could not start'), 'warn'); return; }
       notify(a.name + ': refresh started — your crew is on it.');   // said only once the station accepted the run
-      await r.text();   // the run streams until it finishes; reading it keeps it attached
+      await r.done;   // the run streams until it finishes
     } catch (e) { notify(a.name + ': the refresh did not finish — ' + ((e && e.message) || e), 'warn'); }
     finally { refreshing.delete(id); await load(); paintAll(id); }
   }

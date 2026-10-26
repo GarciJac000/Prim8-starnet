@@ -17,7 +17,10 @@ mod erase_all;
 mod fresh_start;
 mod hud_mode;
 mod lifecycle_preferences;
+mod sidecar_output;
+mod sidecar_reap;
 mod sidecar_startup;
+mod terminal_session;
 mod webview_recovery;
 mod window_visibility;
 
@@ -26,7 +29,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -65,6 +68,11 @@ struct AppState {
     workspaces: PathBuf,
     startup_log: Option<PathBuf>,
     sidecar: Mutex<Option<Child>>,
+    // What the sidecar prints (sidecar_output.rs): the rotating sidecar.log beside startup.log, the
+    // live child's drained output, and the redacted last lines of the latest spawn that never came up.
+    sidecar_log: Arc<sidecar_output::SidecarLog>,
+    sidecar_output: Mutex<Option<sidecar_output::Capture>>,
+    boot_failure_tail: Mutex<Vec<String>>,
     keep_awake: Mutex<KeepAwakeState>,
     lifecycle_preferences_path: PathBuf,
     lifecycle_preferences: Mutex<LifecyclePreferences>,
@@ -85,7 +93,22 @@ struct AppState {
     // Set once setup has built the main window. Before that a second launch must not treat the
     // missing window as a dead instance (see webview_recovery::second_launch_action).
     main_window_built: AtomicBool,
+    // This instance was started by `starnet` (the terminal) with `--background`: its window starts parked and
+    // it runs while the terminal sessions do; their end decides whether it keeps running (terminal_sessions_over,
+    // which leaves an open window alone). Cleared once that decision is made, or by a window close with no
+    // session left alive.
+    launched_for_terminal: AtomicBool,
+    // The `starnet` processes it runs for (the one that started it and any that joined), checked by
+    // watch_terminal_sessions. Read and changed together with launched_for_terminal, under this lock.
+    terminal_pids: Mutex<Vec<u32>>,
+    // Its terminal sessions ended and the close decision is under way: a `starnet` arriving now is told so
+    // (join_terminal_session) and starts StarNet again once this one has quit. Cleared if it stays resident.
+    terminal_closing: AtomicBool,
 }
+
+// `starnet` sessions that asked to join before setup had its state to put them in (the single-instance callback
+// can run inside the startup-failure dialog's message loop): moved into terminal_pids once the state is managed.
+static EARLY_TERMINAL_JOINS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// What the guardian knows about the sidecar's exit history. Serialized verbatim to the frontend
 /// (STATION DATA UNREACHABLE screen) so a halted crash loop is shown as such, never as a generic
@@ -1630,20 +1653,16 @@ fn is_reapable_node_path(node: &Path) -> bool {
     node.is_absolute() && node.file_name().is_some()
 }
 
-/// Terminate every running process whose executable image is EXACTLY `node` — the same path
-/// this shell spawns its sidecar from (never a generic "node.exe" name match). Returns how
-/// many were reaped. Fail-open by design: any enumeration/open/query/terminate error skips
-/// that process and never blocks startup.
+/// Terminate the ORPHANS among the processes running EXACTLY `node` — the bundled runtime this shell spawns its
+/// sidecar from (never a generic "node.exe" name match). The image only nominates; sidecar_reap decides: a process
+/// whose parent is alive (the `starnet` CLI runs on this very node, and so does a station it booted) or that `keep`
+/// names (the terminal sessions this StarNet runs for) is never touched. Returns how many were reaped. Fail-open by
+/// design: any enumeration/open/query/terminate error skips that process and never blocks startup.
 #[cfg(windows)]
-fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, MAX_PATH};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
+fn reap_orphan_sidecars(node: &Path, keep: &[u32], startup_log: &Option<PathBuf>) -> usize {
+    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
 
     if !is_reapable_node_path(node) {
@@ -1661,74 +1680,58 @@ fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
+    let Ok(procs) =
+        sidecar_reap::windows_bundled_node_processes(&node_file_name, &|full| same_path(full, node))
+    else {
         log_startup(
             startup_log,
             "sidecar-reap: snapshot failed — skipped (fail-open)",
         );
         return 0;
+    };
+    let reap = sidecar_reap::orphans_to_reap(&procs, keep, std::process::id());
+    for p in procs.iter().filter(|p| !reap.contains(&p.pid)) {
+        log_startup(
+            startup_log,
+            format!(
+                "sidecar-reap: kept pid={} — {}",
+                p.pid,
+                if keep.contains(&p.pid) {
+                    "a starnet terminal this StarNet runs for"
+                } else {
+                    "its parent is alive (a starnet terminal, a station it runs, or a sidecar's own child)"
+                }
+            ),
+        );
     }
-
     let mut reaped = 0usize;
-    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
-    while ok {
-        let exe_name = {
-            let len = entry
-                .szExeFile
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(entry.szExeFile.len());
-            String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase()
-        };
-        if exe_name == node_file_name && entry.th32ProcessID != std::process::id() {
-            let pid = entry.th32ProcessID;
-            let handle = unsafe {
-                OpenProcess(
-                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-                    0,
-                    pid,
-                )
-            };
-            if !handle.is_null() {
-                // Full image path — the ONLY thing that authorizes a kill. A node.exe running
-                // from anywhere else (system PATH, another app's bundle) is never touched.
-                let mut buf = [0u16; MAX_PATH as usize + 1];
-                let mut size = buf.len() as u32;
-                let got =
-                    unsafe { QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) };
-                if got != 0 {
-                    let full = PathBuf::from(String::from_utf16_lossy(&buf[..size as usize]));
-                    if same_path(&full, node) {
-                        if unsafe { TerminateProcess(handle, 1) } != 0 {
-                            reaped += 1;
-                            log_startup(
-                                startup_log,
-                                format!(
-                                    "sidecar-reap: terminated orphan sidecar pid={pid} ({})",
-                                    full.display()
-                                ),
-                            );
-                        } else {
-                            log_startup(
-                                startup_log,
-                                format!("sidecar-reap: TerminateProcess failed for pid={pid} — skipped (fail-open)"),
-                            );
-                        }
-                    }
-                }
-                unsafe {
-                    CloseHandle(handle);
-                }
+    for pid in reap {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            continue;
+        }
+        // Full image path again, on the handle the kill goes through — the ONLY thing that authorizes it (a pid
+        // reused since the listing is never touched).
+        if sidecar_reap::windows_image(handle).is_some_and(|full| same_path(&full, node)) {
+            if unsafe { TerminateProcess(handle, 1) } != 0 {
+                reaped += 1;
+                log_startup(
+                    startup_log,
+                    format!(
+                        "sidecar-reap: terminated orphan sidecar pid={pid} ({})",
+                        node.display()
+                    ),
+                );
+            } else {
+                log_startup(
+                    startup_log,
+                    format!("sidecar-reap: TerminateProcess failed for pid={pid} — skipped (fail-open)"),
+                );
             }
         }
-        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
-    }
-    unsafe {
-        CloseHandle(snapshot);
+        unsafe {
+            CloseHandle(handle);
+        }
     }
     log_startup(
         startup_log,
@@ -1770,10 +1773,13 @@ fn mac_process_image_path(pid: i32) -> Option<PathBuf> {
 }
 
 /// macOS backstop for a desktop process that exits without running its managed-state Drop hook.
-/// Enumerate every PID, authorize termination only when libproc reports the exact bundled Node
-/// image path, ask it to shut down gracefully, then force only that same verified image if needed.
+/// Enumerate every PID, nominate only those libproc reports at the exact bundled Node image path,
+/// and let sidecar_reap pick the ORPHANS among them (launchd adopted them: ppid 1; `/bin/ps` says the
+/// parent) — the `starnet` CLI runs on this very node, and a process whose parent lives or that `keep`
+/// names is never touched. Ask each orphan to shut down gracefully, then force only that same
+/// verified image if needed.
 #[cfg(target_os = "macos")]
-fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
+fn reap_orphan_sidecars(node: &Path, keep: &[u32], startup_log: &Option<PathBuf>) -> usize {
     use std::ffi::c_void;
 
     #[link(name = "proc")]
@@ -1815,15 +1821,46 @@ fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
     }
     pids.truncate((count as usize).min(pids.len()));
 
-    let mut reaped = 0usize;
-    for pid in pids {
-        if pid <= 0 || pid == std::process::id() as i32 {
-            continue;
-        }
-        if !mac_process_image_path(pid).is_some_and(|path| same_path(&path, node)) {
-            continue;
-        }
+    let procs: Vec<sidecar_reap::NodeProc> = pids
+        .into_iter()
+        .filter(|&pid| pid > 0 && pid != std::process::id() as i32)
+        .filter(|&pid| mac_process_image_path(pid).is_some_and(|path| same_path(&path, node)))
+        .map(|pid| {
+            let parent = Command::new("/bin/ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+                .ok()
+                .and_then(|out| sidecar_reap::parse_ps_ppid(&String::from_utf8_lossy(&out.stdout)));
+            sidecar_reap::NodeProc {
+                pid: pid as u32,
+                parent: parent.unwrap_or(0),
+                // ps could not say: spared (what is not proven orphaned is never reaped)
+                parent_alive: match parent {
+                    None => true,
+                    Some(0) | Some(1) => false,
+                    Some(ppid) => terminal_session::terminal_running(ppid),
+                },
+            }
+        })
+        .collect();
+    let reap = sidecar_reap::orphans_to_reap(&procs, keep, std::process::id());
+    for p in procs.iter().filter(|p| !reap.contains(&p.pid)) {
+        log_startup(
+            startup_log,
+            format!(
+                "sidecar-reap: kept pid={} — {}",
+                p.pid,
+                if keep.contains(&p.pid) {
+                    "a starnet terminal this StarNet runs for"
+                } else {
+                    "its parent is alive (a starnet terminal, a station it runs, or a sidecar's own child)"
+                }
+            ),
+        );
+    }
 
+    let mut reaped = 0usize;
+    for pid in reap.into_iter().map(|pid| pid as i32) {
         const SIGTERM: i32 = 15;
         const SIGKILL: i32 = 9;
         let _ = unsafe { kill(pid, SIGTERM) };
@@ -1859,8 +1896,8 @@ fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn reap_orphan_sidecars(node: &Path, startup_log: &Option<PathBuf>) -> usize {
-    let _ = node;
+fn reap_orphan_sidecars(node: &Path, keep: &[u32], startup_log: &Option<PathBuf>) -> usize {
+    let _ = (node, keep);
     log_startup(
         startup_log,
         "sidecar-reap: this platform has no exact-image reaper wired",
@@ -1930,6 +1967,10 @@ fn sidecar_command(state: &AppState, entry: &Path, node: &Path) -> Command {
             env!("STARNET_BUILD_PROVENANCE_KIND"),
         )
         .env("STARNET_BUILD_DIRTY", env!("STARNET_BUILD_DIRTY"))
+        // The windows-subsystem build has no console to inherit, so a boot crash's text was lost.
+        // spawn_sidecar drains both pipes on their own threads into sidecar.log (sidecar_output.rs).
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .current_dir(&state.root);
     set_sidecar_branded_env(&mut cmd, "SKYNET_PORT", state.port.to_string());
     set_sidecar_branded_env(&mut cmd, "SKYNET_IPC_TOKEN", &state.ipc_token);
@@ -1999,8 +2040,21 @@ fn spawn_sidecar(state: &AppState) -> bool {
 
     let mut last_error = None;
     for attempt in 0..=20 {
-        match sidecar_startup::spawn(&mut sidecar_command(state, &entry, &node), &state.sidecar) {
-            Ok(pid) => {
+        let mut cmd = sidecar_command(state, &entry, &node);
+        let redactor = sidecar_output::Redactor::for_command(&cmd);
+        match sidecar_startup::spawn(&mut cmd, &state.sidecar) {
+            Ok(spawned) => {
+                let pid = spawned.pid;
+                let output = sidecar_output::attach(
+                    &state.sidecar_log,
+                    redactor,
+                    pid,
+                    spawned.stdout,
+                    spawned.stderr,
+                );
+                if let Ok(mut slot) = state.sidecar_output.lock() {
+                    *slot = Some(output.clone());
+                }
                 let (listening, exited) =
                     wait_for_port_or_exit(state.port, SIDECAR_READY_TIMEOUT, Some(&state.sidecar));
                 log_startup(
@@ -2022,6 +2076,7 @@ fn spawn_sidecar(state: &AppState) -> bool {
                         Err(error) => log_startup(&state.startup_log, format!("spawn_sidecar pid={pid} timeout cleanup failed: {error}; retaining child ownership")),
                     }
                 }
+                record_boot_output(state, &output, listening, exited);
                 return listening;
             }
             Err(e) if cfg!(windows) && e.raw_os_error() == Some(32) && attempt < 20 => {
@@ -2045,6 +2100,111 @@ fn spawn_sidecar(state: &AppState) -> bool {
     false
 }
 
+/// A spawn that never came up: copy the engine's own last lines (redacted) into startup.log and keep
+/// them for the startup-failure dialog, so support sees the real fault instead of a bare exit code.
+/// A spawn that came up clears the previous failure.
+fn record_boot_output(
+    state: &AppState,
+    output: &sidecar_output::Capture,
+    listening: bool,
+    exited: Option<Option<i32>>,
+) {
+    if listening {
+        if let Ok(mut tail) = state.boot_failure_tail.lock() {
+            tail.clear();
+        }
+        return;
+    }
+    // The pipes close once the child is gone; give the drain threads a moment to reach EOF so the
+    // fatal error (the last thing a crashing Node prints) is in the tail.
+    output.wait_drained(Duration::from_millis(1500));
+    state.sidecar_log.note(&match exited {
+        Some(code) => format!("=== engine pid={} exited before listening code={code:?} ===", output.pid()),
+        None => format!("=== engine pid={} timed out before listening ===", output.pid()),
+    });
+    let tail = output.tail(sidecar_output::STARTUP_LOG_TAIL);
+    output.take_report();
+    log_startup(
+        &state.startup_log,
+        sidecar_output::startup_log_block(output.pid(), &tail, state.sidecar_log.path()),
+    );
+    if let Ok(mut slot) = state.boot_failure_tail.lock() {
+        *slot = tail;
+    }
+}
+
+/// The guardian saw a sidecar that HAD come up exit unexpectedly: put its last lines in startup.log
+/// beside the watchdog line (once per child; a spawn that never listened was already reported).
+fn record_crash_output(state: &AppState, pid: u32) {
+    let output = state
+        .sidecar_output
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().filter(|o| o.pid() == pid).cloned());
+    let Some(output) = output else {
+        return;
+    };
+    if !output.take_report() {
+        return;
+    }
+    output.wait_drained(Duration::from_millis(500));
+    log_startup(
+        &state.startup_log,
+        sidecar_output::startup_log_block(
+            pid,
+            &output.tail(sidecar_output::STARTUP_LOG_TAIL),
+            state.sidecar_log.path(),
+        ),
+    );
+}
+
+/// The middle of the startup-failure text both platforms show: the engine's own last lines when it
+/// printed any, otherwise the possible causes, then where the full logs are.
+fn startup_failure_details(
+    startup_log: &Option<PathBuf>,
+    sidecar_log: Option<&Path>,
+    engine_tail: &[String],
+) -> String {
+    let cause = match sidecar_output::dialog_excerpt(engine_tail) {
+        Some(excerpt) => format!(
+            "The engine stopped before it became ready. Its last output (secrets removed):\n\n{excerpt}"
+        ),
+        None => "The engine exited or did not become ready. Possible causes include unavailable \
+                 workspace files, a blocked Node runtime, or a port that could not be opened."
+            .to_string(),
+    };
+    let mut logs = match startup_log {
+        Some(p) => format!("Details were written to:\n{}", p.display()),
+        None => "No startup log path was available.".to_string(),
+    };
+    if let Some(p) = sidecar_log {
+        logs.push_str(&format!("\nFull engine output:\n{}", p.display()));
+    }
+    format!("{cause}\n\n{logs}")
+}
+
+#[cfg(test)]
+mod startup_failure_text_tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_s_own_error_replaces_the_list_of_guesses() {
+        let startup = Some(PathBuf::from("C:/data/startup.log"));
+        let tail = vec![
+            "Error: Cannot find module 'missing'".to_string(),
+            "Node.js v22.23.2".to_string(),
+        ];
+        let text = startup_failure_details(&startup, Some(Path::new("C:/data/sidecar.log")), &tail);
+        assert!(text.contains("Error: Cannot find module 'missing'\nNode.js v22.23.2"));
+        assert!(text.contains("C:/data/startup.log") && text.contains("C:/data/sidecar.log"));
+        assert!(!text.contains("Possible causes"));
+
+        let silent = startup_failure_details(&startup, None, &[]);
+        assert!(silent.contains("Possible causes"));
+        assert!(silent.contains("C:/data/startup.log") && !silent.contains("Full engine output"));
+    }
+}
+
 /// Startup-failure dialog (audit 0.2). When the FIRST `spawn_sidecar` fails — e.g. a first-run
 /// user whose bundled node was blocked by antivirus/Application-Control — the window would
 /// otherwise open dead with every /api fetch failing, no explanation, no way back. This surfaces
@@ -2054,19 +2214,18 @@ fn spawn_sidecar(state: &AppState) -> bool {
 /// Cancel/close. Off Windows there is no Retry/Cancel box: a non-blocking notice tells the user
 /// and startup continues with the guardian retrying (see the not(windows) variant below).
 #[cfg(windows)]
-fn show_startup_failure_dialog(_app: &AppHandle, startup_log: &Option<PathBuf>) -> bool {
+fn show_startup_failure_dialog(_app: &AppHandle, state: &AppState) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, IDRETRY, MB_ICONERROR, MB_RETRYCANCEL, MB_SETFOREGROUND, MB_SYSTEMMODAL,
     };
-    let log_line = match startup_log {
-        Some(p) => format!("Details were written to:\n{}", p.display()),
-        None => "No startup log path was available.".to_string(),
-    };
+    let details = startup_failure_details(
+        &state.startup_log,
+        state.sidecar_log.path(),
+        &boot_failure_tail(state),
+    );
     let body = format!(
         "StarNet could not start its local engine.\n\n\
-         The engine exited or did not become ready. Possible causes include unavailable workspace \
-         files, a blocked Node runtime, or a port that could not be opened.\n\n\
-         {log_line}\n\n\
+         {details}\n\n\
          Click Retry to try starting the engine again, or Cancel to close StarNet."
     );
     let to_wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
@@ -2088,9 +2247,9 @@ fn show_startup_failure_dialog(_app: &AppHandle, startup_log: &Option<PathBuf>) 
 /// retrying, but the user is TOLD (non-blocking, so setup never waits on the dialog). Always
 /// returns `false` — nobody pressed Retry.
 #[cfg(not(windows))]
-fn show_startup_failure_dialog(app: &AppHandle, startup_log: &Option<PathBuf>) -> bool {
+fn show_startup_failure_dialog(app: &AppHandle, state: &AppState) -> bool {
     log_startup(
-        startup_log,
+        &state.startup_log,
         "startup failed: sidecar did not come up; showing a non-blocking notice",
     );
     eprintln!("[starnet] startup failed: sidecar did not come up (see startup.log)");
@@ -2100,19 +2259,23 @@ fn show_startup_failure_dialog(app: &AppHandle, startup_log: &Option<PathBuf>) -
         format!(
             "StarNet could not start its local engine yet. It will keep retrying in the background, \
              but the station may stay unreachable until it does.\n\n{}",
-            startup_log_line(startup_log)
+            startup_failure_details(
+                &state.startup_log,
+                state.sidecar_log.path(),
+                &boot_failure_tail(state)
+            )
         ),
         || {},
     );
     false
 }
 
-#[cfg(not(windows))]
-fn startup_log_line(startup_log: &Option<PathBuf>) -> String {
-    match startup_log {
-        Some(p) => format!("Details were written to:\n{}", p.display()),
-        None => "No startup log path was available.".to_string(),
-    }
+fn boot_failure_tail(state: &AppState) -> Vec<String> {
+    state
+        .boot_failure_tail
+        .lock()
+        .map(|tail| tail.clone())
+        .unwrap_or_default()
 }
 
 /// macOS/Linux user-visible startup notice. Never `blocking_show`: this runs during setup or on a
@@ -2196,14 +2359,14 @@ fn spawn_sidecar_with_retry(app: &AppHandle, state: &AppState) -> bool {
         // `false` as one aborted setup and panicked the app on any slow or failed first spawn. Keep the
         // pre-dialog behaviour there — open the window and let the guardian keep retrying.
         if !cfg!(windows) {
-            show_startup_failure_dialog(app, &state.startup_log);
+            show_startup_failure_dialog(app, state);
             log_startup(
                 &state.startup_log,
                 "startup: no native dialog on this platform — continuing; the guardian keeps retrying",
             );
             return true;
         }
-        if !show_startup_failure_dialog(app, &state.startup_log) {
+        if !show_startup_failure_dialog(app, state) {
             log_startup(
                 &state.startup_log,
                 "startup: cancelled; stopping local engine",
@@ -2345,6 +2508,7 @@ fn spawn_guardian(app: AppHandle) {
                                 format!("watchdog: sidecar stopped on purpose (code {code:?}) — respawning"),
                             );
                         } else {
+                            record_crash_output(st, pid);
                             let now = Instant::now();
                             let window_expired = first_crash_at
                                 .map(|t| now.duration_since(t) > GUARDIAN_CRASH_WINDOW)
@@ -2810,6 +2974,8 @@ fn drain_and_kill_sidecar(state: &AppState) {
 fn stay_resident_or_quit(app: &AppHandle, st: &AppState, why: &str) {
     st.close_exit_pending.store(false, Ordering::SeqCst);
     if app.get_webview_window("main").is_some() {
+        // it stays: a `starnet` arriving from now on simply attaches (no longer told StarNet is closing)
+        st.terminal_closing.store(false, Ordering::SeqCst);
         log_startup(
             &st.startup_log,
             format!("close-request: staying resident ({why})"),
@@ -2822,6 +2988,181 @@ fn stay_resident_or_quit(app: &AppHandle, st: &AppState, why: &str) {
     );
     drain_and_kill_sidecar(st);
     app.exit(0);
+}
+
+/// What a window close decides once the window is hidden (Lane 4D), as one function so the end of the terminal
+/// sessions a StarNet ran for (terminal_sessions_over) decides exactly the same way: the close-to-tray preference
+/// or REAL armed work keeps the supervised station resident in the tray; nothing armed (or no sidecar listening)
+/// is a full quit; a live but unreadable sidecar fails OPEN (killing it could destroy armed work). No hidden
+/// daemon, no claim the harness can't prove.
+fn decide_close(app: &AppHandle, st: &AppState) {
+    let close_to_tray = lifecycle_preferences_snapshot(st).close_to_tray;
+    log_startup(
+        &st.startup_log,
+        format!("close-request: close_to_tray={close_to_tray}"),
+    );
+    if close_to_tray {
+        // Explicit authority to keep the supervised process alive even when no scheduled
+        // work is armed. Tray Quit remains the only full-stop action in this mode.
+        stay_resident_or_quit(app, st, "close-to-tray preference");
+        return;
+    }
+    let mut probe = probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
+    if matches!(probe, LifecycleProbe::Ambiguous) {
+        // One retry before deciding — a single slow poll must not park the app in the
+        // tray forever when the sidecar is actually healthy and idle.
+        probe = probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
+    }
+    match probe {
+        LifecycleProbe::Armed(l) if l.armed => {
+            stay_resident_or_quit(app, st, "armed background work");
+        }
+        LifecycleProbe::Ambiguous => {
+            // Alive but unwell — fail OPEN (killing could destroy armed work).
+            stay_resident_or_quit(app, st, "armed state ambiguous");
+        }
+        _ => {
+            // Armed{armed:false} or NotRunning: window-close is a full quit.
+            drain_and_kill_sidecar(st);
+            app.exit(0);
+        }
+    }
+}
+
+/// Started for the terminal (terminal_session.rs): every 2 s, drop the `starnet` sessions that have exited. When none
+/// is left on two ticks running, decide once (terminal_sessions_over) — the extra tick is the grace a `starnet`
+/// started right after the last one ended needs to join (a script's next line; ctrl+c and run it again). A crashed
+/// or closed terminal counts as ended — the app watches the process and never waits for a goodbye. Stops once that
+/// decision is made, or a window close found no session left.
+fn watch_terminal_sessions(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut quiet_ticks = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let st = state.inner();
+            if st.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+            let over = {
+                let mut pids = st
+                    .terminal_pids
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !st.launched_for_terminal.load(Ordering::SeqCst) {
+                    return;
+                }
+                pids.retain(|pid| terminal_session::terminal_running(*pid));
+                if pids.is_empty() {
+                    quiet_ticks += 1;
+                } else {
+                    quiet_ticks = 0;
+                }
+                // one decision: from here this StarNet is no longer the terminal's. A `starnet` that arrives while it
+                // closes is told so (terminal_closing) and starts StarNet again once this one has quit.
+                let decide = quiet_ticks >= 2 && st.launched_for_terminal.swap(false, Ordering::SeqCst);
+                if decide {
+                    st.terminal_closing.store(true, Ordering::SeqCst);
+                }
+                decide
+            };
+            if over {
+                terminal_sessions_over(&app, st);
+                return;
+            }
+        }
+    });
+}
+
+/// Is a `starnet` session this StarNet runs for still alive? (The ones that have exited are dropped.)
+fn terminal_sessions_live(st: &AppState) -> bool {
+    let mut pids = st
+        .terminal_pids
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !st.launched_for_terminal.load(Ordering::SeqCst) {
+        return false;
+    }
+    pids.retain(|pid| terminal_session::terminal_running(*pid));
+    !pids.is_empty()
+}
+
+/// Every `starnet` session this StarNet ran for has ended. If nobody has opened the window meanwhile, decide exactly
+/// as a window close does — a station with routines armed (or the close-to-tray preference) stays in the tray and an
+/// idle one quits, leaving nothing running unseen. A window that is open is a person's: the terminal never closes it.
+fn terminal_sessions_over(app: &AppHandle, st: &AppState) {
+    let visible = app
+        .get_webview_window("main")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if visible {
+        st.terminal_closing.store(false, Ordering::SeqCst);
+        log_startup(
+            &st.startup_log,
+            "terminal-done: the starnet sessions ended, but StarNet was opened meanwhile; it stays as it is",
+        );
+        return;
+    }
+    st.startup_reveal.cancel();
+    log_startup(
+        &st.startup_log,
+        "terminal-done: every starnet session it ran for has ended; deciding as a window close",
+    );
+    decide_close(app, st);
+}
+
+/// A second launch with the terminal's flags: another `starnet` session attaching to the running station. A StarNet
+/// the terminal started runs for this session too, so the first one ending never closes the station under it; a
+/// StarNet a person started (or one that stays in the tray) is theirs and only notes it. Never a window, either way.
+/// Every outcome is logged with the session's pid — bin/starnet.js reads it to confirm its join (review 0.14.1, F7).
+fn join_terminal_session(app: &AppHandle, pid: u32) {
+    enum Join {
+        Joined,
+        Starting,
+        Closing,
+        NotTracked,
+    }
+    let outcome = match app.try_state::<AppState>() {
+        // setup has not managed its state yet (it may be waiting on the startup-failure dialog): keep the pid until
+        // it has, so this session is tracked like the one that started StarNet (review 0.14.1, F6)
+        None => {
+            if pid > 0 {
+                EARLY_TERMINAL_JOINS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(pid);
+            }
+            Join::Starting
+        }
+        Some(state) => {
+            let st = state.inner();
+            let mut pids = st
+                .terminal_pids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pid > 0 && st.launched_for_terminal.load(Ordering::SeqCst) {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+                Join::Joined
+            } else if st.terminal_closing.load(Ordering::SeqCst) {
+                Join::Closing
+            } else {
+                Join::NotTracked
+            }
+        }
+    };
+    log_startup(
+        &startup_log_path(app),
+        match outcome {
+            Join::Joined => format!("second-launch --background: starnet session pid {pid} joins the station the terminal started"),
+            Join::Starting => format!("second-launch --background: starnet session pid {pid} joins once StarNet has started"),
+            Join::Closing => format!("second-launch --background: starnet session pid {pid} arrived while StarNet is closing (its starnet sessions ended); start StarNet again once it has quit"),
+            Join::NotTracked => format!("second-launch --background: starnet session pid {pid}: this StarNet is a person's or stays in the tray; a terminal ending never closes it"),
+        },
+    );
 }
 
 /// The init script every main-window document runs first.
@@ -2989,42 +3330,15 @@ fn build_main_window(
                         return;
                     };
                     let st = state.inner();
-                    let close_to_tray = lifecycle_preferences_snapshot(st).close_to_tray;
-                    log_startup(
-                        &st.startup_log,
-                        format!("close-request: close_to_tray={close_to_tray}"),
-                    );
-                    if close_to_tray {
-                        // Explicit authority to keep the supervised process alive even when no scheduled
-                        // work is armed. Tray Quit remains the only full-stop action in this mode.
-                        stay_resident_or_quit(&app2, st, "close-to-tray preference");
+                    // closed while a `starnet` session it runs for is still alive: it keeps running for that
+                    // session, and the session's end decides exactly as this close would have — never a
+                    // station closed under a terminal that is still using it
+                    if terminal_sessions_live(st) {
+                        stay_resident_or_quit(&app2, st, "a starnet session still uses this station");
                         return;
                     }
-                    let mut probe =
-                        probe_lifecycle_armed(st.port, &st.api_token, Duration::from_millis(1500));
-                    if matches!(probe, LifecycleProbe::Ambiguous) {
-                        // One retry before deciding — a single slow poll must not park the app in the
-                        // tray forever when the sidecar is actually healthy and idle.
-                        probe = probe_lifecycle_armed(
-                            st.port,
-                            &st.api_token,
-                            Duration::from_millis(1500),
-                        );
-                    }
-                    match probe {
-                        LifecycleProbe::Armed(l) if l.armed => {
-                            stay_resident_or_quit(&app2, st, "armed background work");
-                        }
-                        LifecycleProbe::Ambiguous => {
-                            // Alive but unwell — fail OPEN (killing could destroy armed work).
-                            stay_resident_or_quit(&app2, st, "armed state ambiguous");
-                        }
-                        _ => {
-                            // Armed{armed:false} or NotRunning: window-close is a full quit.
-                            drain_and_kill_sidecar(st);
-                            app2.exit(0);
-                        }
-                    }
+                    st.launched_for_terminal.store(false, Ordering::SeqCst);
+                    decide_close(&app2, st);
                 });
             }
         });
@@ -4931,7 +5245,15 @@ fn main() {
     tauri::Builder::default()
         // A second launch should focus the running window, not spin up a 2nd sidecar. Registered FIRST per
         // Tauri guidance (n1): single-instance must run before other plugins so a second process bails early.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // The terminal's own launch never reveals the window: `--background` is a `starnet` session attaching to
+            // the station that is already running (terminal_session.rs).
+            if let terminal_session::TerminalLaunch::Background { pid } = terminal_session::parse(argv.iter()) {
+                join_terminal_session(app, pid);
+                return;
+            }
+            // a person opening StarNet: revealed as always. The terminal sessions it runs for stay tracked — their end
+            // never closes a window that is open, and a close while one is alive waits for it (terminal_sessions_live)
             let win = app.get_webview_window("main");
             // No managed state yet = setup is still booting the sidecar: this instance is starting.
             let (built, rebuilding) = app
@@ -5022,6 +5344,13 @@ fn main() {
             hud_mode::starnet_hud_fold
         ])
         .setup(move |app| {
+            // Started by `starnet` (bin/starnet.js) with the app closed: the window stays parked and this StarNet runs
+            // for that terminal session (terminal_session.rs, watch_terminal_sessions).
+            let terminal_pid = match terminal_session::parse(std::env::args()) {
+                terminal_session::TerminalLaunch::Background { pid } => Some(pid),
+                terminal_session::TerminalLaunch::Person => None,
+            };
+            let launched_for_terminal = terminal_pid.is_some();
             let root = project_root(app.handle());
             let port = sidecar_port; // the port the CSP was pinned to in main()
             let ipc_token = uuid::Uuid::new_v4().to_string();
@@ -5032,7 +5361,8 @@ fn main() {
             let workspaces = workspace_path(app.handle());
             let lifecycle_preferences_path = lifecycle_preferences_path(app.handle());
             let lifecycle_preferences = load_lifecycle_preferences(&lifecycle_preferences_path);
-            let start_minimized = lifecycle_preferences.start_minimized;
+            // started for the terminal: parked like start-minimized, for this launch only (the stored choice is untouched)
+            let start_minimized = lifecycle_preferences.start_minimized || launched_for_terminal;
             let migrated_workspaces = migrate_workspace_data(
                 &workspaces,
                 &legacy_workspace_paths(&root, &workspaces),
@@ -5052,12 +5382,19 @@ fn main() {
                     lifecycle_preferences.close_to_tray
                 ),
             );
+            if let Some(pid) = terminal_pid {
+                log_startup(
+                    &startup_log,
+                    format!("startup: started by starnet (--background, terminal pid {pid}) — the station runs with the app's keys; the window stays parked until someone opens StarNet"),
+                );
+            }
             // One-time: lift any plaintext channel bot tokens into the keychain and strip them from the file,
             // BEFORE spawning the sidecar so the injected SKYNET_<ID>_TOKEN env reflects the migrated tokens.
             migrate_channel_tokens_from_plaintext(&workspaces);
             // Same one-time sweep for the cloud device token — this is what upgrades an already
             // linked station from a plaintext token to a keychain one, with no user action.
             migrate_credits_token_from_plaintext(&workspaces);
+            let sidecar_log = Arc::new(sidecar_output::SidecarLog::beside(&startup_log));
             let state = AppState {
                 port,
                 app_version: app.package_info().version.to_string(),
@@ -5067,6 +5404,9 @@ fn main() {
                 workspaces,
                 startup_log,
                 sidecar: Mutex::new(None),
+                sidecar_log,
+                sidecar_output: Mutex::new(None),
+                boot_failure_tail: Mutex::new(Vec::new()),
                 keep_awake: Mutex::new(KeepAwakeState::new()),
                 lifecycle_preferences_path,
                 lifecycle_preferences: Mutex::new(lifecycle_preferences),
@@ -5078,22 +5418,37 @@ fn main() {
                 webview_rebuilding: AtomicBool::new(false),
                 webview_recovery: webview_recovery::RecoveryBudget::default(),
                 main_window_built: AtomicBool::new(false),
+                launched_for_terminal: AtomicBool::new(launched_for_terminal),
+                terminal_pids: Mutex::new(terminal_pid.filter(|pid| *pid > 0).into_iter().collect()),
+                terminal_closing: AtomicBool::new(false),
             };
             // Before spawning OUR sidecar: terminate any orphan sidecars left behind by a
             // hard-killed previous shell (Drop/ExitRequested never ran there). Multiple live
             // sidecars on one WORKSPACES dir violate the one-sidecar invariant and burn each
-            // other's rotating Codex OAuth refresh tokens. Scoped strictly to processes whose
-            // image path IS our bundled node runtime; fail-open, never blocks startup.
-            reap_orphan_sidecars(&node_binary(&state.root), &state.startup_log);
+            // other's rotating Codex OAuth refresh tokens. Scoped strictly to ORPHANS whose image
+            // path IS our bundled node runtime — never the `starnet` terminal that started this
+            // StarNet (it runs on that same node), nor anything with a live parent; fail-open,
+            // never blocks startup.
+            let keep = state
+                .terminal_pids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            reap_orphan_sidecars(&node_binary(&state.root), &keep, &state.startup_log);
             // Bring the sidecar up before starting background supervision. Cancel drops
             // the owned state and child, before a guardian or hidden window can be created.
             // A setup Err becomes a panic in Tauri, and release builds use panic = "abort" — a user
             // pressing Cancel used to "crash" with 0xC0000409. Stop the child ourselves and exit cleanly.
+            // A terminal start that is cancelled exits EXIT_START_CANCELLED instead: `starnet` waits on this process,
+            // and a 0 reads as a hand-off to a StarNet already starting (review 0.14.1, F5).
             if !spawn_sidecar_with_retry(app.handle(), &state) {
                 state.shutting_down.store(true, Ordering::SeqCst);
                 state.kill_sidecar();
                 log_startup(&state.startup_log, "startup: cancelled by user; exiting cleanly");
                 drop(state);
+                if launched_for_terminal {
+                    std::process::exit(terminal_session::EXIT_START_CANCELLED);
+                }
                 std::process::exit(0);
             }
             app.manage(state);
@@ -5102,6 +5457,39 @@ fn main() {
 
             // Respawn the sidecar if it crashes while the window is open (see spawn_guardian).
             spawn_guardian(app.handle().clone());
+            // `starnet` sessions that asked to join while setup was still starting are tracked now, like the one that
+            // started this StarNet (review 0.14.1, F6)
+            let watch_terminals = {
+                let st = app.state::<AppState>();
+                let early = std::mem::take(
+                    &mut *EARLY_TERMINAL_JOINS
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                );
+                let mut pids = st
+                    .terminal_pids
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if st.launched_for_terminal.load(Ordering::SeqCst) && !early.is_empty() {
+                    for pid in &early {
+                        if !pids.contains(pid) {
+                            pids.push(*pid);
+                        }
+                    }
+                    log_startup(
+                        &st.startup_log,
+                        format!(
+                            "terminal: starnet session(s) {early:?} that asked while StarNet was starting are tracked now"
+                        ),
+                    );
+                }
+                st.launched_for_terminal.load(Ordering::SeqCst) && !pids.is_empty()
+            };
+            // Started for a terminal session: StarNet runs while it does (a launch that named no pid stays parked
+            // until someone opens it or quits it from the tray).
+            if watch_terminals {
+                watch_terminal_sessions(app.handle().clone());
+            }
 
             // ---- Lane 4D: tray supervisor ----
             // The tray is the visible owner of the background-lifecycle contract. Open reveals the window; the
@@ -5205,6 +5593,10 @@ fn main() {
         .build(context)
         .expect("failed to build the StarNet desktop shell")
         .run(|app, event| {
+            // macOS, NOT built or tested here: opening a running StarNet from the Dock or Finder arrives as
+            // RunEvent::Reopen, not as a second launch, so a window parked by `starnet` (or by close-to-tray /
+            // start-minimized) stays hidden until the menu-bar icon's Open StarNet. A Reopen arm that calls
+            // show_main_window would let the Dock reveal it — owed, with a Mac to prove it on (review 0.14.1, F8).
             if let RunEvent::ExitRequested { api, code, .. } = event {
                 // WebView2 crash recovery destroys the dead main window before building its
                 // replacement; that momentary zero-window state is not a request to quit.
@@ -5301,12 +5693,14 @@ mod sidecar_reap_tests {
 
     /// Ambient end-to-end proof (spawns and terminates REAL processes) — excluded from the
     /// default test run; execute explicitly with `cargo test -- --ignored`. Copies node.exe to
-    /// a unique temp "bundled" path, starts one process from it (the orphan) and one from the
-    /// system node (the bystander), then asserts the reap kills exactly the former.
+    /// a unique temp "bundled" path and starts three processes: an ORPHAN from it (its parent
+    /// exits at once), one from it with a LIVE parent (this test, standing in for the `starnet`
+    /// CLI, which runs on the bundled node), and a bystander from the system node. The reap must
+    /// kill exactly the orphan.
     #[cfg(windows)]
     #[test]
     #[ignore]
-    fn reap_terminates_only_processes_from_the_exact_path() {
+    fn reap_terminates_only_orphans_from_the_exact_path() {
         let node_on_path = std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|d| d.join("node.exe"))
@@ -5329,27 +5723,39 @@ mod sidecar_reap_tests {
         std::fs::copy(&src, &bundled).unwrap();
 
         let idle = ["-e", "setInterval(function(){}, 1000)"];
-        let mut orphan = Command::new(&bundled).args(idle).spawn().unwrap();
+        // the orphan: started by a short-lived node that exits at once, so its parent pid is dead
+        let starter = "const c=require('child_process').spawn(process.argv[1],['-e','setInterval(function(){},1000)'],{detached:true,stdio:'ignore'});c.unref();console.log(c.pid)";
+        let out = Command::new(&src)
+            .args(["-e", starter, bundled.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let orphan: u32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("orphan pid");
+        let mut owned = Command::new(&bundled).args(idle).spawn().unwrap();
         let mut bystander = Command::new(&src).args(idle).spawn().unwrap();
         std::thread::sleep(Duration::from_millis(400));
 
-        let reaped = reap_orphan_sidecars(&bundled, &None);
-        assert!(
-            reaped >= 1,
-            "expected at least the planted orphan to be reaped"
-        );
+        let reaped = reap_orphan_sidecars(&bundled, &[], &None);
+        assert_eq!(reaped, 1, "exactly the planted orphan is reaped");
 
         std::thread::sleep(Duration::from_millis(400));
         assert!(
-            matches!(orphan.try_wait(), Ok(Some(_))),
-            "process running from the bundled path must be terminated"
+            !terminal_session::terminal_running(orphan),
+            "the orphan running from the bundled path must be terminated"
+        );
+        assert!(
+            matches!(owned.try_wait(), Ok(None)),
+            "a bundled-node process with a live parent (the starnet CLI) must never be touched"
         );
         assert!(
             matches!(bystander.try_wait(), Ok(None)),
             "node from a DIFFERENT path must never be touched"
         );
 
-        let _ = orphan.wait();
+        let _ = owned.kill();
+        let _ = owned.wait();
         let _ = bystander.kill();
         let _ = bystander.wait();
         let _ = std::fs::remove_dir_all(&dir);

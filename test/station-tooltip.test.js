@@ -108,6 +108,8 @@ const clampedR = T.place({ left: 980, top: 300, width: 20, height: 20 }, tip, vp
 A.ok(clampedR.left + tip.width <= vp.width, 'a tip at the right edge stays on screen');
 A.ok(clampedR.arrowX <= tip.width - 10 && clampedR.arrowX >= 10,
   'the arrow stays inside the card after clamping (it must keep pointing at the anchor, not off the corner)');
+const tall = T.place({ left: 400, top: 5, width: 8, height: 790 }, tip, vp);   // the CREW rail's resize edge spans the rail
+A.ok(tall.top >= 0 && tall.top + tip.height <= vp.height, 'a tip on an anchor with no room above or below stays on screen (it ran off the bottom at TEXT SIZE 130+)');
 A.ok(T.adopt(null) === '', 'adopt() tolerates a null element');
 
 /* ---- 5. the DELAY/CANCEL path: no ghost card beside a control the pointer already left ------------

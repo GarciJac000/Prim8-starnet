@@ -55,6 +55,7 @@ class RecordingContext {
   beginPath() {}
   clearRect() { this.draws = []; }
   setTransform() {}
+  translate() {} transform() {}   // the speech accent's skew about the planted feet (drawBody)
   ellipse(...args) { this.ellipses.push({ args, alpha: this.globalAlpha, color: this.fillStyle }); }
   fill() {}
   getTransform() { return { a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 }; }
@@ -234,7 +235,26 @@ test('reduced motion freezes decorative breath/gesture/spill without inventing o
   assert.equal(worker._pose, 'blank.type.north');
   assert.notEqual(work1.frame.image, work2.frame.image, 'working still follows its real typing track');
   assert.deepEqual(Object.keys(worker).filter(k => !Object.hasOwn(body({ working: true, sitting: true, dir: 'north' }), k)).sort(),
-    ['_pose', '_poseLast', '_rA', '_rAt', '_rD8', '_rW', '_renderCycleUnits', '_renderFrame', '_renderGroundGap', '_renderPoseFade', '_renderSpeechAccent', '_renderStandingHeight', '_renderTravelError', '_renderWalkTween', '_speechAt', '_speechEase', '_turnAng'], 'only render telemetry and pose/speech interpolation state are added');
+    ['_pose', '_poseLast', '_rA', '_rAt', '_rD8', '_rW', '_renderCycleUnits', '_renderDrift', '_renderFrame', '_renderGroundGap', '_renderLive', '_renderNextAt', '_renderPoseFade', '_renderSpeechAccent', '_renderStandingHeight', '_renderTravelError', '_renderWalkTween', '_speechAt', '_speechEase', '_turnAng'], 'only render telemetry and pose/speech interpolation state are added (_renderLive/_renderDrift/_renderNextAt: the still pacer readouts, 2026-10-21)');
+  assert.equal(worker._renderLive, false, 'a body under reduced motion has no clock-driven bob or breath: the still pacer may treat it as still');
+  const breather = body({ aph: 0 });
+  draw(sprites, breather, 100000, {});   // (past the boot-time stretch window, which carries its own frame edges)
+  // the planted breath is a sub-pixel swell every still frame draws at its true phase (review 10-21, option b): not motion for the
+  // body — _renderDrift says it moves, for the overlays that round to whole px over its head
+  assert.equal(breather._renderLive, false, 'a planted standing body breathing is not clock motion for the still pacer (sub-pixel, drawn at its true phase)');
+  assert.equal(breather._renderDrift, true, '...but it reports the drift, so a bubble or nameplate over its head keeps the normal pace');
+  const tops = [100000, 100000 + 1000 / 30].map(t => draw(sprites, breather, t, {}).frame.args[1]);
+  assert.ok(Math.abs(tops[1] - tops[0]) * 2 < 0.01, 'between two still frames the breath moves the drawn top ' + (Math.abs(tops[1] - tops[0]) * 2).toFixed(4) + ' device px at zoom 2 (under 0.01)');
+  const bobber = body({ aph: 0 });
+  draw(sprites, bobber, 100000);   // no appearance: the three-argument renderer, not planted — the idle bob
+  assert.equal(bobber._renderLive, true, 'a standing body that bobs (not planted) is motion: the bob steps whole device px and lifts the shadow');
+  const talker = body({ aph: 0, speaking: true });
+  draw(sprites, talker, 100000, {}); draw(sprites, talker, 100400, {});
+  talker.speaking = false;
+  let liveUntil = null;
+  for (let t = 100400; t < 104000; t += 1000 / 60) { draw(sprites, talker, t, {}); if (talker._renderLive) liveUntil = t; }
+  assert.ok(liveUntil != null && liveUntil > 100400 + 600 && liveUntil < 100400 + 2000, 'a planted body that just spoke stays motion while its speech accent eases out (' + Math.round(liveUntil - 100400) + ' ms), judged by the ease, never a flat lobe of the accent');
+  assert.equal(talker._renderLive, false, '...and is still once the accent is gone');
   const spill1 = draw(sprites, body({ id: 'ULTRON' }), 1000, { reducedMotion: true }).ctx.ellipses;
   const spill2 = draw(sprites, body({ id: 'ULTRON' }), 2200, { reducedMotion: true }).ctx.ellipses;
   assert.deepEqual(spill1, spill2, 'leader spill stops pulsing under reduced motion');

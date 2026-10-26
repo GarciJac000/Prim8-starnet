@@ -12,6 +12,8 @@ const SHIPPED_INPUTS: &[&str] = &[
     "frontend-embed",
     "../sidecar",
     "../shared",
+    // the `starnet` terminal command (bin/starnet.js, its launchers and bin/lib) ships as a resource beside the app
+    "../bin",
     "src",
     "capabilities",
     "icons",

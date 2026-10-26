@@ -206,7 +206,7 @@ async function collect(provider, req) { const out = []; for await (const e of pr
   // I. supportsTools reflects the warmed catalog; unknown -> null (never a false refusal)
   {
     const modelsFetch = async () => new Response(JSON.stringify({ data: [
-      { id: 'tooly', supported_parameters: ['tools'] },
+      { id: 'tooly', supported_parameters: ['tools'], top_provider: { max_completion_tokens: 64000 } },
       { id: 'brainy', supported_parameters: ['tools', 'reasoning_effort'], reasoningEfforts: ['low', 'high'] },
       { id: 'plain', supported_parameters: [] }
     ] }), { status: 200 });
@@ -215,6 +215,8 @@ async function collect(provider, req) { const out = []; for await (const e of pr
     A.eq(p.supportsTools('tooly'), true, 'tool-capable model -> true');
     A.eq(p.supportsTools('plain'), false, 'non-tool model -> false');
     A.eq(p.supportsTools('unknown-xyz'), null, 'unknown model -> null (do not false-refuse)');
+    A.eq(p.outputLimit('tooly'), 64000, 'output limit from top_provider.max_completion_tokens (bug d3a76db3: what a call can bill)');
+    A.eq(p.outputLimit('plain'), 0, 'a model with no published output ceiling -> 0 (unknown)');
     A.eq(p.reasoningEfforts('brainy'), ['low', 'high'], 'declared reasoning efforts are exposed');
     A.eq(p.reasoningEfforts('plain'), ['none'], 'non-reasoning model exposes only reasoning off');
   }

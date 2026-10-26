@@ -4,7 +4,7 @@
    standing on its own AFTER the tour: while a STATION quest is open (an agent reached for a tool its room can't
    grant — a real capability gap the Commander can close by placing a prop), gently glow the BUILD dock so the
    fix is one obvious click away. The glow is a soft HINT, not the tutorial's imperative ring — it never scrims,
-   never blocks, and vanishes the instant the last station gap closes.
+   never blocks, and vanishes the instant the last station gap closes or once the Commander has looked (SEEN, below).
 
    Reuses the kit-out's resolver DISCIPLINE, honoring its two locked traps:
      • TRAP 1 — dock targets are HIDDEN until the dock is open. So we glow the ALWAYS-VISIBLE BUILD dock toggle
@@ -25,12 +25,40 @@ const DockGlow = (() => {
 
   const q = sel => { try { return document.querySelector(sel); } catch (_) { return null; } };
 
-  // are any STATION quests currently open? (the capability-gap generator's live count — G1b). Work/maintenance
-  // quests deliberately DON'T drive the BUILD-dock glow: only a station gap is closed by PLACING a prop, which
-  // is exactly what the BUILD dock is for. A work/maint quest is closed elsewhere (a run finishing / a fix).
-  function stationOpen() {
-    try { return (typeof StationQuestStore !== 'undefined' && StationQuestStore.openCount) ? StationQuestStore.openCount() > 0 : false; } catch (_) { return false; }
+  // the OPEN station quests (the capability-gap generator — G1b). Work/maintenance quests deliberately DON'T drive the
+  // BUILD-dock glow: only a station gap is closed by PLACING a prop, which is exactly what the BUILD dock is for.
+  function openGaps() {
+    try { return (typeof StationQuestStore !== 'undefined' && StationQuestStore.quests) ? StationQuestStore.quests().filter(q => q && q.status === 'open') : []; } catch (_) { return []; }
   }
+
+  /* SEEN (Andrew 10-23: "i think its weird that build is always highlighted"). A gap can stay open for weeks (nobody
+     places the prop), so "glow while any gap is open" lit BUILD for good. The glow now announces a gap the Commander has
+     not looked at yet: opening the BUILD dock (and closing it again) or entering BUILD MODE marks every open gap seen, and
+     only a NEW gap lights it again. Gaps first seen before this rule existed count as seen (SINCE, stamped on first run),
+     so an update never opens on a lit BUILD. Seen ids keep their own key (the newest 200). */
+  const SEEN_KEY = 'starnet.dockglow.seen.v1', SINCE_KEY = 'starnet.dockglow.since.v1';
+  let seen = null, since = null, dockWasOpen = false;
+  function seenIds() {
+    if (!seen) { let a = []; try { a = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'); } catch (_) { a = []; } seen = new Set(Array.isArray(a) ? a : []); }
+    return seen;
+  }
+  function sinceMs() {
+    if (since == null) {
+      let v = NaN; try { v = Number(localStorage.getItem(SINCE_KEY)); } catch (_) { v = NaN; }
+      if (!(v > 0)) { v = Date.now(); try { localStorage.setItem(SINCE_KEY, String(v)); } catch (_) {} }
+      since = v;
+    }
+    return since;
+  }
+  function markSeen(gaps) {
+    const s = seenIds(); let grew = false;
+    for (const g of gaps) if (g && g.id && !s.has(g.id)) { s.add(g.id); grew = true; }
+    if (!grew) return;
+    const keep = Array.from(s).slice(-200); seen = new Set(keep);
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(keep)); } catch (_) {}
+  }
+  // a gap worth a glow: open, not seen, and first seen after the seen rule started
+  const unseen = gaps => gaps.filter(g => !seenIds().has(g.id) && !(Number(g.firstSeenAt) > 0 && Number(g.firstSeenAt) < sinceMs()));
   // "on the floor" = the BUILD dock toggle is actually in the DOM + laid out (it lives in the in-game bottom
   // bar; the title/connect screens have no bottom bar). Cheaper + more honest than a body-class flag.
   const inGame = () => { const el = q('.bb-group[data-group="build"] .bb-grp'); return !!(el && el.getClientRects().length); };
@@ -55,16 +83,24 @@ const DockGlow = (() => {
   }
 
   function tick() {
-    // stand-down conditions (any true → no glow): not in-game, REFIT already open, the tutorial is coaching, or
-    // no station gap is open. Otherwise glow the resolved dock entry.
-    if (!inGame() || refitOpen() || tutorialCoaching() || !stationOpen()) { clear(); return; }
+    // stand-down conditions (any true → no glow): not in-game, the tutorial is coaching, REFIT already open (it marks the
+    // open gaps seen: the Commander is where the fix is made), or no UNSEEN gap. Otherwise glow the resolved dock entry.
+    if (!inGame() || tutorialCoaching()) { clear(); return; }
+    sinceMs();   // stamped on the first in-game tick, gaps or not: a gap minted later must date after it
+    const gaps = openGaps();
+    if (refitOpen()) { markSeen(gaps); dockWasOpen = false; clear(); return; }
+    // the BUILD dock opened and closed again: the Commander looked (the glow moved to BUILD MODE while it was open)
+    const open = dockOpen();
+    if (dockWasOpen && !open) markSeen(gaps);
+    dockWasOpen = open;
+    if (!unseen(gaps).length) { clear(); return; }
     apply(target());
   }
 
   function start() { if (timer) return; tick(); timer = setInterval(tick, POLL_MS); }
   function stop() { if (timer) { clearInterval(timer); timer = 0; } clear(); }
 
-  return { start, stop, tick, _target: target };
+  return { start, stop, tick, _target: target, SEEN_KEY, SINCE_KEY };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { DockGlow };

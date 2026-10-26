@@ -161,7 +161,8 @@
           ? 'done — the ' + prop + ' is on its floor.'
           : 'its run hit a wall: the room grants no ' + e.capLabel + '. drop a ' + prop + ' in its bay and it can do this for real.',
         reward: 'the ' + e.capLabel + ' capability, live on the floor',
-        status: done ? 'done' : 'open'
+        status: done ? 'done' : 'open',
+        firstSeenAt: e.firstSeenAt == null ? null : e.firstSeenAt   // the BUILD-dock glow dates a gap by it (dockglow.js SEEN)
       };
     });
   }

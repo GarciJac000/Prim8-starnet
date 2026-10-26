@@ -261,6 +261,14 @@ const SpaceBG = (() => {
       ctx.fillRect(tx, ty, k < 5 ? 2 : 1, k < 5 ? 2 : 1);
     }
   }
+  /* the weather's STILL readout (world.js STILL VERDICT, 2026-10-21), allocation-free: `now` while a meteor or the bolide
+     is crossing the sky (the fastest thing on screen: never drawn at the still pace), else when the next one is due, else
+     Infinity (reduced motion adds none; an unarmed clock arms on the next draw, which shows nothing new). */
+  function weatherNext(now) {
+    if (meteor || bolide) return now;
+    if (reduceMotion()) return Infinity;
+    return Math.min(nextMeteorAt > 0 ? nextMeteorAt : Infinity, nextBolideAt > 0 ? nextBolideAt : Infinity);
+  }
 
   /* ------------------------------------------------------------- BACKDROP: THE VOID ---- */
   /* FROZEN (law 1). Interstellar deep space: nebulas → dust → twinkle bands → weather. Depths
@@ -532,6 +540,7 @@ const SpaceBG = (() => {
       drawMeteor(ctx, w, h, now);
       drawBolide(ctx, w, h, now);
     },
+    nextChange: weatherNext,   // the STILL readout (see weatherNext)
   };
 
   /* --------------------------------------------------------- BACKDROP: THE NURSERY ---- */
@@ -864,6 +873,7 @@ const SpaceBG = (() => {
       drawMeteor(ctx, w, h, now);
       drawBolide(ctx, w, h, now);
     },
+    nextChange: weatherNext,   // the STILL readout (see weatherNext)
   };
 
   /* ------------------------------------------------------------ BACKDROP: ANDROMEDA ---- */
@@ -1061,6 +1071,7 @@ const SpaceBG = (() => {
       drawMeteor(ctx, w, h, now);
       drawBolide(ctx, w, h, now);
     },
+    nextChange: weatherNext,   // the STILL readout (see weatherNext): ANDROMEDA's sky carries the meteor and the bolide too
   };
 
   /* ------------------------------------------------ shared: the BLUE PIXEL space family ---- */
@@ -1373,6 +1384,12 @@ const SpaceBG = (() => {
       drawMeteor(ctx, w, h, now);
       drawBolide(ctx, w, h, now);
     },
+    // the STILL readout (see weatherNext): the ember shower is always crossing (300-780 px/s) and the fireball tears
+    // across in ~2 s, so either one in the sky is motion; with neither, the next fireball (or meteor) is the due change
+    nextChange(now, st) {
+      if ((st.streaks && st.streaks.length) || st.fire) return now;
+      return Math.min(st.nextFire > 0 && !reduceMotion() ? st.nextFire : Infinity, weatherNext(now));
+    },
   };
 
   /* ------------------------------------------------------- shared: SURFACE backdrops ---- */
@@ -1641,6 +1658,14 @@ const SpaceBG = (() => {
       tile2(ctx, st.wispCv, w, h, parX(cam, SURF.cloud * 1.55) + t * 13, parY(cam, SURF.cloud * 1.55) + t * 3.6);
       ctx.globalAlpha = 1;
     },
+    /* the STILL readout (world.js STILL VERDICT; final fixes 10-21): the water STEPS — draw() swaps the wave plate every
+       FRAME_MS (the texture wave advances between plates), so the next plate edge is due and each step lands on its own vsync
+       (plasma's dueAt, the same shape), never up to a still interval late. The swell's slide, the glitter, the cloud decks and
+       their shadows stay ambient drift. Reduced motion holds plate 0: nothing due. */
+    nextChange(now, st) {
+      if (reduceMotion() || !st.frames || st.frames.length < 2) return Infinity;
+      return (Math.floor(now / OCEAN_BG.FRAME_MS) + 1) * OCEAN_BG.FRAME_MS;
+    },
   };
 
   /* ---------------------------------------------------------- BACKDROP: NIGHT CITY ---- */
@@ -1902,9 +1927,16 @@ const SpaceBG = (() => {
       ctx.globalAlpha = 1;
 
       const still = reduceMotion();
-      // traffic — slow, and only on the arterials. Headlights warm one way, tail-lights red the other.
+      /* traffic — slow, and only on the arterials. Headlights warm one way, tail-lights red the other.
+         TIME-BASED (2026-10-21): a car used to advance a fixed 16 ms per DRAW, so its speed was the draw rate's — half
+         speed at the still tier's 30 draws/s, 2.4x at 144. It now covers the same ground per wall second at any rate:
+         the elapsed time since the last draw (clamped like the belt's shower; the first draw counts one 60 Hz frame),
+         scaled by the 16/16.67 the shipped look was tuned at — so at 60 draws/s every car is where it was (to float
+         dust), and at 30 or 144 it is in the same place at the same wall time. */
+      const cityDt = st.cityT == null ? 1000 / 60 : Math.max(0, Math.min(100, now - st.cityT)); st.cityT = now;
+      const cityStep = cityDt * (16 * 60 / 1000);   // 16 for a 60 Hz frame: the old per-draw step
       for (const car of st.traffic) {
-        if (!still) { car.u += car.spd / 1000 * 16; if (car.u > 1) car.u -= 1; else if (car.u < 0) car.u += 1; }
+        if (!still) { car.u += car.spd / 1000 * cityStep; if (car.u > 1) car.u -= 1; else if (car.u < 0) car.u += 1; }
         const x = car.vert ? car.p : car.u * w, y = car.vert ? car.u * h : car.p;
         const sx = ((x + gx) % w + w) % w, sy = ((y + gy) % h + h) % h;
         ctx.fillStyle = rgba(car.warm ? P.HEAD : P.TAIL, 0.9);
@@ -1922,6 +1954,14 @@ const SpaceBG = (() => {
       ctx.globalAlpha = 0.9;
       tile2(ctx, st.cloudCv, w, h, parX(cam, SURF.cloud) + t * 4.5, parY(cam, SURF.cloud) + t * 1.3);
       ctx.globalAlpha = 1;
+    },
+    /* the STILL readout (world.js STILL VERDICT; review 10-21): the cars are MOTION, never ambient. Each one is its own
+       object crossing the screen (0.010-0.032 of the canvas per second: ~20-65 device px/s on a 2100 px canvas), not drift,
+       twinkle, flicker or a glow, so a city sky with traffic driving is changing on every draw: `now`, and the floor keeps the
+       normal pace. Reduced motion holds every car still (draw's `still`), and a city with no arterials has none: then only the
+       ambient layers are left (the dome's breath, the beacons' blink, the cloud drift) and nothing is due. */
+    nextChange(now, st) {
+      return !reduceMotion() && st.traffic && st.traffic.length ? now : Infinity;
     },
   };
 
@@ -2052,6 +2092,18 @@ const SpaceBG = (() => {
     ctx.globalAlpha = 1;                             // never leak a layer alpha into the world pass
   }
 
+  /* THE STILL READOUT (world.js STILL VERDICT, 2026-10-21), allocation-free: when the drawn sky next changes in a way the
+     still pace must not slow — `now` while it is changing right now (a meteor, the bolide, the belt's ember shower or
+     fireball crossing, a city's cars driving; the sky still baking or settling a resize), else when the next such change is
+     due, else Infinity. The slow layers (drift, twinkle, the gas breathing, ocean swell, a city's clouds and beacons) are
+     ambient and never reported. The clock is the caller's (the frame's own `now`, the same one draw() is given). */
+  function nextChange(now) {
+    const id = resolve(curId);
+    if (builtId !== id || !st || pendKey) return now;
+    const f = BACKDROPS[id].nextChange;
+    return f ? f(now, st) : Infinity;
+  }
+
   /* pick the station's backdrop. Returns the id actually in effect (an unknown id falls back
      to the default rather than blanking the sky). Idempotent — re-picking the current one does
      not force a rebuild. */
@@ -2113,6 +2165,6 @@ const SpaceBG = (() => {
     ctx.globalAlpha = 1;
   }
 
-  return { draw, setBackdrop, getBackdrop, list, paintSample, invalidate, _dbgLosePixels, bake,
+  return { draw, nextChange, setBackdrop, getBackdrop, list, paintSample, invalidate, _dbgLosePixels, bake,
     _dbgBakeState: () => ({ ready: !!st && builtId === resolve(curId), id: builtId, width: builtW, height: builtH }), DEFAULT_ID };
 })();

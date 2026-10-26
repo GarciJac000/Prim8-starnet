@@ -40,6 +40,7 @@ const ImageTask = require('./image-task.js');
 const { makeCostEngine } = require('./cost.js');
 const { makeLedger } = require('./ledger.js');
 const { makeBudget } = require('./budget.js');
+const RunSpendPool = require('./run-spend-pool.js');   // one PER RUN cap shared by a run and every worker it starts (bug d3a76db3)
 const { makeCredits } = require('./credits.js');   // managed-credit backend adapter (inert unless STARNET_CREDITS_URL is set)
 const { makeTierList } = require('./tierlist.js');   // editorial model tier list from the linked cloud (picker badges)
 const { makeCreditsLink } = require('./credits-link.js');   // device-pairing client + durable link config (inert unless STARNET_CLOUD_URL is set)
@@ -97,6 +98,7 @@ const Todo = require('./tools/builtin/todo.js');
 const DeliverableTool = require('./tools/builtin/deliverable.js');   // deliverable_note — the agent NAMES its finished work (prose only; never status/crew)
 const { makeImageTools } = require('./tools/builtin/image.js');           // STUDIO: image_generate / image_analyze (OpenRouter multimodal)
 const { makeConnectorTools } = require('./tools/builtin/connectors.js');  // WEB: connectors.list — what the station HAS wired, and what it could (read-only, no secrets)
+const KeyTools = require('./tools/builtin/keys.js');  // WEB: keys.save — a key pasted into chat becomes a KEYS entry, spent by name
 const { makeVoiceTools } = require('./tools/builtin/voice.js');           // STUDIO: voice_generate — speech saved into the workspace as a playable clip
 const { makeResolveTools } = require('./tools/builtin/resolve.js');       // STUDIO: DaVinci Resolve — FCPXML timelines (free) + live Studio control (Hermes-plugin port)
 const { makeSpotifyTools } = require('./tools/builtin/spotify.js');       // JUKEBOX: control/query the user's Spotify
@@ -129,7 +131,7 @@ const { makeCapCtx } = require('./capability/capGate.js');
 const { composeOffice, stationWithObject, stationWithConnectors } = require('./capability/office.js');   // THE MOAT: interactive office = compute freebie + placed caps
 const { summarizeCapabilities } = require('./capability/capsummary.js');   // truthful "what you can/can't do" so the agent stops over-promising
 const { scopeForRun, makeSavedFloor } = require('./capability/cap-scope.js');   // ...and WHICH room a room-scoped agent's missing gear must go in
-const { starnetManual, starnetManualIndex, starnetManualPointer } = require('./manual.js');   // truthful "how StarNet works" so the agent can guide a stuck Commander (interactive only); the index form keeps rules inline + a TOC served by manual.read
+const { starnetManual, starnetManualIndex, starnetManualPointer, starnetManualTerminal } = require('./manual.js');   // truthful "how StarNet works" so the agent can guide a stuck Commander (interactive only); the index form keeps rules inline + a TOC served by manual.read
 const FinishLine = require('./finish-line.js');     // immutable "crawl to the finish line" task doctrine at the final prompt seam
 const { makeHarnessSnapshot } = require('./harness-snapshot.js');   // bounded secret-free build/scheduler/connectors/diagnostics truth for station.inspect
 const { makeOpenRouterProvider } = require('./providers/openrouter.js');
@@ -150,6 +152,7 @@ const {
   attachCatalogCache
 } = require('./providers/factory.js');
 const { makeCatalogCache, runWindow: catalogRunWindow } = require('./providers/catalog-cache.js');
+const { promptTierCeiling } = require('./providers/prices.js');
 /* RESTRICTED GOOGLE DATA NEVER RIDES THE STARNET RELAY (mcp/google-relay-guard.js). Every provider this process
    builds for StarNet Managed ('starnet' — the one StarNet-operated path model traffic can take) streams through
    the guard, so primary runs, fallbacks and auxiliary passes all send a copy with Gmail/Drive tool results
@@ -199,7 +202,7 @@ const kimiRegion = require('./providers/kimi-region.js');
 const { effectiveModel: resolveEffectiveModel, effectiveUsd, effectiveRunUsd } = require('./spend.js');
 const { makeEmitter } = require('../shared/emitter.js');
 const { redact, setKnownSecretSource, renderRecall, injectRecall, rank, makeContext, compactionMemoryBlock, compactionSummaryPrompt, RUN_CONTEXT_DEFAULTS, foldFreedEnough } = require('./context.js');
-const { runContextNote, crewCallFence } = require('./providers/provider.js');   // lean-prompt: the per-run <run_context> note and the trailing <crew_call> note (adapters share their predicates)
+const { runContextNote, crewCallFence, isBatchOnlyModel, chatModelId } = require('./providers/provider.js');   // lean-prompt: the per-run <run_context> note and the trailing <crew_call> note (adapters share their predicates)
 const { makeSummarizer } = require('./compaction-summarizer.js');   // chunked context-compaction fold (Lane A)
 const EarlierConversation = require('./earlier-conversation.js');     // the turns COMMS's history window dropped, carried verbatim
 const { setStationSecretSource } = require('./child-env.js');   // station-secret-free env for every helper process
@@ -266,6 +269,7 @@ const engineCredential = require('./engine-credential.js');                     
 const channelSecretsMod = require('./channels/secrets.js');                        // T1.4: token-vs-config split + keychain migration
 const { makeConnectGateway } = require('./channels/discord.gateway.js');           // P2-E: the real Discord gateway WS client (inbound)
 const { makeSseHub, runTeeView } = require('./channels/sse.js');
+const { makeRunStreams, runStreamOf } = require('./run-streams.js');   // ONE stream per page for every run it watches (2026-10-21)
 const { makeHandoffHost } = require('./browser-handoff.js');   // STEP-IN: the agent hands its live browser to the Commander
 const { makeHandoffRoutes, makeSigninStore, nudgeLine: handoffNudgeLine } = require('./browser-handoff-routes.js');
 const { makeBrowserViews, makeViewRoutes } = require('./browser-view.js');   // BROWSER window: watch a run's browser, browse yourself
@@ -387,6 +391,7 @@ const QuestSweeps = require('./questsweeps.js');
 const GoalAdvance = require('./goal-advance.js'); // USER-STUDY LOOP: pure — a finished quest slate settles its plan step; journey completions fold onto the goal mirror
 const QuestRefresh = require('./questrefresh.js'); // QUEST V3: the standing 24h + caught-up quest-refresh engine (pure gates/directive/parse) // QUEST V2 §A: pure seam-matchers for the mechanical contract sweeps (run-bind / prop-live / fact-learned / artifact-exists)
 const { makeThreadsStore } = require('./threads-store.js');   // NS-6: durable THREAD LEDGER (ideas raised but never acted on)
+const SessionTombstones = require('./session-tombstones.js');   // the sidecar's own record of deleted sessions (qa/bugs/3e926b6a)
 const Recommendation = require('./recommendation-ledger.js');
 const RecommendationEval = require('./recommendation-eval.js');
 const { makeRecommendationLedger } = Recommendation; // one cross-surface recommendation/verdict lifecycle + shared utility ranker
@@ -1124,6 +1129,52 @@ const engineKeys = engineCredential.makeEngineKeys({
     try { return [ENGINE_KEYS_FILE, ENGINE_KEYS_FILE + '.bak'].every(f => JSON.stringify(JSON.parse(fs.readFileSync(f, 'utf8'))) === want); } catch (_) { return false; }
   }
 });
+/* #137 THE DESKTOP'S ENDPOINTS, KEPT ACROSS RESTARTS. On the desktop app the OS keychain holds provider KEYS; a provider's
+   ENDPOINT (a CUSTOM base URL, an Ollama that is not on this machine) reaches the station only when the app pushes it
+   (POST /api/key), and runtimeBaseUrls is memory. Every app restart (an update included) and every sidecar respawn
+   therefore started a station with no endpoint: a routine due at launch, and any routine, Run Now, line hop, channel or
+   phone run before the window handed the endpoint over again, failed "no CUSTOM base URL is saved on this station". So
+   a station whose shell pushes its provider config (the per-launch IPC token is set) keeps the endpoints it was pushed
+   (URLs only, never a key) in .secrets/ (station-recovery skips it, /api/file cannot reach it) and reads them back at
+   boot, before the scheduler's launch catch-up. Only the endpoints of the Commander's OWN servers (CUSTOM, Ollama) are
+   kept: a cloud provider has a working default, and its endpoint override stays as it was (this session only).
+   Main AND .bak are written and read back: an endpoint the Commander replaced or cleared (a URL can carry a token in
+   its query) must not survive in the recovery copy. */
+const DESKTOP_ENDPOINTS_FILE = path.join(WORKSPACES, '.secrets', 'provider-endpoints.json');
+const SHELL_PUSHES_PROVIDER_CONFIG = !!String(ENV('IPC_TOKEN') || '').trim();
+const KEPT_ENDPOINT_PROVIDERS = new Set(['custom', 'ollama']);
+let desktopEndpointsOnDisk = '{}';
+function desktopEndpointsHeld() {
+  const out = {};
+  for (const id of Object.keys(runtimeBaseUrls).sort()) {
+    const u = String(runtimeBaseUrls[id] || '').trim();
+    if (u && KEPT_ENDPOINT_PROVIDERS.has(id)) out[id] = u;
+  }
+  return out;
+}
+(function loadDesktopEndpoints() {
+  if (!SHELL_PUSHES_PROVIDER_CONFIG) return;
+  const saved = loadResilient(DESKTOP_ENDPOINTS_FILE, 'desktop-endpoints');
+  const urls = saved && typeof saved === 'object' ? saved.baseUrls : null;
+  if (!urls || typeof urls !== 'object' || Array.isArray(urls)) return;
+  for (const p of Object.keys(urls)) {
+    const id = normalizeProviderIdFromRegistry(p, '');
+    const u = typeof urls[p] === 'string' ? urls[p].trim() : '';
+    if (KEPT_ENDPOINT_PROVIDERS.has(id) && getProviderProfile(id) && u && !runtimeBaseUrls[id]) runtimeBaseUrls[id] = u;
+  }
+  desktopEndpointsOnDisk = JSON.stringify(desktopEndpointsHeld());
+})();
+// called on every endpoint push; writes only when the set changed. The pushed endpoint is live either way; a failed
+// write is logged (saveCredentialRemovalVerified) and retried by the next change.
+function saveDesktopEndpoints() {
+  if (!SHELL_PUSHES_PROVIDER_CONFIG) return true;
+  const baseUrls = desktopEndpointsHeld();
+  const want = JSON.stringify(baseUrls);
+  if (want === desktopEndpointsOnDisk) return true;
+  const ok = saveCredentialRemovalVerified(DESKTOP_ENDPOINTS_FILE, { version: 1, baseUrls: baseUrls }, null, 'desktop-endpoints');
+  if (ok) desktopEndpointsOnDisk = want;
+  return ok;
+}
 function reportDomainStoreIssue(tag) {
   return function onDomainStoreIssue(status, detail) {
     const file = detail && detail.file;
@@ -1725,6 +1776,9 @@ function attachStreamKeepAlive(res) {
   if (t && typeof t.unref === 'function') t.unref();
   return () => clearInterval(t);
 }
+// THE PAGE'S ONE RUN STREAM (2026-10-21, sidecar/run-streams.js): every run a page watches rides one response, so a browser's
+// six connections per host are never spent one per live run. Same heartbeat as the per-run streams above.
+const runStreams = makeRunStreams({ uuid: () => crypto.randomUUID(), keepAliveMs: STREAM_KA_MS });
 
 // durable per-workstream CONVERSATION transcript (P0.1): segmented append-only + fsync/read-back proven, a SIBLING of
 // the fs jail. runStore answers "what happened" (one line per run); this keeps WHAT WAS SAID — a server-
@@ -1745,7 +1799,17 @@ const transcriptIo = makeSegmentedTranscriptIo({
   writeDurable: writeFileDurable,
   onWarning: (message) => console.warn('[transcript] ' + message)
 });
-const transcriptStore = makeTranscriptStore({ io: transcriptIo, clock: { now: () => Date.now() }, redact });
+/* DELETED SESSIONS ARE FORGOTTEN (qa/bugs/3e926b6a). The ledger learns each delete from the save the page writes
+   (handleSaveWrite, and the save on disk at boot — observeDeletedSessions) and keeps it past the page's 500-id list.
+   The transcript store reads through it, so resume, recall, cross-session reads and the evidence pack never hand a
+   deleted session's words to a model; the run-history readers that quote titles (sessionRunForgotten) and the
+   memory purge (forgetDeletedSessionMemory) honor the same stamp. Built before the transcript store reads anything. */
+const sessionTombstones = SessionTombstones.makeSessionTombstones({ fs, path, file: path.join(WORKSPACES, 'session-tombstones.json'),
+  writeDurable: writeFileDurable, now: () => Date.now(),
+  onIssue: (status, info) => console.warn('[session-tombstones] ' + status + ' ' + ((info && info.file) || '')) });
+const transcriptStore = makeTranscriptStore({ io: transcriptIo, clock: { now: () => Date.now() }, redact, deletedAt: id => sessionTombstones.deletedAt(id) });
+// a run-history row of a deleted session, filed at or before its delete: never quoted to a model again
+function sessionRunForgotten(r) { return !!r && sessionTombstones.forgotten(r.streamId, r.ts); }
 const dispatchDeliveryStore = require('./dispatch-delivery.js');
 const dispatchDeliveryDeps = { runStore, transcriptStore, redact,
   hash: text => crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
@@ -2273,7 +2337,7 @@ function warmModelCatalog() {
     ms => {
       if (ms && ms.length) {
         // snapshot the ids so the channel /model command can validate an id synchronously (see setAgentModelFromChannel)
-        try { orModelCatalogIds = ms.map(x => String((x && (x.id || x.model || x.name)) || '')).filter(Boolean); } catch (_) {}
+        try { orModelCatalogIds = ms.map(x => String((x && (x.id || x.model || x.name)) || '')).filter(id => id && !isBatchOnlyModel('openrouter', id)); } catch (_) {}
       }
       return ms;
     }
@@ -2898,7 +2962,9 @@ function channelRunConfigFor(agentId, candidate) {
   const hero = stationDefaultFor(id, ident);
   const followsStation = !!hero;
   const provider = normalizeProvider(followsStation ? (hero.provider || ident.provider) : ident.provider);
-  const model = String((followsStation ? hero.model : ident.model) || '').trim();
+  // a batch-only '<id>:batch' an older build saved runs on its base model here too, as in runOnceCore: the Telegram setup
+  // probe, NOT RIGHT? / SET IT UP FOR ME, skill evaluation and restored reviews stream this model without runOnceCore
+  const model = chatModelId(provider, String((followsStation ? hero.model : ident.model) || '').trim());
   if (!model) return { ok: false, error: 'target agent ' + id + ' has no roster model' + (id !== 'agent' ? ' and the station default (the Overseer) has none' : '') };
   /* A browser build may hand the channel route a candidate key/base URL that has not entered the desktop
      runtime store. Accept it ONLY when the caller says it belongs to the SAME provider as the roster. This is
@@ -3007,6 +3073,72 @@ function engineCredentialError(provider, what) {
 // notebook: a sibling of the fs jail. Holds NO secret (the key/tokens live elsewhere). The frontend keeps
 // localStorage as a fast cache and writes through here on every persist; on boot it pulls the newer of the two.
 const saveStore = makeSaveStore({ fs, pathMod: path, root: WORKSPACES, clock: { now: () => Date.now() } });
+
+/* observeDeletedSessions(save) — fold the station save's deleted-session lists into the session tombstone ledger
+   (qa/bugs/3e926b6a). Only `forgetIds` — the Commander's Delete of a conversation — is forgotten; a row DELETE AGENT or a
+   task card's remove took off the rail is in `deletedIds` only and keeps its history and memory (session-tombstones.js).
+   The ledger write is synchronous: the transcript reads honor a delete the moment this returns. A fresh delete then
+   purges what that session left in memory (forgetDeletedSessionMemory), behind the reply. */
+function observeDeletedSessions(save) {
+  let fresh = [];
+  try { fresh = sessionTombstones.observeSave(save); }
+  catch (e) { failNote('session-tombstones.observe', e); }   // held in memory; the next save or boot writes it again
+  if (fresh.length) forgetDeletedSessionMemory();
+  return fresh;
+}
+// every agent whose notebook or pending proposals sit on disk (a crew member that left keeps its file), and the hero
+function memoryAgentIds() {
+  const ids = new Set(['agent']);
+  try {
+    for (const name of fs.readdirSync(WORKSPACES)) {
+      const m = /^([A-Za-z0-9_-]{1,40})\.(?:notebook|pending)\.json$/.exec(name);
+      if (m) ids.add(m[1]);
+    }
+  } catch (e) { failNote('session-tombstones.agents', e); }
+  return Array.from(ids);
+}
+/* forgetDeletedSessionMemory() — remove what deleted sessions wrote into memory: the notebook records and pending memory
+   proposals created there (by their runs, or filed under their stream), the versions their runs wrote into records
+   created elsewhere (rolled back), the session quotes on a rating verdict (the verdict and the Commander's words stay),
+   and the open threads mined from them (session-tombstones.js forgetSessionMemory). Each removed record is announced as
+   memory.forget (reason 'session-deleted'): the station HUD says "memory forgotten" and an open Memory Core refreshes.
+   One pass at a time; a delete that lands mid-pass runs another. A pass that fails records nothing, so the next boot
+   retries it. */
+let sessionMemoryPurge = null;
+let sessionMemoryPurgeAgain = false;
+function forgetDeletedSessionMemory() {
+  if (sessionMemoryPurge) { sessionMemoryPurgeAgain = true; return sessionMemoryPurge; }
+  sessionMemoryPurge = (async () => {
+    do {
+      sessionMemoryPurgeAgain = false;
+      const todo = sessionTombstones.unpurged();
+      if (!todo.length) break;
+      const counts = await SessionTombstones.forgetSessionMemory({ store: notebookStore, threads: threadsStore,
+        agentIds: memoryAgentIds(), deleted: todo, runs: runStore.all() });
+      sessionTombstones.markPurged(todo);
+      for (const f of counts.forgot.slice(0, 50)) chanEmit('memory.forget', { agentId: f.agentId, id: f.id, reason: 'session-deleted' });   // the rest are in the log line
+      if (counts.notes || counts.revisions || counts.verdicts || counts.pending || counts.threads) {
+        console.log('[session-tombstones] deleted sessions: forgot ' + counts.notes + ' memory record(s), ' + counts.revisions
+          + ' version(s) they wrote (' + counts.restored + ' record(s) rolled back to an earlier version), the session quotes on '
+          + counts.verdicts + ' rating verdict(s) (verdicts and words kept), ' + counts.pending + ' pending proposal(s), ' + counts.threads + ' thread(s)');
+      }
+    } while (sessionMemoryPurgeAgain);
+  })().catch(swallow('session-tombstones.memory')).then(() => { sessionMemoryPurge = null; });
+  return sessionMemoryPurge;
+}
+// BOOT: the save on disk is the newest list the page wrote (none at all = a new station: an empty list). The first list
+// the ledger ever reads is ADOPTED: those deletes were made while Delete only hid the rail row, so their transcript and
+// recall are forgotten from now on but the memories they wrote are kept (never a retroactive wipe at the first boot of
+// this build). An unreadable save teaches nothing. An unfinished purge from an earlier run is retried.
+{
+  const bootSave = saveStore.loadState('agent');
+  const bootLists = bootSave.status === 'ok' || bootSave.status === 'recovered' ? bootSave.doc : bootSave.status === 'absent' ? { forgetIds: [], deletedIds: [] } : null;
+  const firstList = !(sessionTombstones.since() > 0);
+  observeDeletedSessions(bootLists);
+  const adopted = firstList && sessionTombstones.since() > 0 ? sessionTombstones.adopted().length : 0;
+  if (adopted) console.log('[session-tombstones] ' + adopted + ' session(s) deleted before this build: forgotten from history and recall; the memories they wrote are kept');
+  if (sessionTombstones.unpurged().length) forgetDeletedSessionMemory();
+}
 // the saved floor as a validated station model for the capability note's room scope (cap-scope.js): re-validated
 // (~11 ms on a 152-prop save) only when the save file's stamp moved, and only asked when a floor object is missing
 const savedFloor = makeSavedFloor({ stamp: () => saveStore.stamp('agent'), loadStamped: () => saveStore.loadStamped('agent') });
@@ -5092,6 +5224,19 @@ function oauthPrimaryStatus(pid) {
 // forwarded to open browser EventSources (the station HUD). The bot token / OR key are NEVER placed on a
 // payload — nothing to leak here — and redact() runs before validate() as a second backstop.
 const sse = makeSseHub({ epoch: crypto.randomUUID() });
+/* Which of those listeners is a StarNet PAGE. A page's EventSource cannot set a header, so it signs in with a single-use
+   SSE ?ticket= (ApiTicket.sseUrl, the only caller); a Node client — the MCP bridge (sidecar/mcp/serve.js), a script —
+   sends the header token. So sse.size() > 1 is "someone listens", never "an app is open": an attached MCP client made
+   every terminal /yolo, /model and /personality wait 6 s and answer "a page is open" with no app open (review 10-24).
+   pageListening() counts only ticket-signed listeners still connected. */
+const ssePages = new Set();
+function pageListening() {
+  for (const r of ssePages) if (r.destroyed || r.writableEnded) ssePages.delete(r);
+  return ssePages.size > 0;
+}
+// THE LIVE FEED (GET /api/observe, sidecar/observer.js): every non-internal run's events + its approvals, for a watching
+// terminal. Its own hub — the page never subscribes here, so nothing the page already receives is counted twice.
+const observer = require('./observer.js').makeObserver({ redact, epoch: crypto.randomUUID() });
 // Full-payload channel logging is opt-in (STARNET_DEBUG_CHANNELS=1): every COMMS/workitem/queue event
 // otherwise printed a whole JSON line to stdout on normal operation. Default = event name only.
 const DEBUG_CHANNEL_LOGS = String(process.env.STARNET_DEBUG_CHANNELS || '') === '1';
@@ -5624,7 +5769,9 @@ function bumpQueue(agentId, d) { const n = Math.max(0, (queueDepth.get(agentId) 
 
 // the placed floor's RoutingPlan (posted by the app on every geo change). resolveTarget answers "which agent
 // runs this work-item?"; a non-deployable plan (cycle/orphan/dead-bay) is refused so routing can't loop.
-const router = makeRouter();
+// What a bay's runs may use is bounded by the SAVED floor (savedFloor: the save file, re-validated when it changes) and
+// the default office — the plan says where work goes and may narrow what it gets there, never widen it.
+const router = makeRouter({ savedStation: () => savedFloor() });
 /* THE WORK LINE (agentic graphs, 2026-07-27). resolveTarget names the dock that runs a message; `chainRunner`
    runs everything the Commander drew DOWNSTREAM of that dock — bay -> bay, until the line ships out. One
    instance, bound to the floor's edge function; each caller hands it its own way to execute a hop. Emits its
@@ -6831,8 +6978,40 @@ function cronPreflightConfig(job) {
   return { ok: true };
 }
 
+/* ONE ROUTINE DELIVERY PER CHAT AT A TIME (upgrade review 2026-10-23). A long reply goes out in parts, one awaited send
+   each; two routines delivering to the same chat at once (a recovery pass runs several receipts together) interleaved
+   their parts. Each chat is a FIFO: a delivery waits for the one ahead of it to finish, words and files both. */
+const cronChatTails = new Map();
+function cronChatTurn(key, fn) {
+  const run = (cronChatTails.get(key) || Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  cronChatTails.set(key, tail);
+  tail.then(() => { if (cronChatTails.get(key) === tail) cronChatTails.delete(key); });
+  return run;
+}
+// Telegram answers a burst with 429 + retry_after: wait it out once for THIS part (a short, bounded wait) rather than
+// fail the delivery, whose retry would resend every part that already landed.
+async function cronSendPart(adapter, chatId, text, route) {
+  let sent = await adapter.send(chatId, text, route);
+  const wait = Number(sent && sent.ok === false && sent.retryable ? sent.retryAfter : 0);
+  if (wait > 0 && wait <= 30) {
+    await new Promise(r => setTimeout(r, wait * 1000 + 250));
+    sent = await adapter.send(chatId, text, route);
+  }
+  return sent;
+}
+// The delivery of a routine's newest result names the older ones that will not come (cron-store supersedeDeliveries).
+// It promises no place to find them: HISTORY lists only a routine's latest runs, and a script-only routine records
+// no run rows at all — the note says only what is certain.
+function cronSupersededNote(n) {
+  n = Math.max(0, parseInt(n, 10) || 0);
+  if (!n) return '';
+  return '\n\n(' + n + ' earlier result' + (n === 1 ? '' : 's') + ' of this routine ' + (n === 1 ? 'was' : 'were') + ' not delivered and will not be resent.)';
+}
+
 async function deliverCronResult(job, result) {
   if (!job || !result || result.outcome === 'silent') return { ok: true, skipped: true };
+  const supersededNote = cronSupersededNote(result.superseded);
   if (job.noAgent) {
     try {
       const streamId = 'cron-' + result.runId;
@@ -6843,9 +7022,9 @@ async function deliverCronResult(job, result) {
       if (!recorded.some(t => t.role === 'assistant')) transcriptStore.append({ streamId, agentId: job.agentId, role: 'assistant', taint: 'scheduled script output', content: result.outcome === 'failed' ? String(result.error || 'script failed') : String(result.text || '') });
     } catch (e) { failNote('cron.script.transcript', e); }
   }
-  const text = result.outcome === 'failed'
+  const text = (result.outcome === 'failed'
     ? ('✦ ' + (job.name || 'Routine') + ' failed\n\n' + String(result.error || 'The run failed.'))
-    : ('✦ ' + (job.name || 'Routine') + '\n\n' + String(result.text || '(completed with no text)'));
+    : ('✦ ' + (job.name || 'Routine') + '\n\n' + String(result.text || '(completed with no text)'))) + supersededNote;
   const mode = String(job.deliver || 'local').trim(), targets = [];
   if (mode === 'origin' && job.origin && job.origin.target) targets.push(String(job.origin.target));
   else if (mode === 'origin' && job.origin && job.origin.channel && job.origin.chatId) targets.push('@origin');
@@ -6865,13 +7044,19 @@ async function deliverCronResult(job, result) {
      delivers byte-identically to before. */
   let chatBody = String(result.text || ''), chatText = text, attach = { files: [], dropped: [] }, named = [], runs = [];
   if (result.outcome !== 'failed') {
-    const parsed = RoutineMedia.parseReply(result.text);
+    const candidates = RoutineMedia.parseReply(result.text).files;
     try { runs = runStore.list(null, { streamId: 'cron-' + result.runId, limit: 50 }) || []; } catch (_) { runs = []; }
-    named = parsed.files;
-    attach = RoutineMedia.pickFiles({ named: named, runs: runs, agentId: job.agentId });
+    // A named path is an instruction only if the file is really there: read it first (before any word is sent), so a
+    // line naming nothing on the station ("MEDIA: N/A") stays in the message as written, with no missing-file note.
+    const found = candidates.length ? (await RoutineMedia.readNamed(candidates, RoutineMedia.fireAgents(runs, job.agentId), readChannelUpload)).found : [];
+    named = found.map(f => f.path);
+    // generated images ride unasked only for a routine holding ALLOW IMAGES (the studio grant) — never for one that
+    // makes pictures for another purpose (routine-media.js pickFiles)
+    attach = RoutineMedia.pickFiles({ named: found, runs: runs, agentId: job.agentId, generatedImages: Array.isArray(job.unattendedGrants) && job.unattendedGrants.indexOf('studio') >= 0 });
     if (named.length) {
+      const parsed = RoutineMedia.parseReply(result.text, named);
       chatBody = parsed.text;
-      chatText = '✦ ' + (job.name || 'Routine') + (parsed.text.trim() ? '\n\n' + parsed.text : '');
+      chatText = '✦ ' + (job.name || 'Routine') + (parsed.text.trim() ? '\n\n' + parsed.text : '') + supersededNote;
     }
   }
   let failed = 0, firstError = '';
@@ -6883,38 +7068,40 @@ async function deliverCronResult(job, result) {
     const channel = String(rec.channel || 'telegram'), live = liveChannelFor(channel);
     if (!(live && live.adapter)) { failed++; firstError = firstError || channel + ' is not connected'; continue; }
     const chatId = String(rec.chatId || target), route = rec.threadId ? { threadId: rec.threadId } : undefined;
-    try {
-      // A routine's reply is as long as the model made it, and the adapter sends ONE message (the hub chunks chat
-      // replies before calling it). Sent whole, a digest past Telegram's 4096 was refused "message is too long" on the
-      // fire and on every retry — the chat never saw it (2026-10-20). Split it under the platform's ceiling, in order.
-      const desc = channelRegistry.get(channel.split(':')[0]);
-      const parts = hubChunkText(redact(chatText), Number(desc && desc.maxMessageLength) > 200 ? Number(desc.maxMessageLength) : 1900);
-      for (let i = 0; i < parts.length; i++) {
-        const sent = await live.adapter.send(chatId, parts[i], route);
-        if (sent && sent.ok === false) throw new Error((sent.error || 'send failed') + (i ? ' (after ' + i + ' of ' + parts.length + ' parts)' : ''));
+    await cronChatTurn(channel + '\u0001' + chatId + '\u0001' + String(rec.threadId || ''), async () => {
+      try {
+        // A routine's reply is as long as the model made it, and the adapter sends ONE message (the hub chunks chat
+        // replies before calling it). Sent whole, a digest past Telegram's 4096 was refused "message is too long" on the
+        // fire and on every retry — the chat never saw it (2026-10-20). Split it under the platform's ceiling, in order.
+        const desc = channelRegistry.get(channel.split(':')[0]);
+        const parts = hubChunkText(redact(chatText), Number(desc && desc.maxMessageLength) > 200 ? Number(desc.maxMessageLength) : 1900);
+        for (let i = 0; i < parts.length; i++) {
+          const sent = await cronSendPart(live.adapter, chatId, parts[i], route);
+          if (sent && sent.ok === false) throw new Error((sent.error || 'send failed') + (i ? ' (after ' + i + ' of ' + parts.length + ' parts)' : ''));
+        }
+        deliveredTargets.add(target);
+        if (job.attachToSession) {
+          channelStore.appendTurn(job.agentId, 'user', '[Scheduled routine: ' + job.name + '] ' + String(job.prompt || ''));
+          channelStore.appendTurn(job.agentId, 'assistant', chatBody);
+        }
+      } catch (e) { failed++; firstError = firstError || ((e && e.message) || String(e)); return; }
+      // The words landed, so this target is delivered: a file that fails is told to the chat, never retried (a retry
+      // would resend the message), and never silent — the Commander would be waiting for a picture that is not coming.
+      // A Full Access fire may already have put its own files here with channel.send — never the same picture twice.
+      if ((attach.files.length || (named.length && attach.dropped.length)) && !RoutineMedia.filesAlreadySent(runs, target, chatId)) {
+        const files = await RoutineMedia.sendFiles(attach.files, {
+          read: readChannelUpload,
+          send: (item) => typeof live.adapter.sendMedia === 'function'
+            ? live.adapter.sendMedia(chatId, item, route)
+            : Promise.resolve({ ok: false, error: channel + ' cannot carry files' })
+        });
+        for (const f of files.failed) console.warn('[cron] routine ' + job.id + ' file "' + f.path + '" not attached [' + channel + ']: ' + f.error);
+        const missed = files.failed.map(f => f.path).concat(named.length ? attach.dropped : []);
+        if (missed.length) {
+          try { await live.adapter.send(chatId, RoutineMedia.missedNote(missed), route); } catch (e) { failNote('cron.delivery.missedNote', e); }
+        }
       }
-      deliveredTargets.add(target);
-      if (job.attachToSession) {
-        channelStore.appendTurn(job.agentId, 'user', '[Scheduled routine: ' + job.name + '] ' + String(job.prompt || ''));
-        channelStore.appendTurn(job.agentId, 'assistant', chatBody);
-      }
-    } catch (e) { failed++; firstError = firstError || ((e && e.message) || String(e)); continue; }
-    // The words landed, so this target is delivered: a file that fails is told to the chat, never retried (a retry
-    // would resend the message), and never silent — the Commander would be waiting for a picture that is not coming.
-    // A Full Access fire may already have put its own files here with channel.send — never the same picture twice.
-    if ((attach.files.length || (named.length && attach.dropped.length)) && !RoutineMedia.filesAlreadySent(runs, target, chatId)) {
-      const files = await RoutineMedia.sendFiles(attach.files, {
-        read: readChannelUpload,
-        send: (item) => typeof live.adapter.sendMedia === 'function'
-          ? live.adapter.sendMedia(chatId, item, route)
-          : Promise.resolve({ ok: false, error: channel + ' cannot carry files' })
-      });
-      for (const f of files.failed) console.warn('[cron] routine ' + job.id + ' file "' + f.path + '" not attached [' + channel + ']: ' + f.error);
-      const missed = files.failed.map(f => f.path).concat(named.length ? attach.dropped : []);
-      if (missed.length) {
-        try { await live.adapter.send(chatId, RoutineMedia.missedNote(missed), route); } catch (e) { failNote('cron.delivery.missedNote', e); }
-      }
-    }
+    });
   }
   return { ok: failed === 0, error: firstError || null, deliveredTargets: Array.from(deliveredTargets) };
 }
@@ -7186,7 +7373,7 @@ function nightFocusInputs() {
     const meta = {}; for (const p of (projectsStore.snapshot().projects || [])) meta[p.root] = p;
     // recent user run titles → a cheap per-root "mention" frequency (which project the Commander names lately).
     let runTitles = [];
-    try { runTitles = (runStore.list(null, { limit: 60 }) || []).filter(r => r && !contextpack.isInternalStream(r.streamId)).map(r => String(r.title || '').toLowerCase()); } catch (_) { runTitles = []; }
+    try { runTitles = (runStore.list(null, { limit: 60 }) || []).filter(r => r && !contextpack.isInternalStream(r.streamId) && !sessionRunForgotten(r)).map(r => String(r.title || '').toLowerCase()); } catch (_) { runTitles = []; }
     projects = blessedRoots().map(root => {
       const m = meta[root] || {};
       const base = nightfocus.baseName(m.displayPath || root).toLowerCase();
@@ -8257,7 +8444,7 @@ function nightshiftBeliefMap() {
 // initially clean directive cannot reappear as owner chat. The pure pack never renders an internal run title.
 // Shared by the context pack and the readiness count, so both always read the SAME projection.
 function nightshiftRecentRuns() {
-  try { return (runStore.list(null, { limit: 60 }) || []).filter(r => r && (r.internal || (!r.taintedBy && !TrustedLearning.quotedMaterial(r.title)))).map(r => ({ title: r.title, ts: r.ts, streamId: r.streamId, reason: r.reason, internal: !!r.internal })); } catch (_) { return []; }
+  try { return (runStore.list(null, { limit: 60 }) || []).filter(r => r && !sessionRunForgotten(r) && (r.internal || (!r.taintedBy && !TrustedLearning.quotedMaterial(r.title)))).map(r => ({ title: r.title, ts: r.ts, streamId: r.streamId, reason: r.reason, internal: !!r.internal })); } catch (_) { return []; }
 }
 
 /* NS-2: the CONTEXT-PACK io — the ambient half of contextpack.js. Gathers REAL recent activity from the durable
@@ -8410,7 +8597,8 @@ function nightshiftUserRunCount() {
 
 // NS-2: the PURELY-LOCAL pre-spend readiness gate for the night-shift driver (the cold-leash fix). Answers, with NO
 // model call, "could a beat even reach a model call right now?" — the same readiness/eligibility conditions the act
-// pipeline checks first. Dossier OR substantial recent activity counts as grounding (Autopilot.readiness folds both).
+// pipeline checks first. A current GROUNDED aim in the dossier (never a seed) OR one recent user run counts as grounding
+// (Autopilot.readiness folds both; bug 41b2d015 dropped the old 4-area / 4-run breadth bar).
 // Returns { ok, reason }. Called by the driver BEFORE the leash is spent, so a stand-down that no model call could
 // have avoided (cold on both paths → tier not hot, or nothing eligible) costs no budget. Safety reads fail closed:
 // an unproven budget/provider/readiness gate stands down as `precheck-error` and is retried on a later tick.
@@ -8459,8 +8647,12 @@ function nightshiftReadinessView() {
     let activityCount = 0;
     try { activityCount = nightshiftUserRunCount(); } catch (_) { activityCount = 0; }
     const rd = Autopilot.readiness(summary, beliefsByDim, Date.now(), { activityCount });
+    // goalsStale (additive, bug 41b2d015): grounded aims ARE on file but past the recency window — the panel names that
+    // instead of claiming the station doesn't know them. A seed-only goals area is neither usable nor stale: the
+    // station does not know their aims, it holds a canned line (the engine computes both from non-seed beliefs).
     return {
-      tier: rd.tier, goalsUsable: !!rd.goalsUsable, usableDims: rd.usableDims || [],
+      tier: rd.tier, goalsUsable: !!rd.goalsUsable, goalsStale: !!rd.goalsStale,
+      usableDims: rd.usableDims || [],
       activityCount: rd.activityCount || 0, hotDimsMin: Autopilot.HOT_MIN, hotRunsMin: Autopilot.ACTIVITY_HOT_MIN
     };
   } catch (_) { return null; }
@@ -8495,8 +8687,8 @@ async function runNightshiftBeat(opts) {
   const pack = nightshiftContextPack();
   const activity = pack.activityLines || [];
   const threads = pack.threads || [];   // NS-6: open threads draw FIRST (improv is the fallback)
-  // readiness folds BOTH grounding paths: the dossier AND substantial recent activity (a heavily-active brand-new
-  // user is now hot on activity alone). eligibility opens to all archetypes when activity is the grounding source.
+  // readiness folds BOTH grounding paths: the dossier's current aims AND recent user runs (one run is grounding on
+  // its own). eligibility opens to all archetypes when activity is the grounding source.
   const snap = commanderPosture.beliefs() || {};
   const summary = { known: Array.isArray(snap.known) ? snap.known : Object.keys((snap.beliefs) || {}) };
   const beliefsByDim = (dim) => (snap.beliefs && snap.beliefs[dim]) || [];
@@ -10402,9 +10594,9 @@ function startTelegram(token, key, model, agentCfg) {
   let adapterRef = null;
   const hub = makeChannelHub({
     channel: 'telegram', runOnce: runOnce, store: channelStore, steerRun: channelSteerRun,
-    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
     runSlash: (input, sctx) => runSlashForChannel(input, sctx),   // shared slash registry — identical answers to the desktop
-    userCommandNames: () => userCommandEntries().map(c => c.name),
+    userCommandNames: () => userCommandEntries().map(c => c.name), desktopCommand: isDesktopSlashCommand,
     // Only the adapter can mint owner trust: its owner is claimed from an admitted DM and group traffic never
     // claims it. A token-reachable group member therefore stays an ordinary channel caller.
     ownerTrusted: (msg) => !!(adapterRef && adapterRef._internals && msg && msg.chatType === 'dm'
@@ -10494,7 +10686,7 @@ function startTelegram(token, key, model, agentCfg) {
       catch (_) { return false; }
     },
     ownerUserId: (channelSecrets.telegram && channelSecrets.telegram.ownerId) || '',
-    onOwnerClaim: (uid) => { try { persistOwnerClaim('telegram', uid); } catch (_) {} },
+    onOwnerClaim: (uid) => { try { persistOwnerClaim('telegram', uid); } catch (_) {} publishCommandMenu(adapterRef, 'telegram'); },   // the owner's DM gets their own commands' menu
     ownerAdmission: (message) => telegramOwnerAdmission((channelSecrets && channelSecrets.telegram) || {}, message),
     onInbound: (m) => {
       // WORK-ITEM INTERCEPT: an admitted message becomes a box that rides the player-laid belts to the
@@ -10584,12 +10776,21 @@ function startTelegram(token, key, model, agentCfg) {
    reserved — the hub's table AND the slash registry's builtins/aliases — because a built-in always wins its name.
    Read at connect, like the rest of the menu: an edit to usercommands.json runs at once but lists on the next
    connect. Bot API cap: 100 rows. */
-function channelMenuCommands() {
+/* WHO CAN READ WHICH MENU (2026-10-23). A bot's default and all-groups menus are readable by anyone who opens a DM
+   with it or shares a group with it, while the Commander's descriptions are their own notes ("deploy main to
+   10.0.0.5"). So: `publicRows` lists their commands by NAME with one generic line (groups still tap them; they run
+   for the owner only), and the descriptions they wrote are published only into the owner's own DM. The default scope
+   (every DM, a stranger's included) lists the built-ins only — a stranger's DM can run none of the Commander's
+   commands. The owner scope is a 'chat' scope on the owner's id (a private chat's id IS the user's id); an unpaired
+   bot has none yet, and the owner claim republishes (onOwnerClaim). */
+const USER_MENU_PUBLIC_LINE = 'One of the owner\'s own commands (owner only)';
+function channelMenuCommands(opts) {
   const base = menuCommands();
   const reserved = HUB_COMMANDS.map(c => c.command);
   for (const c of slash.BUILTIN_COMMANDS) { reserved.push(c.name); for (const a of (c.aliases || [])) reserved.push(a); }
   let mine = [];
   try { mine = userMenuEntries(userCommandStore.load(), reserved); } catch (_) { mine = []; }
+  if (opts && opts.publicRows) mine = mine.map(r => ({ command: r.command, description: USER_MENU_PUBLIC_LINE }));
   return base.concat(mine).slice(0, 100);
 }
 // Publish the bot's "/" menu from the hub's OWN command table, so Telegram can never offer a command the hub
@@ -10601,11 +10802,15 @@ function publishCommandMenu(adapter, label) {
   // Telegram resolves its most-specific command scope first. Publish the same table for default + all groups so
   // a forum topic never loses the command menu to an older/narrower BotFather scope. Other adapters ignore the
   // optional scope argument and keep their original single publish.
-  const list = channelMenuCommands();
-  Promise.all([
-    Promise.resolve(adapter.setCommands(list)),
-    Promise.resolve(adapter.setCommands(list, { scope: { type: 'all_group_chats' } }))
-  ])
+  const ownerList = channelMenuCommands();   // scopes: see WHO CAN READ WHICH MENU above
+  let ownerId = '';
+  try { ownerId = String((adapter._internals && adapter._internals.owner) || ''); } catch (_) { ownerId = ''; }
+  const publishes = [
+    Promise.resolve(adapter.setCommands(menuCommands().slice(0, 100))),
+    Promise.resolve(adapter.setCommands(channelMenuCommands({ publicRows: true }), { scope: { type: 'all_group_chats' } }))
+  ];
+  if (/^\d{1,20}$/.test(ownerId)) publishes.push(Promise.resolve(adapter.setCommands(ownerList, { scope: { type: 'chat', chatId: ownerId } })));
+  Promise.all(publishes)
     .then((results) => { for (const r of results) if (r && r.ok === false) console.warn('[' + label + '] command menu not published: ' + (r.error || 'unknown')); })
     .catch(swallow('channels.menu'));
 }
@@ -10686,9 +10891,9 @@ function startTelegramBot(botId) {
   const botStore = makeBotScopedStore(botId);
   const hub = makeChannelHub({
     channel: 'telegram:' + botId, runOnce: runOnce, store: botStore, steerRun: channelSteerRun,
-    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
     runSlash: (input, sctx) => runSlashForChannel(input, sctx),   // shared slash registry — identical answers to the desktop
-    userCommandNames: () => userCommandEntries().map(c => c.name),
+    userCommandNames: () => userCommandEntries().map(c => c.name), desktopCommand: isDesktopSlashCommand,
     ownerTrusted: (msg) => !!(adapterRef && adapterRef._internals && msg && msg.chatType === 'dm'
       && adapterRef._internals.owner && String(msg.userId || '') === String(adapterRef._internals.owner)),
     // the paired owner in ANY chat (owner-only control commands; see hub.js COMMANDS `owner`) — same adapter-minted id
@@ -10776,6 +10981,7 @@ function startTelegramBot(botId) {
     onOwnerClaim: (uid) => {
       const ok = persistTelegramBotOwnerClaim(botId, uid);
       console.log('  · telegram bot ' + (rec.username ? '@' + rec.username : botId) + ' owner claimed (userId ' + String(uid) + ')' + (ok ? '' : ' — NOT persisted; re-claims on restart'));
+      publishCommandMenu(adapterRef, 'telegram:' + botId);   // the owner's DM gets their own commands' menu
     },
     ownerAdmission: (message) => telegramOwnerAdmission(recOf(), message),
     onInbound: (m) => { Promise.resolve(hub.onInbound(m)).catch(e => console.warn('[telegram:' + botId + '] inbound error:', (e && e.message) || e)); },
@@ -10830,7 +11036,7 @@ function startDiscord(token, key, model, agentCfg) {
   const wired = wireChannel(channelRegistry.get('discord'), {
     hub: {
       runOnce: runOnce, store: channelStore, steerRun: channelSteerRun,
-      historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+      historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
       secrets: () => {
         const d = (channelSecrets && channelSecrets.discord) || {};
         const provider = normalizeProvider(d.provider);
@@ -10855,7 +11061,7 @@ function startDiscord(token, key, model, agentCfg) {
       // it a "/standup" here fell through to the MODEL as paid chat, and /usage, /tools, /routine and /away answered
       // "not available on this channel" (2026-10-18). Owner-only either way: the hub gates both on isOwner.
       runSlash: (input, sctx) => runSlashForChannel(input, sctx),
-      userCommandNames: () => userCommandEntries().map(c => c.name)
+      userCommandNames: () => userCommandEntries().map(c => c.name), desktopCommand: isDesktopSlashCommand
     },
     adapter: {
       fetch: globalThis.fetch, token: token, clock: { now: () => Date.now() },
@@ -10940,7 +11146,7 @@ function devHubSecrets() {
   const provider = 'openrouter';
   const key = providerRuntimeKey(provider, '');
   const baseUrl = providerRuntimeBaseUrl(provider, '');
-  const model = String(process.env.SKYNET_DEFAULT_MODEL || process.env.STARNET_DEFAULT_MODEL || '').trim();
+  const model = chatModelId(provider, String(process.env.SKYNET_DEFAULT_MODEL || process.env.STARNET_DEFAULT_MODEL || '').trim());   // a batch-only id runs on its base model
   return { key, model, provider, baseUrl, configured: providerHasCredential(provider, key, baseUrl), reasoningEffort: resolveReasoningEffort(provider, ''), agentId: undefined, system: undefined };
 }
 function getDevHub() {
@@ -10949,9 +11155,9 @@ function getDevHub() {
     channel: 'dev', maxMessageLength: 4000, agentPrefix: 'dev_', textBatchWaitMs: 0,
     ownerSurface: true,   // DEV_MODE-only local route behind the launch token: every inbound is the Commander
     runSlash: (input, sctx) => runSlashForChannel(input, sctx),   // shared slash registry — identical answers to the desktop
-    userCommandNames: () => userCommandEntries().map(c => c.name),
+    userCommandNames: () => userCommandEntries().map(c => c.name), desktopCommand: isDesktopSlashCommand,
     runOnce: runOnce, store: channelStore,
-    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
     send: (chatId, text) => devCaptureReply(chatId, text),
     secrets: devHubSecrets,
     persona: DEV_PERSONA, classify: Classify.isTaskDirective, redact: redact, emit: chanEmit, taskIntent: TaskIntent,
@@ -11123,7 +11329,7 @@ function startGenericChannel(id, token, key, model, agentCfg) {
   const wired = wireChannel(desc, {
     hub: {
       runOnce: runOnce, store: channelStore, steerRun: channelSteerRun,
-      historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+      historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
       secrets: () => {
         const r = (channelSecrets && channelSecrets[id]) || {};
         const p = normalizeProvider(r.provider);
@@ -11147,7 +11353,7 @@ function startGenericChannel(id, token, key, model, agentCfg) {
       // it a "/standup" here fell through to the MODEL as paid chat, and /usage, /tools, /routine and /away answered
       // "not available on this channel" (2026-10-18). Owner-only either way: the hub gates both on isOwner.
       runSlash: (input, sctx) => runSlashForChannel(input, sctx),
-      userCommandNames: () => userCommandEntries().map(c => c.name)
+      userCommandNames: () => userCommandEntries().map(c => c.name), desktopCommand: isDesktopSlashCommand
     },
     adapter: adapterOpts
   });
@@ -11241,6 +11447,10 @@ updatePreparation = makeUpdatePreparation({
   abortRuns: () => updateAbortLiveRuns(),
   appVersion: () => { try { return computeVersionSurface().appVersion || computeVersionSurface().harness || 'unknown'; } catch (_) { return 'unknown'; } }
 });
+// bug 31db37b0: once per boot, pre-update recovery points beyond the newest three are removed (every install attempt left one)
+try {
+  for (const miss of updatePreparation.pruneSnapshots().errors) failNote('update.snapshots.prune', Object.assign(new Error('could not remove ' + miss.file), { code: miss.code }));
+} catch (e) { failNote('update.snapshots.prune', e); }
 
 const server = http.createServer((req, res) => {
   // DNS-REBINDING FLOOR ON EVERY PATH (2026-09-23 security audit). The Host pin used to guard only /api/* (and
@@ -11528,6 +11738,20 @@ async function handleGroups(req, res) {
    ==================================================================================================================== */
 const REMOTE_NOTE = '\n\n[REMOTE] The Commander sent this from their phone through StarNet Remote. Work exactly as you normally '
   + 'would. They will read your reply on a small screen, so lead with the result.';
+/* THE TERMINAL (2026-10-18, Andrew: "the agent thinks its in starnet so it will tell u to interact with buttons that ltrly dont
+   exist"). The `starnet` CLI runs the agent on its roster persona — the DESKTOP's, which speaks of the COMMS panel, approve/deny
+   buttons and one-tap FORK rows — so handleRun appends this after it (client:'terminal'). It names the terminal's real
+   commands (bin/lib/tui.js HELP), so "how do I…" gets an answer the Commander can type. A constant: it rides the cached prefix. */
+const TERMINAL_NOTE = '\n\n[TERMINAL] The Commander is talking to you from the StarNet terminal CLI (`starnet`), not the desktop '
+  + 'app. There is no station on their screen: no COMMS panel, no buttons, cards, windows, dock or one-tap rows — anything earlier '
+  + 'in these instructions about clicking, tapping, approve/deny buttons, FORK rows or placing props does not apply here. In their '
+  + 'terminal: an approval shows as a card they answer with y (allow once), n (deny) or v (read the full request first); a '
+  + 'question you ask with brief.ask is answered by number or by typing; /model shows and switches your model; /new starts a fresh '
+  + 'conversation and /resume reopens an earlier one; /stop stops your run; /flow lists workflows and /flow run <name> <text> sends '
+  + 'one job; @name talks to another agent; /help lists everything. The station\'s own commands work there too: /usage, /tools, '
+  + '/routine, /away, the Commander\'s own commands, and each skill as /<skill> <task> (/skills lists them). Never write a FORK: line — ask in plain words. When something '
+  + 'can only be done in the StarNet desktop app (placing props, building the station, connecting accounts or keys), say so '
+  + 'plainly. Write for a terminal: plain text and simple markdown (short paragraphs, lists, code blocks), no wide tables.';
 const remoteCrypto = require('./remote/crypto.js');
 const remoteDevices = require('./remote/devices.js').makeDevices({
   fs, path, crypto: remoteCrypto, file: path.join(WORKSPACES, '.secrets', 'remote.json'),
@@ -11678,7 +11902,7 @@ const remoteHost = require('./remote/host.js').makeRemoteHost({
     finally { runs.delete(rid); runsMeta.delete(rid); grantsSession.delete(rid); }   // its session-scoped grants end with it, like every other run
   },
   view: remoteView,
-  deskOpen: () => sse.size() > 1,   // a StarNet page is connected (the phones' own tee is always one listener)
+  deskOpen: () => pageListening(),   // a StarNet page is connected (an MCP client on the feed is not a desk)
   // how each agent looks (the skin the Commander picked), from the station save the page mirrors here
   crewLooks: () => remoteCrewLooks(),
   portrait: (skin) => remotePortraits.forSkin(skin),
@@ -11911,6 +12135,8 @@ const ROUTES = [
   { m: 'POST', qsplit: '/api/local-voice/warm', h: media.handleLocalVoiceWarm },
   { m: 'POST', exact: '/api/local-voice/transcribe', h: media.handleLocalVoiceTranscribe },
   { m: 'POST', exact: '/api/run', h: handleRun, errorPolicy: runFailPolicy },
+  { m: 'GET', exact: '/api/run/stream', h: handleRunStream },   // the page's ONE stream for every run it watches (run-streams.js)
+  { m: 'POST', exact: '/api/run/stream/withdraw', h: handleRunStreamWithdraw },   // the page stopped watching one run
   { m: 'POST', exact: '/api/run-recoveries/resolve', h: handleRunRecoveryResolve },
   { m: 'POST', exact: '/api/run-recoveries/continue', h: handleRunRecoveryContinue },
   { m: 'POST', exact: '/api/tts', h: media.handleTts, errorPolicy: media.ttsFailOpenPolicy },
@@ -12001,6 +12227,9 @@ const ROUTES = [
   { m: 'POST', exact: '/api/channels/telegram/owner/pair', h: handleTelegramOwnerPair },
   { m: 'POST', exact: '/api/channels/telegram/owner/revoke', h: handleTelegramOwnerRevoke },
   { m: 'POST', exact: '/api/roster', h: handleRoster },
+  { m: 'POST', exact: '/api/agent/model', h: handleAgentModel },   // the terminal's /model: one agent's model + provider (via the page when open)
+  { m: 'POST', exact: '/api/agent/approval', h: handleAgentApproval },   // the terminal's /yolo: one agent's approval mode (via the page when open)
+  { m: 'POST', exact: '/api/agent/personality', h: handleAgentPersonality },   // the terminal's /personality (via the page when open)
   { m: 'POST', exact: '/api/agent/delete', h: handleAgentDelete },
   { m: 'POST', exact: '/api/dossier', h: handleDossier },
   { m: 'POST', exact: '/api/goals', h: handleGoals },   // GROWTH Tier 2: the active goal-arc summary for cron personas
@@ -12031,6 +12260,7 @@ const ROUTES = [
   { m: 'GET', rx: GENERIC_CHANNEL_RX.status, h: (req, res, gm) => handleGenericChannelStatus(req, res, gm[1]) },
   { m: 'POST', rx: GENERIC_CHANNEL_RX.ownerPair, h: (req, res, gm) => handleChannelOwnerPair(req, res, gm[1]) },
   { m: 'GET', qsplit: '/api/channels/events', h: handleChannelEvents },   // path match: the SSE url carries ?cursor= + a ?ticket= (header-less EventSource)
+  { m: 'GET', qsplit: '/api/observe', h: (req, res) => require('./observer.js').serveObserver(observer.hub, req, res) },   // the terminal's live feed (header auth; sidecar/observer.js)
   { m: 'POST', exact: '/api/routing', h: handleRouting },
   { m: 'GET', qsplit: '/api/routing/chain', h: handleRoutingChain },   // qsplit, not exact: `exact` compares the FULL url and this route always carries a query
   // PROOF (guided workflow Phase 4): GET is the inert feature probe; POST runs ONE real, labeled sample
@@ -12161,6 +12391,7 @@ const ROUTES = [
   { m: 'GET', exact: '/api/servicekeys', h: handleServiceKeysList },
   { m: 'POST', exact: '/api/servicekeys', h: handleServiceKeyUpsert },
   { m: 'POST', exact: '/api/servicekeys/toggle', h: handleServiceKeyToggle },
+  { m: 'POST', exact: '/api/servicekeys/scrub', h: handleServiceKeyScrub },
   { m: 'GET', exact: '/api/servicekeys/catalog', h: handleServiceKeysCatalog },
   { m: 'POST', exact: '/api/servicekeys/autonomy', h: handleServiceKeyAutonomy },
   { m: 'POST', exact: '/api/servicekeys/remove', h: handleServiceKeyRemove },
@@ -12352,6 +12583,9 @@ const ROUTES = [
   { m: 'POST', exact: '/api/notebook/restore', h: handleNotebookRestore },
   { m: 'GET', prefix: '/api/notebook', h: serveNotebook },
   { m: 'POST', exact: '/api/save/recovery-ack', h: handleSaveRecoveryAck },
+  { m: 'GET', qsplit: '/api/save/conflicts', h: serveSaveConflicts },   // qsplit, not exact: the boot offer sends ?after=<ms> (an exact miss fell through to serveSaveLoad)
+  { m: 'POST', exact: '/api/save/conflicts/restore', h: handleSaveConflictRestore },
+  { m: 'POST', exact: '/api/save/adopt', h: handleSaveAdopt },   // a reopening window's unprovable unsent save: merged, never refused
   { m: 'GET', prefix: '/api/save', h: serveSaveLoad },
   { m: 'POST', qsplit: '/api/save', h: handleSaveWrite },   // qsplit, not exact: the unload beacon carries ?ticket= (apiauth.ticketOk)
   { m: 'GET', prefix: '/api/insights', h: serveInsights },
@@ -12534,6 +12768,10 @@ server.listen(PORT, '127.0.0.1', () => {
   // Install the Commander's shell hooks onto the station-wide spine. Awaited-but-guarded: a hooks file that
   // is broken must delay nothing and break nothing at boot.
   installShellHooks().catch(swallow('shellhooks.install'));
+  // TERMINAL MODE on macOS: a dragged-in StarNet.app has no installer to put `starnet` on PATH, so the packaged app links
+  // it into ~/.local/bin (sidecar/cli-link.js: idempotent, never replaces a file it did not make, a no-op off macOS and
+  // outside an app bundle). Windows: the installer's hooks own PATH.
+  try { const cl = require('./cli-link.js').ensureCliLink(); if (cl && cl.said) console.log('  · ' + cl.said); } catch (e) { console.warn('[cli-link] ' + ((e && e.message) || e)); }
   // auto-start a previously-connected Telegram bot (saved config), else an env-provided one (headless deploys).
   try {
     const t = (channelSecrets && channelSecrets.telegram) || {};
@@ -12812,9 +13050,12 @@ function handleChannelEvents(req, res) {
     'X-Accel-Buffering': 'no'
   });
   try { res.write('retry: 3000\n\n'); } catch (_) {}        // EventSource auto-reconnects after 3s if dropped
+  // the header token passed the gate → a Node client; otherwise the gate passed on an SSE ticket → a page (ssePages)
+  const isPage = !apiauth.apiTokenOk(req, API_TOKEN);
   sse.add(res);
   if (!sse.resume(res, req.headers['last-event-id'] || new URL(req.url, 'http://localhost').searchParams.get('cursor'))) return;
-  const done = () => { clearInterval(ka); sse.remove(res); };   // evict on disconnect — mirrors /api/run cleanup; idempotent
+  if (isPage) ssePages.add(res);
+  const done = () => { clearInterval(ka); sse.remove(res); ssePages.delete(res); };   // evict on disconnect — mirrors /api/run cleanup; idempotent
   // DATA (not an SSE comment): EventSource hides comments from JS, so the old `: ka` kept TCP open
   // while world.js truthfully aged the unobservable link to LINK DOWN. The hub emits an empty JSON
   // MessageEvent through its normal dead/backpressured-client bounds; world.js refreshes freshness
@@ -13004,7 +13245,7 @@ function getSampleHub() {
     channel: 'sample', maxMessageLength: 4000, agentPrefix: 'smp_', textBatchWaitMs: 0,
     ownerSurface: true,   // the Commander's own sample-crate route behind the launch token
     runOnce: runOnce, store: channelStore,
-    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
     /* THE SAMPLE IS UNADDRESSED, EVERY TIME. This route's whole claim is "a REAL run on the REAL UNADDRESSED
        dispatch path" — the FILTER/SPLITTER must sort it. The hub's ordinary chat→agent bookkeeping saved a
        binding for chatId 'sample' on the first run, so from the SECOND sample on resolveTarget took its
@@ -13342,7 +13583,7 @@ function makeTriggerHub(hooks) {
     store: new Proxy(channelStore, { get: (t, k) => k === 'loadHistory' ? (agentId) => hooks.turns(agentId).slice(-40)
       : k === 'appendTurn' ? (agentId, role, content) => { hooks.turns(agentId).push({ role: role, content: content }); }
       : k === 'clearHistory' ? () => {} : (typeof t[k] === 'function' ? t[k].bind(t) : t[k]) }),
-    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }),
+    historyFor: (streamId) => transcriptStore.reconstruct(streamId, { limit: 100 }), observeInto: channelObserveInto,
     bindChats: false,   // every fire is UNADDRESSED: the line's own doors decide the dock, never a remembered chat binding
     send: (chatId, text) => { hooks.send(text); return Promise.resolve({ ok: true }); },
     secrets: () => ({}),
@@ -14317,7 +14558,7 @@ async function warmModelCatalogSet() {
     const models = await provider.listModels();   // cache hit after boot warmup; a cold fetch is bounded by the provider
     if (!Array.isArray(models) || !models.length) return null;
     const s = new Set();
-    for (const m of models) { if (m && m.id) s.add(String(m.id)); }
+    for (const m of models) { if (m && m.id && !isBatchOnlyModel('openrouter', m.id)) s.add(String(m.id)); }
     return s.size ? s : null;
   } catch (_) { return null; }
 }
@@ -14416,8 +14657,8 @@ async function applyVoiceTurnRoute(o) {
   const rosterIdent = agentRoster.get(String(o.agentId || 'agent')) || null;
   // the agent's own route, resolved exactly as runOnceCore resolves it
   const mainProvider = normalizeProvider(o.provider || (rosterIdent && rosterIdent.provider) || '');
-  const mainModel = String(o.model || '').trim() || (rosterIdent && rosterIdent.model ? String(rosterIdent.model).trim() : '')
-    || (providerUsesCodex(mainProvider) ? CODEX_DEFAULT_MODEL : CRON_DEFAULT_MODEL);
+  const mainModel = chatModelId(mainProvider, String(o.model || '').trim() || (rosterIdent && rosterIdent.model ? String(rosterIdent.model).trim() : '')
+    || (providerUsesCodex(mainProvider) ? CODEX_DEFAULT_MODEL : CRON_DEFAULT_MODEL));
   const mainBaseUrl = o.baseUrl || o.base_url || '';
   const tProvider = setting.model ? normalizeProvider(setting.provider || mainProvider) : mainProvider;
   const sameProvider = tProvider === mainProvider;
@@ -14428,6 +14669,10 @@ async function applyVoiceTurnRoute(o) {
   const swapping = credentialOk && !(sameProvider && setting.model === mainModel);
   const tEntry = swapping ? await voiceCatalogEntry(tProvider, setting.model, tKey, tBaseUrl) : null;
   const limit = (tEntry && Number(tEntry.context_length)) || 0;
+  // the voice run works in its model's price-tier window (runOnceCore runWindowCeiling), so "fits without a fold" is
+  // measured against that window: a conversation the voice run would fold stays on the agent's model
+  const tierCeiling = promptTierCeiling(tProvider, setting.model, !!(getProviderProfile(tProvider) || {}).unmetered);
+  const runLimit = (tierCeiling > 0 && limit > tierCeiling) ? tierCeiling : limit;
   let promptTokens = 0;
   if (limit) {
     const est = makeContext(Object.assign({ contextLimit: limit }, RUN_CONTEXT_DEFAULTS));
@@ -14435,7 +14680,7 @@ async function applyVoiceTurnRoute(o) {
   }
   const facts = {
     setting, main: { provider: mainProvider, model: mainModel },
-    target: { credentialOk, contextLimit: limit, efforts: tEntry && tEntry.reasoningEfforts },
+    target: { credentialOk, contextLimit: runLimit, efforts: tEntry && tEntry.reasoningEfforts },
     promptTokens, compactAt: RUN_CONTEXT_DEFAULTS.compactAt
   };
   let plan = voiceChatRoute.planVoiceRoute(facts);
@@ -14807,7 +15052,10 @@ function handleRuntimeAgent(req, res) {
     configured: !!(model && providerHasCredential(provider, key, baseUrl)),
     version: (() => { try { return computeVersionSurface().harness || 'dev'; } catch (_) { return 'dev'; } })(),
     agents: [...agentRoster].map(([agentId, a]) => ({
-      agentId, name: (a && a.name) || agentId, model: (a && a.model) || null, provider: (a && a.provider) || null
+      agentId, name: (a && a.name) || agentId, model: (a && a.model) || null, provider: (a && a.provider) || null,
+      // the settings a run here is held to (additive): its reasoning effort and its approval mode, as the roster has them
+      reasoningEffort: (a && a.reasoningEffort) || null, approvalMode: (a && a.approvalMode) || null,
+      personaId: (a && a.personaId) || ((agentRosterRaw.get(agentId) || {}).personaId) || null
     }))
   }));
 }
@@ -14858,6 +15106,7 @@ function setProviderRuntimeConfig(provider, patch) {
     const baseUrl = String(patch.baseUrl || '').trim();
     if (baseUrl) runtimeBaseUrls[id] = baseUrl;
     else delete runtimeBaseUrls[id];
+    saveDesktopEndpoints();   // #137: the station keeps the endpoint across an app restart or a respawn
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'keyPool')) {
     const pool = providerRuntimeKeyPool(id, Array.isArray(patch.keyPool) ? patch.keyPool : []);
@@ -15077,16 +15326,73 @@ async function handleServiceKeyUpsert(req, res) {
     unattendedReason: catalog && catalog.unattendedReason
   }, Date.now(), { reservedEnv: SERVICEKEYS_RESERVED_ENV });
   if (r.error) return json(400, { error: r.error });
+  const prev = (Array.isArray(serviceKeys) ? serviceKeys : []).find(row => row && row.id === r.record.id);
   serviceKeys = r.list.map(applyServiceKeyCatalogPolicy);
   const record = serviceKeys.find(row => row.id === r.record.id) || r.record;
   if (!record.ref) serviceKeyRefs.drop(record.id);   // a pasted key replaced a 1Password reference: forget the value read for it
   applyServiceKeysEnv();
-  const saved = saveServiceKeys();   // verified read-back; on false the key is LIVE but not durable — say so honestly
+  // A key this save REPLACES (rotated, or swapped for a 1Password reference) must not survive in any copy on disk: the
+  // ordinary resilient save keeps the previous file as the recovery copy. Write both copies and read both back, the
+  // same way a removal is saved. Verified read-back either way; on false the key is LIVE but not durable — say so.
+  const replacesKey = !!(prev && prev.key && prev.key !== record.key);
+  const saved = replacesKey ? saveServiceKeyRemoval(serviceKeys) : saveServiceKeys();
   // A 1Password reference is READ now (the Commander is here to unlock and approve), so the row says at once whether it
   // works. Saved either way: a locked vault is a state to fix, not a reason to lose the reference.
   if (record.ref) await serviceKeyRefs.refresh(record, { timeoutMs: 60000 });
   applyServiceKeysEnv();
   return json(saved ? 200 : 500, { ok: saved, saved, key: publicServiceKey(record), error: saved ? undefined : 'key is active for this session but could not be verified on disk' });
+}
+/* A KEY PASTED INTO CHAT (keys.save, 2026-10-25): the same upsert, catalog policy, env apply and verified persist as
+   POST /api/servicekeys, for a value the host found in the Commander's own message (tools/builtin/keys.js). A catalog
+   platform keeps its own name and docs. refuseReplace (a run that has read content the Commander did not write) may
+   add a key but never swap a saved one for a different value. */
+function saveServiceKeyFromChat(input) {
+  const asked = String((input && input.name) || '').trim();
+  const key = String((input && input.key) || '');
+  const catalog = serviceKeysCatalog.byId(serviceKeysMod.slug(asked));
+  const name = catalog ? catalog.name : asked;
+  const id = serviceKeysMod.slug(name);
+  const prev = serviceKeys.find(row => row && row.id === id) || null;
+  const prevLive = prev ? (liveServiceKeys().find(row => row && row.id === id) || null) : null;
+  const brief = (row) => ({ name: row.name, envVar: row.envVar, autonomous: row.autonomous === true, unattendedSupported: row.unattendedSupported !== false });
+  if (prevLive && prevLive.key === key) return { ok: true, record: brief(prev), existed: true, sameValue: true, saved: true };
+  if (prev && input && input.refuseReplace) {
+    return { ok: false, error: name + ' already has a saved key, and this run has read content the Commander did not write, so it cannot replace it. '
+      + 'Ask the Commander to paste the new key in a fresh message, or replace it in TOOLSETS & CONNECTORS → KEYS.' };
+  }
+  const r = serviceKeysMod.upsert(serviceKeys, {
+    name, key, docsUrl: (input && input.docsUrl) || (catalog && catalog.docsUrl) || undefined,
+    unattendedSupported: !(catalog && catalog.unattendedSupported === false),
+    unattendedReason: catalog && catalog.unattendedReason
+  }, Date.now(), { reservedEnv: SERVICEKEYS_RESERVED_ENV });
+  if (r.error) return { ok: false, error: r.error };
+  const before = serviceKeys;
+  serviceKeys = r.list.map(applyServiceKeyCatalogPolicy);
+  const record = serviceKeys.find(row => row.id === r.record.id) || r.record;
+  applyServiceKeysEnv();
+  // ALL OR NOTHING (never destroy the last copy): a saved key is scrubbed out of the chat, the task brief and the
+  // transcript, so a key that is live but NOT proven on disk would leave no copy anywhere after a restart. Unlike the
+  // panel (where the Commander sees "not durable" and still holds the key), the chat path reverts and says so.
+  if (!saveServiceKeys()) {
+    serviceKeys = before;
+    applyServiceKeysEnv();
+    if (!saveServiceKeys()) console.warn('[servicekeys] chat save reverted in memory; the store on disk could not be re-verified');
+    return { ok: false, error: 'the key could not be saved to disk, so nothing was changed — the key is still in the Commander\'s message. Ask them to add it in TOOLSETS & CONNECTORS → KEYS.' };
+  }
+  serviceKeyRefs.drop(record.id);   // a pasted key replaced a 1Password reference: forget the value read for it
+  // the task brief captured the message, key and all, before the save: name it there too (async, failure noted)
+  taskBriefStore.scrubText(t => KeyTools.nameSavedKeys(t, liveServiceKeys())).catch(e => failNote('servicekeys.chat.brief-scrub', e));
+  return { ok: true, record: brief(record), existed: !!prev, sameValue: false, saved: true };
+}
+/* POST /api/servicekeys/scrub { texts:[...] } -> { texts } — each text with every saved service key's value replaced by
+   its placeholder (keys.keyPlaceholder). COMMS calls it on `servicekey.saved` so the Commander's bubble and the desk
+   save stop holding a key that now lives in KEYS. Returns only what it was sent, minus secrets; never a value. */
+async function handleServiceKeyScrub(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 1 << 22)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  if (!Array.isArray(body.texts) || body.texts.length > 500) return json(400, { error: 'texts must be an array of at most 500 strings' });
+  const keys = liveServiceKeys();
+  return json(200, { texts: body.texts.map(t => (typeof t === 'string' ? KeyTools.nameSavedKeys(t, keys) : t)) });
 }
 async function handleServiceKeyToggle(req, res) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
@@ -15908,8 +16214,10 @@ function lifecycleArmedSnapshot(now) {
   // scheduler (or an armed one with zero jobs) is honestly not armed: nothing would tick after window close.
   let routines = { armed: false, count: 0, healthy: false, halted: false };
   try {
-    // Completed/paused routines need a live ticker only while a result still awaits delivery.
-    const jobs = Array.isArray(cronJobs) ? cronJobs.filter(job => job && (job.enabled !== false || cronStore.pendingDeliveries(job).length > 0)) : [];
+    // Completed/auto-paused routines need a live ticker only while a result still awaits delivery. A routine the
+    // Commander PAUSED holds its results until resumed (cronStore.deliveriesHeld), so nothing of it would run.
+    const jobs = Array.isArray(cronJobs) ? cronJobs.filter(job => job && (job.enabled !== false ||
+      (!cronStore.deliveriesHeld(job) && cronStore.pendingDeliveries(job).length > 0))) : [];
     // A durable E-STOP halt (cron.halt.json) freezes the timer — a halted scheduler is NOT doing background
     // work, so it must not hold the process alive after window close (same truthfulness rule as night shift).
     const armed = !!cronArmed && !cronHalted && jobs.length > 0;
@@ -16478,7 +16786,7 @@ async function handleCronRun(req, res) {
   let body; try { body = JSON.parse(await readBody(req, 4096)) || {}; } catch (e) { res.writeHead(400); return res.end('bad json'); }
   const job = cronStore.getJob(cronJobs, String(body.id || ''));
   if (!job) { res.writeHead(404, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'no such routine' })); }
-  if (cronStore.pendingDeliveries(job).length >= cronStore.MAX_PENDING_DELIVERIES) {
+  if (cronStore.undeliveredCount(job) >= cronStore.MAX_PENDING_DELIVERIES) {
     res.writeHead(409, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: 'delivery backlog is full — reconnect the destination before running again' }));
   }
@@ -16519,6 +16827,11 @@ async function handleCronRun(req, res) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: (!model ? 'choose a model for this routine agent first' : cronCredentialError(provider)) }));
   }
+  // ONE STREAM PER PAGE (run-streams.js): a page that names its run stream gets this POST answered at once and the run's
+  // lines on that stream — a routine started from NEEDS YOU or an app no longer holds a connection for its whole run
+  const sink = pageRunSink(body, res);
+  if (sink === false) return;
+  const lines = runLineWriter(res, sink);
 
   // COMMAND ROUTINE: "Run Now" must behave exactly like the scheduled fire, which the cron driver's runOnce
   // wrapper redirects to runSlashRoutine. This path calls runOnce DIRECTLY, so without the same redirect a
@@ -16526,24 +16839,25 @@ async function handleCronRun(req, res) {
   // doing two different things depending on who started it. Placed AFTER the credential gate above so both
   // paths gate identically (see runSlashRoutine's note on that shared limit).
   if (assembledPrompt.charAt(0) === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
     const runIdC = crypto.randomUUID();
+    openRunAnswer(res, sink, { runId: runIdC });
     cronDriver.leases.set(job.id, { runId: runIdC, startedAt: Date.now(), heartbeatAt: Date.now(), ac: new AbortController(), isOnce: false });
-    const busC = { emit: (name, payload) => { try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {} } };
+    const busC = { emit: (name, payload) => { try { lines.write(name, redact(payload)); } catch (_) {} } };
     const emitC = wrapEmitDiag(makeEmitter(busC, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
     try { cronEmit('cron.fire', { jobId: job.id, runId: runIdC, scheduledFor: Date.now() }); } catch (_) {}
     let out;
     try { out = await runSlashRoutine(assembledPrompt, { agentId: job.agentId, runId: runIdC, emit: emitC }); }
     catch (e) { out = { ok: false, text: 'that command failed: ' + ((e && e.message) || e) }; }
     cronDriver.settleRun(job.id, runIdC, { reason: out.ok ? 'done' : 'error', errMsg: out.ok ? null : out.text, buf: out.text || '' }, null);
-    try { res.end(); } catch (_) {}
+    lines.end();
     return;
   }
 
-  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
-  const kaOff = attachStreamKeepAlive(res);   // hold-open heartbeat: a long tool phase must not leave the stream byte-silent
-  const ac = new AbortController();
   const runId = crypto.randomUUID();
+  openRunAnswer(res, sink, { runId });
+  // hold-open heartbeat: a long tool phase must not leave the stream byte-silent (a page's shared stream keeps its own)
+  const kaOff = sink ? () => {} : attachStreamKeepAlive(res);
+  const ac = new AbortController();
   runs.set(runId, ac);
   runsMeta.set(runId, { agentId: job.agentId, startedAt: Date.now(), source: 'cron' });
   // Register the manual run in the DRIVER's lease map (the other half of the one-run-per-routine fix): the
@@ -16557,10 +16871,13 @@ async function handleCronRun(req, res) {
   // window that asked for it must not cancel it (it stays stoppable through its lease, like a scheduled fire).
   // Without detach:true, Run Now keeps its law: the watcher leaving cancels the run.
   const detached = body.detach === true;
-  if (!detached) res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  // on the page's shared stream (run-streams.js) the watcher leaving is that stream closing, or this run withdrawn — never
+  // this POST's own response, which closes as soon as its receipt is sent
+  if (!detached && sink) sink.onGone(() => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  else if (!detached) res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
   // detached: the watcher leaving changes nothing — the run stays in runs/runsMeta (live in the snapshot, busy, and
   // stoppable on its own) until its own finally below removes it
-  const bus = { emit: (name, payload) => { try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {} } };
+  const bus = { emit: (name, payload) => { try { lines.write(name, redact(payload)); } catch (_) {} } };
   const emit = wrapEmitDiag(makeEmitter(bus, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
   // tee: stream every event to the watching browser AND capture the outcome so the last-run record is honest.
   const state = { buf: '', errMsg: null, reason: null, transient: false, usd: 0, toolsRan: 0 };   // toolsRan: an empty reply after work is not 'nothing was done'
@@ -16726,7 +17043,7 @@ async function handleCronRun(req, res) {
     // write retains the receipt; a late zombie cannot overwrite its replacement.
     cronDriver.settleRun(job.id, runId, state, null);
     kaOff();
-    try { res.end(); } catch (_) {}
+    lines.end();
   }
 }
 
@@ -18216,16 +18533,19 @@ async function handleWorkshopShiftNow(req, res) {
   let body; try { body = JSON.parse(await readBody(req, 4096)) || {}; } catch (e) { res.writeHead(400); return res.end('bad json'); }
   const agentId = String(body.agentId || '');
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'choose a valid agent' })); }
-  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
-  const kaOff = attachStreamKeepAlive(res);   // hold-open heartbeat (mirrors /api/run): shifts run whole tool phases silently
-  const bus = { emit: (name, payload) => { try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {} } };
+  const sink = pageRunSink(body, res);   // the page's ONE run stream, when it named one (run-streams.js)
+  if (sink === false) return;
+  openRunAnswer(res, sink);
+  const kaOff = sink ? () => {} : attachStreamKeepAlive(res);   // hold-open heartbeat (mirrors /api/run): shifts run whole tool phases silently
+  const lines = runLineWriter(res, sink);
+  const bus = { emit: (name, payload) => { try { lines.write(name, redact(payload)); } catch (_) {} } };
   const emit = wrapEmitDiag(makeEmitter(bus, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
   let result;
   try { result = await runWorkshopShift(agentId, { emit: emit, broadcast: true }); }
   catch (e) { result = { fired: false, reason: 'error: ' + ((e && e.message) || e) }; }
   kaOff();
-  try { res.write(JSON.stringify({ name: 'workshop.shift.result', payload: result }) + '\n'); } catch (_) {}
-  try { res.end(); } catch (_) {}
+  lines.write('workshop.shift.result', result);
+  lines.end();
 }
 
 /* POST /api/workshop/implement { agentId, runId, note? } — BUILD what a plan deliverable describes. `note` is what
@@ -18239,16 +18559,19 @@ async function handleWorkshopImplement(req, res) {
   const runId = String(body.runId || '');
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'choose a valid agent' })); }
   if (!runId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'no deliverable named' })); }
-  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
-  const kaOff = attachStreamKeepAlive(res);
-  const bus = { emit: (name, payload) => { try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {} } };
+  const sink = pageRunSink(body, res);   // the page's ONE run stream, when it named one (run-streams.js)
+  if (sink === false) return;
+  openRunAnswer(res, sink);
+  const kaOff = sink ? () => {} : attachStreamKeepAlive(res);
+  const lines = runLineWriter(res, sink);
+  const bus = { emit: (name, payload) => { try { lines.write(name, redact(payload)); } catch (_) {} } };
   const emit = wrapEmitDiag(makeEmitter(bus, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
   let result;
   try { result = await runImplementBuild(agentId, runId, { emit: emit, broadcast: true, note: body.note }); }
   catch (e) { result = { fired: false, reason: 'error: ' + ((e && e.message) || e) }; }
   kaOff();
-  try { res.write(JSON.stringify({ name: 'workshop.implement.result', payload: result }) + '\n'); } catch (_) {}
-  try { res.end(); } catch (_) {}
+  lines.write('workshop.implement.result', result);
+  lines.end();
 }
 
 /* THE AUTHORING ROUTES. Without these there was no way to make an extension except to find a folder and
@@ -18670,6 +18993,138 @@ async function handleRoster(req, res) {
 // truth and re-pushes the surviving crew via /api/roster right after; this route's job is the server-side stores
 // the roster push can't touch. The hero ('agent') is never deletable — refused here as a second line of defence
 // behind the UI guard (you can't archive the founder without corrupting resume).
+/* POST /api/agent/model { agentId, model, provider, effort? } — the terminal's /model: pin ONE agent's model the way the desktop's
+   picker does. With a StarNet page connected, the PAGE applies it (station.control agent.model → setAgentModelPin: roster push +
+   save) — the page owns the crew, so a roster-only write would be reverted by its next push; a headless station (no page) is
+   its own source of truth and the roster takes it directly. A provider that is not connected is refused (the agent's next run
+   would fail), and an unknown agent too. Answers { ok, agentId, model, provider, via: 'page'|'roster' }. */
+async function handleAgentModel(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 1 << 14)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  const agentId = String(body.agentId || '');
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) return json(400, { error: 'invalid agentId' });
+  const cur = agentRoster.get(agentId);
+  if (!cur) return json(404, { error: 'no agent "' + agentId + '" on this station' });
+  const model = String(body.model == null ? '' : body.model).trim().slice(0, 200);
+  const provider = normalizeProviderId(String(body.provider || cur.provider || '').trim());
+  const effort = body.effort == null ? '' : String(body.effort).trim().slice(0, 20);
+  if (!model) return json(400, { error: 'no model named' });
+  if (!provider) return json(400, { error: 'no provider named' });
+  if (!providerHasCredential(provider, providerRuntimeKey(provider, ''), providerRuntimeBaseUrl(provider, ''))) {
+    return json(409, { error: 'the provider "' + provider + '" is not connected on this station (no key or sign-in)' });
+  }
+  // a StarNet page is connected (a ticket-signed listener — the same test the remote host uses; an MCP client is not one)
+  if (pageListening()) {
+    const out = await stationBridge.request('station.control', Object.assign({ action: 'agent.model', agent: agentId, model, provider }, effort ? { effort } : {}));
+    if (out && out.ok) return json(200, Object.assign({ ok: true, agentId, model, provider, via: 'page' }, effort ? { effort } : {}));
+    return json(409, pageRefusal(out, agentId));
+  }
+  // no page: nothing was awaited since `cur` was read, so this writes onto the roster as it is now
+  agentRoster.set(agentId, Object.assign({}, cur, { model, provider }, effort ? { reasoningEffort: effort } : {}));
+  if (!saveAgentRoster()) { agentRoster.set(agentId, cur); return json(500, { error: 'could not save the roster' }); }
+  return json(200, Object.assign({ ok: true, agentId, model, provider, via: 'roster' }, effort ? { effort } : {}));
+}
+/* POST /api/agent/approval {agentId, mode:'ask'|'full'} and POST /api/agent/personality {agentId, personality, system?} — one
+   agent's approval mode or personality, for a client with no page of its own (the terminal's /yolo and /personality). The
+   same two paths as /api/agent/model: a StarNet page connected → that page's own control (it saves, recomposes and pushes
+   the roster); none → that ONE agent's roster entry, saved (never /api/roster, which replaces every agent; never the
+   station-wide bypass switch). With no page a personality needs its prompt, which only the app's composer writes: the
+   caller composes it with the app's own modules and sends it as `system`, and the roster keeps the personaId beside it. */
+/* A StarNet page was connected but its answer never came (the bridge's 6 s lapsed: a slow save, a busy station, a page
+   closing). Nothing is written here then: the page may still apply the change, push a newer roster or delete the agent
+   meanwhile, and a second write from a snapshot taken before the wait would overwrite that (review 10-24). But the page
+   applies a change BEFORE it proves its save (setAgentApproval pushes the roster, then proveCrewSaved), so an unanswered
+   change may already be in force: the reply never says "nothing changed" — it says the app did not confirm, and what the
+   station's roster holds for that agent NOW, read after the wait (`station`; `gone` when the page removed the agent). */
+function pageRefusal(out, agentId) {
+  if (out && out.unattended) {
+    const a = agentRoster.get(agentId);
+    const raw = agentRosterRaw.get(agentId) || {};
+    return Object.assign({ error: 'the StarNet app did not confirm in time — it may still be applying the change', pageOpen: true, unanswered: true },
+      a ? { station: { approvalMode: a.approvalMode === 'full' ? 'full' : 'ask', model: a.model || null, provider: a.provider || null, reasoningEffort: a.reasoningEffort || null, personaId: a.personaId || raw.personaId || null } } : { gone: true });
+  }
+  return { error: String((out && out.error) || 'the station page refused the change'), pageOpen: true };
+}
+/* /yolo off with no page open LOWERS an agent's power, so it must hold where the app reads it back: the app hydrates its
+   crew from its save and pushes that roster when it opens, so a roster-only "ask" came back as FULL ACCESS with no prompt
+   (review 10-24). The agent's row in the save takes the same mode (the field the page's proveCrewSaved checks), written
+   the way the save-restore route writes a server-side change: on the save's own revision, a fresh updatedAt (the app
+   adopts the newer copy at boot), never over a save this sidecar cannot read or one a newer StarNet wrote. Answers
+   { save:'patched'|'agrees' } (the save holds it), { save:'no-record' } (the save has no row for this agent) or
+   { save:'not-saved', why } (the save could not take it: the app may bring its own setting back when it opens). */
+function saveApprovalMode(agentId, mode) {
+  const notSaved = why => ({ save: 'not-saved', why });
+  if (workspaceDegraded) return notSaved('the station save was written by a newer StarNet');
+  let state;
+  try { state = saveStore.loadState('agent'); } catch (e) { return notSaved('the station save could not be read (' + ((e && e.message) || e) + ')'); }
+  if (state.status === 'unreadable') return notSaved('the station save is unreadable right now');
+  // a torn save reads as no document, as a missing one does: neither holds the change, and the app seeds the station
+  // from its own copy when it opens — never reported as if the roster were the whole station (review 10-24)
+  if (state.status === 'corrupt') return notSaved('the station save is damaged');
+  if (state.status === 'absent') return notSaved('the station has no app save yet');
+  const doc = state.doc;
+  if (!doc || typeof doc !== 'object') return notSaved('the station save holds no crew');
+  const rows = [];
+  if (doc.agent && typeof doc.agent === 'object' && String(doc.agent.id || '') === agentId) rows.push(doc.agent);
+  for (const x of (Array.isArray(doc.agents) ? doc.agents : [])) if (x && typeof x === 'object' && String(x.id || '') === agentId) rows.push(x);
+  if (!rows.length) return { save: 'no-record' };
+  const stale = rows.filter(x => (x.approvalMode === 'full' ? 'full' : 'ask') !== mode);
+  if (!stale.length) return { save: 'agrees' };
+  for (const x of stale) x.approvalMode = mode;
+  const at = Date.now();
+  Object.assign(doc, { updatedAt: Math.max(at, (Number(doc.updatedAt) || 0) + 1), _saveClient: 'approval-' + at, _saveDirty: false });
+  let result;
+  try { result = saveStore.save('agent', doc, { compareRevision: true }); } catch (e) { return notSaved('the station save refused the change (' + ((e && e.message) || e) + ')'); }
+  if (!result || result.ok !== true) return notSaved(result && result.conflict ? 'the station save changed while it was written' : 'the station save refused the change');
+  try { seedSaveMemos('agent', doc); } catch (e) { failNote('agent.approval.seed-memos', e); }
+  return { save: 'patched' };
+}
+async function handleAgentApproval(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 1 << 12)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  const agentId = String(body.agentId || '');
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) return json(400, { error: 'invalid agentId' });
+  const cur = agentRoster.get(agentId);
+  if (!cur) return json(404, { error: 'no agent "' + agentId + '" on this station' });
+  const mode = body.mode === 'full' ? 'full' : body.mode === 'ask' ? 'ask' : '';
+  if (!mode) return json(400, { error: 'approval is "ask" or "full"' });
+  if (pageListening()) {
+    const out = await stationBridge.request('station.control', { action: 'agent.approval', agent: agentId, mode });
+    if (out && out.ok) return json(200, { ok: true, agentId, mode, via: 'page' });
+    return json(409, pageRefusal(out, agentId));
+  }
+  // no page: nothing was awaited since `cur` was read. The roster takes it either way (taking power away is never refused:
+  // the station's runs ask first from now). Taking it away also goes into the app's save, the copy the app hydrates its
+  // crew from and pushes back when it opens; `save` says whether it took it, so the caller never reports as lasting a
+  // change the app may undo (review 10-24)
+  agentRoster.set(agentId, Object.assign({}, cur, { approvalMode: mode }));
+  if (!saveAgentRoster()) { agentRoster.set(agentId, cur); return json(500, { error: 'could not save the roster' }); }
+  const s = mode === 'ask' ? saveApprovalMode(agentId, mode) : null;
+  return json(200, Object.assign({ ok: true, agentId, mode, via: 'roster' }, s ? { save: s.save } : {}, s && s.why ? { saveError: s.why } : {}));
+}
+async function handleAgentPersonality(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 1 << 20)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  const agentId = String(body.agentId || '');
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) return json(400, { error: 'invalid agentId' });
+  const cur = agentRoster.get(agentId);
+  if (!cur) return json(404, { error: 'no agent "' + agentId + '" on this station' });
+  const personality = String(body.personality || '').trim().toLowerCase();
+  if (!/^[a-z0-9_-]{1,40}$/.test(personality)) return json(400, { error: 'invalid personality' });
+  if (pageListening()) {
+    const out = await stationBridge.request('station.control', { action: 'agent.personality', agent: agentId, personality });
+    if (out && out.ok) return json(200, { ok: true, agentId, personality, via: 'page' });
+    return json(409, pageRefusal(out, agentId));
+  }
+  // no page: nothing was awaited since `cur` was read
+  const system = typeof body.system === 'string' ? body.system : '';
+  if (!system.trim() || system.length > 400000) return json(409, { error: 'no StarNet page is open to compose the new prompt, and none was sent' });
+  const raw = agentRosterRaw.get(agentId);
+  agentRoster.set(agentId, Object.assign({}, cur, { system }));
+  agentRosterRaw.set(agentId, Object.assign({}, raw && typeof raw === 'object' ? raw : {}, { personaId: personality }));
+  if (!saveAgentRoster()) { agentRoster.set(agentId, cur); if (raw) agentRosterRaw.set(agentId, raw); else agentRosterRaw.delete(agentId); return json(500, { error: 'could not save the roster' }); }
+  return json(200, { ok: true, agentId, personality, via: 'roster' });
+}
 async function handleAgentDelete(req, res) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
   let body; try { body = JSON.parse(await readBody(req, 1 << 16)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
@@ -18830,6 +19285,16 @@ function placedTypesFrom(v) {
   if (Array.isArray(v)) return v.map(e => (e && typeof e === 'object') ? e.objectType : e).map(s => String(s || '').trim()).filter(Boolean);
   return String(v || '').split(',').map(s => s.trim()).filter(Boolean);
 }
+/* The floor a slash command reads. The page sends its live floor; the TERMINAL (`starnet`) has no floor to see and sends
+   none, and its runs then use the agent's SAVED floor (handleRun: no `placed` → savedPlacement). Its commands read that
+   same floor, so /tools and the skills it lists in the terminal are the ones a terminal run really gets. Any other caller
+   without a floor keeps the old reading (none). */
+function slashPlacedFor(placed, client, agentId) {
+  if (placed != null || client !== 'terminal') return placedTypesFrom(placed);
+  const id = /^[A-Za-z0-9_-]{1,40}$/.test(String(agentId || '')) ? String(agentId) : 'agent';
+  try { return placedTypesFrom(require('./capability/saved-placement.js').savedPlacement(saveStore.load('agent'), id)); }
+  catch (e) { failNote('slash.terminal-floor', e); return []; }
+}
 
 /* The gear a skill can use for this agent: what the browser reports placed (its room + shared station gear) PLUS what
    the agent's execution profile or Full Access grants, plus the ORCHESTRATOR every Commander-started run carries
@@ -18857,8 +19322,8 @@ function serveSlashCatalog(req, res) {
   let placedTypes = [], agentId = 'agent';
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
-    placedTypes = placedTypesFrom(u.searchParams.get('placed') || '');
     agentId = String(u.searchParams.get('agent') || 'agent');
+    placedTypes = slashPlacedFor(u.searchParams.has('placed') ? (u.searchParams.get('placed') || '') : null, u.searchParams.get('client'), agentId);
   } catch (_) {}
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(slash.catalog(slashOptions(skillGearFor(agentId, placedTypes)))));
@@ -18972,6 +19437,7 @@ const slashActions = slashActionsMod.makeSlashActions({
         tokens: ledger.all().reduce((s, r) => s + (Number(r && r.tokens) || 0), 0),
         unpricedRuns: ledger.all().filter(r => r && r.unpriced === true && !r.unmetered).length,
         unmeteredRuns: ledger.all().filter(r => r && r.unmetered === true).length,
+        usageMissingRuns: ledger.all().filter(r => r && r.usageMissing === true && !r.unmetered).length,   // stopped mid-answer: their $ is a floor
         agentUsd: ledger.usdForAgent(agentId),
         caps: { perRun: effectiveCaps.perRun, perAgent: effectiveCaps.perAgent, perDay: effectiveCaps.perDay, global: effectiveCaps.global }
       };
@@ -19073,6 +19539,21 @@ async function runSlashRoutine(line, opts) {
   return { ok: !!(r && r.ok !== false), text: body };
 }
 
+/* /mention observe: a group line the bot overheard, filed as a run-less user row in the chat's canonical stream — the
+   stream a channel hub's historyFor replays — so the next addressed run actually sees it. `taint` is the hub's verdict
+   (null for a member's own words, a source for a forwarded one); passing it, null included, stamps the row's provenance. */
+function channelObserveInto(streamId, agentId, text, taint) {
+  transcriptStore.append({ streamId: String(streamId), agentId: String(agentId || ''), role: 'user', taint: taint || null, content: String(text || '') });
+  return true;
+}
+
+/* Does the shared registry's BUILT-IN table know this token (a name or an alias)? What a channel hub answers as a
+   desktop command instead of handing it to the model as paid chat (bug 6cd531b1). Built-ins only: a skill or recipe
+   name typed on a phone stays ordinary text, exactly as before. */
+function isDesktopSlashCommand(token) {
+  try { return !!slash.resolve('/' + String(token || '')); } catch (_) { return false; }
+}
+
 async function runSlashForChannel(input, ctx) {
   ctx = ctx || {};
   const agentId = /^[A-Za-z0-9_-]{1,40}$/.test(String(ctx.agentId || '')) ? String(ctx.agentId) : 'agent';
@@ -19106,7 +19587,9 @@ async function runSlashForChannel(input, ctx) {
   // plainly rather than returning an empty reply that reads like a failure.
   if (out.directive.type !== 'server') return { ok: false, text: 'That command only works in the StarNet desktop app.' };
   let r;
-  try { r = await slashActions.run(out.directive.action, out.directive.args, { agentId: agentId, placed: placed }); }
+  // the chat a messaging hub ran this from (hub.js: { channel, chatId, threadId }) — /routine add delivers there
+  const dOrigin = (ctx.deliveryOrigin && typeof ctx.deliveryOrigin === 'object' && ctx.deliveryOrigin.channel && ctx.deliveryOrigin.chatId) ? ctx.deliveryOrigin : null;
+  try { r = await slashActions.run(out.directive.action, out.directive.args, dOrigin ? { agentId: agentId, placed: placed, deliveryOrigin: dOrigin } : { agentId: agentId, placed: placed }); }
   catch (e) { return { ok: false, text: 'That command failed: ' + ((e && e.message) || e) }; }
   return r || { ok: false, text: 'No answer.' };
 }
@@ -19115,7 +19598,7 @@ async function handleSlashDispatch(req, res) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
   let body; try { body = JSON.parse(await readBody(req, 1 << 14)) || {}; } catch (e) { return json(400, { ok: false, error: 'bad json' }); }
   const input = body.input != null ? body.input : ('/' + String(body.command || ''));
-  const placed = placedTypesFrom(body.placed);
+  const placed = slashPlacedFor(body.placed, body.client, body.agentId);
   // skills resolve against the agent's full gear (profile / Full Access grants included); `placed` itself still rides
   // the server-action ctx unchanged below
   const out = slash.dispatch(input, slashOptions(skillGearFor(String(body.agentId || 'agent'), placed)));
@@ -19638,10 +20121,65 @@ async function handleSkillCandidateAction(req, res) {
 }
 
 /* ------------------------------- the run endpoint ------------------------------- */
+/* GET /api/run/stream — the page's ONE stream for every run it watches (sidecar/run-streams.js says why: a browser's six
+   connections per host were spent one per live run, so a sixth paused run left none for Approve/Deny). The page opens
+   it when its first run starts, names it on each POST /api/run, and closes it a few seconds after its last run ends;
+   the stream closing stops every run still on it, as each run's own response closing did. Token-gated like every
+   /api route. */
+function handleRunStream(req, res) {
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  runStreams.open(res);
+}
+// POST /api/run/stream/withdraw { stream, key } — the page stopped watching one run (a Stop before its run id was known, or
+// any other abort of that run's fetch): the same page-gone path its own response closing took. A key not yet on the stream
+// is remembered, so that run is refused when its POST arrives.
+async function handleRunStreamWithdraw(req, res) {
+  let body;
+  try { body = JSON.parse(await readBody(req, 4096)) || {}; } catch (_) { res.writeHead(400); return res.end('bad json'); }
+  respondJson(res, 200, runStreams.withdraw(body.stream, body.key));
+}
+/* The run a POST starts rides the page's stream when the body names one ({ stream: { id, key } }): every route that streams
+   a run to the page (/api/run, a routine's Run now, a workshop build) answers its POST at once and writes the run's lines
+   there. null: no stream named, so this response IS the run's stream, as always. false: refused — already answered 409,
+   before any work: the station does not hold that stream (it restarted, the page's connection dropped) or the page
+   withdrew this run before it arrived. */
+function pageRunSink(body, res) {
+  const via = runStreamOf(body);
+  if (!via) return null;
+  const sink = runStreams.attach(via.id, via.key);
+  if (sink) return sink;
+  respondJson(res, 409, runStreams.has(via.id)
+    ? { error: 'this run was withdrawn by its page before it started', code: 'run_withdrawn' }
+    : { error: 'this page\'s run stream is not open on the station (it restarted, or the connection dropped)', code: 'run_stream_gone' });
+  return false;
+}
+// a run's lines for a streaming route: onto the page's stream (sink) or this response, exactly one {name,payload} per line
+function runLineWriter(res, sink) {
+  return {
+    write: (name, payload) => { try { if (sink) sink.write(name, payload); else res.write(JSON.stringify({ name, payload }) + '\n'); } catch (_) {} },
+    end: () => { if (sink) sink.end(); else { try { res.end(); } catch (_) {} } }
+  };
+}
+// open a streaming route's answer: a receipt when the run rides the page's stream, else this response's NDJSON head
+function openRunAnswer(res, sink, receipt) {
+  if (sink) return respondJson(res, 200, Object.assign({ ok: true, stream: sink.streamId }, receipt || {}));
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+}
+
 async function handleRun(req, res) {
   let body;
   try { body = JSON.parse(await readBody(req, 2 << 20, res)); }
   catch (e) { if (res.headersSent) return; res.writeHead(400); return res.end('bad json'); }   // over-limit already answered 413
+  // A TERMINAL has no persona of its own to send (the page composes one): `rosterSystem:true` with no system runs the agent
+  // as its roster entry defines it. Opt-in, so every caller that sends (or deliberately omits) a system is unchanged.
+  if (body && typeof body === 'object' && !body.system && body.rosterSystem === true) {
+    const rec = agentRoster.get(String(body.agentId || 'agent'));
+    if (rec && rec.system) body.system = rec.system;
+  }
+  // …and says WHERE the Commander is: the roster persona is the desktop's (COMMS panel, Approve/Deny buttons, one-tap FORK
+  // rows), so a terminal run is told the truth after it, the REMOTE_NOTE pattern. Exact match, opt-in.
+  const terminalClient = !!(body && typeof body === 'object' && body.client === 'terminal');
+  if (terminalClient) body.system = String(body.system || '') + TERMINAL_NOTE;
   const { model, system, messages = [], agentId = 'agent', isTask = false, provider, fallbackModels, fallbackProviders } = body || {};
   const recurring = !!(body && body.recurring);   // the browser's mint detector saw this task SHAPE before → salience boost for reflection
   // REASON-ONLY SELF-TALK (retitle / goal-judge / pitch / autopilot): the caller composed a complete strict-format
@@ -19728,6 +20266,14 @@ async function handleRun(req, res) {
   if (!model) { res.writeHead(400); return res.end('no model selected — pick a model for ' + oauthLabel(runProvider) + ' first'); }
   if (!providerHasCredential(runProvider, key, baseUrl)) { res.writeHead(400); return res.end('missing key/model — ' + providerCredentialError(runProvider)); }
 
+  /* ONE STREAM PER PAGE (2026-10-21, sidecar/run-streams.js). A page that names its run stream gets this POST answered at
+     once and the run's events on that stream, so a paused run no longer holds one of the browser's six connections to the
+     station. Without one (a script, a test, an older page) this response IS the run's stream, as always. A stream the
+     station does not hold (it restarted, the page's connection dropped) or a key the page already withdrew (its Stop beat
+     this POST) refuses the run here, before any work and before a continuation is spent. */
+  const sink = pageRunSink(body, res);
+  if (sink === false) return;
+
   // Consume a continuation before opening the response stream or doing provider/tool work. The durable start
   // record is intentionally one-way: losing this response may require another review, but retrying cannot run
   // the same continuation twice and duplicate an external effect.
@@ -19735,18 +20281,15 @@ async function handleRun(req, res) {
   let recovery = null;
   if (body && body.recovery) {
     const accepted = consumeRunRecoveryContinuation(body.recovery, agentId, runId);
-    if (!accepted.ok) { res.writeHead(accepted.code || 409); return res.end(accepted.error || 'continuation blocked'); }
+    if (!accepted.ok) { if (sink) sink.release(); res.writeHead(accepted.code || 409); return res.end(accepted.error || 'continuation blocked'); }
     recovery = accepted.plan;
   }
 
-  res.writeHead(200, {
-    'Content-Type': 'application/x-ndjson; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'X-Accel-Buffering': 'no'
-  });
+  openRunAnswer(res, sink, { runId });   // a receipt when the run's events ride the page's stream, else this response is the stream
   // hold-open heartbeat: a lead awaiting team.dispatch produces NO events for minutes (only child lifecycle
-  // is forwarded) — the blank line keeps the watched run's socket provably alive through that silence.
-  const kaOff = attachStreamKeepAlive(res);
+  // is forwarded) — the blank line keeps the watched run's socket provably alive through that silence. (A page's shared
+  // stream carries its own heartbeat.)
+  const kaOff = sink ? () => {} : attachStreamKeepAlive(res);
 
   const ac = new AbortController();
   runs.set(runId, ac);
@@ -19771,8 +20314,15 @@ async function handleRun(req, res) {
   // the approvals it was still waiting on — the abort below denies them, and the conversation must say so after a reload.
   // Registered FIRST: listeners run in order, so it reads the signal before the disconnect law aborts it.
   let leadOver = false;   // this run's own finally ran: a close after it is just the stream's normal end
-  res.on('close', () => { if (!leadOver && !ac.signal.aborted && !internal) { try { notePageClosed(runId, pending); } catch (e) { failNote('run.pageClosed.note', e); } } });
-  res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  if (!sink) {
+    res.on('close', () => { if (!leadOver && !ac.signal.aborted && !internal) { try { notePageClosed(runId, pending); } catch (e) { failNote('run.pageClosed.note', e); } } });
+    res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  } else sink.onGone(() => {
+    // on the page's shared stream (run-streams.js) the page leaving is that stream closing, or this run withdrawn: the same two
+    // steps in the same order. Never this POST's own response, which closes as soon as its receipt is sent.
+    if (!leadOver && !ac.signal.aborted && !internal) { try { notePageClosed(runId, pending); } catch (e) { failNote('run.pageClosed.note', e); } }
+    ac.abort(); runs.delete(runId); runsMeta.delete(runId);
+  });
 
   // the "bus" writes one validated, REDACTED NDJSON line per event (key-shaped secrets are scrubbed even
   // if a tool ever echoes one back); makeEmitter validates against the frozen registry first.
@@ -19780,7 +20330,10 @@ async function handleRun(req, res) {
   let leadStarted = false, leadEnded = false;
   const bus = { emit: (name, payload) => {
     if (payload && payload.runId === runId) { if (name === 'agent.run.start') leadStarted = true; else if (name === 'agent.run.end') leadEnded = true; }
-    try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {}
+    try {
+      if (sink) sink.write(name, redact(payload));
+      else res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n');
+    } catch (_) {}
   } };
   const emit = wrapEmitDiag(makeEmitter(bus, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
 
@@ -19811,7 +20364,7 @@ async function handleRun(req, res) {
        ended run — it would outlive every run that could ever clear it. */
     const detached = !!(by && by.detached && by.signal);
     const say = detached ? chanEmit : emit;
-    let askId = '', announced = false;
+    let askId = '', announced = false, answeredVia = '';
     if (detached && pendingByRun.get(runId) !== pending) pendingByRun.set(runId, pending);   // the turn already ended: reopen its answer slot
     const sessionOver = (d) => (detached && leadOver && d === 'session') ? 'once' : d;
     return makeConsentWait({
@@ -19831,12 +20384,16 @@ async function handleRun(req, res) {
         // saw this lead's stream, or reloaded since, files the ask under that conversation and answers with this runId)
         if (detached) Object.assign(row, { background: true, runId, streamId: streamId || '' });
         say('permission.prompt', row);
+        observer.publish('permission.prompt', row, { runId, agentId, streamId: streamId || '' });   // a watching terminal sees the ask too
         // STARNET REMOTE: index the prompt so a paired phone can answer it too. A phone answer resolves the same
         // finisher and then tells this run's page (permission.response on its own stream), so the floor stops
         // waiting on a question somebody already answered elsewhere.
         const orig = pending.get(promptId);
         if (orig) { orig.askRow = row; if (detached) orig.detached = true; }   // the snapshot + the page-closed note read these
         if (orig && fields && fields.fresh) orig.freshConsent = true;   // handleConsent: a "full" here approves this call only
+        // an answer from the TERMINAL (POST /api/consent { via:'terminal' }) settles a card the page still shows: tell the page
+        // on this run's own stream, the way a phone answer does, so the desk never keeps live keys on a settled ask
+        if (orig) orig.announce = (decision) => { announced = true; answeredVia = 'terminal'; try { say('permission.response', { promptId, decision, via: 'terminal' }); } catch (e) { failNote('consent.terminalResponse', e); } };
         // the card's INSPECT FULL REQUEST (GET /api/consent/args): the whole redacted request, kept on the pending entry in
         // server memory only — never in the event or the run record — and gone the moment the prompt settles
         if (orig && fields && fields.argsFull && typeof fields.argsFull.text === 'string') orig.consentArgs = { tool: row.tool, text: fields.argsFull.text, truncated: !!fields.argsFull.truncated };
@@ -19851,6 +20408,13 @@ async function handleRun(req, res) {
     }).ask().then((v) => {
       if (untrack) untrack();
       v = sessionOver(v);   // a "session" answer after this run ended: its session is over, so this call only
+      // a watching terminal learns the ask is settled, whoever answered it (desk, phone, terminal) or if nobody did
+      if (askId) {
+        const settled = { promptId: askId, decision: typeof v === 'string' ? (/^(once|session|always|full)$/.test(v) ? v : 'deny') : (v && v.__clarify ? 'once' : 'deny') };
+        if (answeredVia) settled.via = answeredVia;
+        if (v === 'timeout') settled.expired = true;
+        observer.publish('permission.response', settled, { runId, agentId });
+      }
       if (detached) {
         // a desk answer (POST /api/consent) settles it on one page: tell every other page and surface on the station bus
         if (!announced && askId) {
@@ -19981,7 +20545,9 @@ async function handleRun(req, res) {
       surface: 'interactive', prompt: promptConsent, pathPrompt: promptPathTrust, summon: summonRequest,   // team.summon → live summonAgent() round-trip; pathPrompt → NS-5 "work in <root>?" bless
       loginPrompt: askHuman,   // attended browser login: browser.login's two consent asks ride the same fail-closed permission.prompt channel
       // the Commander is AT the station (COMMS): this run may drive the shared, signed-in station browser
+      // (the terminal CLI is on that same computer, token-authenticated, so its runs may too)
       stationBrowser: true,
+      viewer: terminalClient ? 'terminal' : '',   // the terminal CLI: no GUI — the manual and capability notes say so
       idempotencyScope: connectorContinuationScope,
       parentRunId: connectorContinuationScope ? body.connectorContinuationOf : undefined,
       askCommander,            // in-turn clarify: brief.ask blocks + resumes the SAME turn on this watched surface
@@ -20048,7 +20614,8 @@ async function handleRun(req, res) {
     const ps = pendingSummonByRun.get(runId);   // settle any summon request still open → null (no agent created)
     if (ps) { for (const f of ps.values()) { try { f(null); } catch (_) {} } pendingSummonByRun.delete(runId); }
     kaOff();
-    try { res.end(); } catch (_) {}
+    if (sink) sink.end();   // the run's last line on the page's stream (a page that left already took it off)
+    else { try { res.end(); } catch (_) {} }
   }
 }
 
@@ -20086,7 +20653,7 @@ function transcriptRecoveryTail(recovery, msgs, streamId) {
     const state = runJournal.inspect(src);
     const base = recoveryBase(state, msgs);
     if (!base) return null;
-    const rows = transcriptStore.history(streamId, { sourceRunId: src, limit: 5000 });
+    const rows = transcriptStore.history(streamId, { sourceRunId: src, limit: 5000, proof: true });   // a proof read: a deleted session's source rows still vouch (never handed on)
     return { base, rows, sourceWasContinuation: !!(state.meta && state.meta.recoveryOf) };
   } catch (e) { failNote('transcript.recovery.inspect', e); return null; }
 }
@@ -20097,6 +20664,16 @@ function latestUserText(list) {
     if (t != null) return t;
   }
   return '';
+}
+// The newest `n` user turns' text, newest first (keys.save looks for a pasted key in these).
+function recentUserTexts(list, n) {
+  const msgs = Array.isArray(list) ? list : [];
+  const out = [];
+  for (let i = msgs.length - 1; i >= 0 && out.length < n; i--) {
+    const t = userMsgText(msgs[i]);
+    if (t != null) out.push(t);
+  }
+  return out;
 }
 /* A FILE NAME IS NOT A HOST (soak 10-15): DomainTask.classify asks whether a dotted name ("about.me", "logo.ai") is a
    file that already exists where this run's relative paths land — its project folder when it has one, and the agent's
@@ -20344,6 +20921,11 @@ async function runOnceCore(o) {
   // applied default) > provider default. An explicit per-run choice still wins; the roster only fills a gap.
   const reasoningEffort = resolveReasoningEffort(providerId, o.reasoningEffort || o.reasoning_effort || (o.reasoning && o.reasoning.effort) || (rosterIdent && rosterIdent.reasoningEffort));
   let model = String((o && o.model) || '').trim() || (rosterIdent && rosterIdent.model ? String(rosterIdent.model).trim() : '') || (usingCodex ? CODEX_DEFAULT_MODEL : CRON_DEFAULT_MODEL);
+  // A batch-only variant ('<id>:batch') an older build offered and saved can never run on chat/completions (404 on every
+  // run); run its base model instead. The sidecar never rewrites the saved roster or routine record (the page's model
+  // dock does move ITS selection to the base row and saves it: modeldock.js catalogEquivalent); this run's own events,
+  // history and cost name the model it really used.
+  model = chatModelId(providerId, model);
   const runKey = providerRuntimeKey(providerId, key);
   const baseUrl = providerRuntimeBaseUrl(providerId, o.baseUrl || o.base_url || '', runKey);   // #89: a page copy's endpoint rides only its own key
   const streamId = o.streamId || null;   // M-mem.2b (browser run only; the headless hub omits it → global memory)
@@ -20471,7 +21053,13 @@ async function runOnceCore(o) {
   // live for autonomous runs without tool arguments ever leaving the sidecar); agent.token never (that noise
   // decision stands). redact() still runs over the view as a second backstop. Re-using the name `emit` means
   // every existing emit(...) call site below tees automatically, with no per-site change.
-  const rawEmit = o.emit;
+  // EVERY run but reason-only self-talk also reaches a watching terminal (GET /api/observe): the run's own sink runs
+  // first and unchanged; with nobody watching the tee is one size() check (sidecar/observer.js)
+  const rawEmit = internal ? o.emit : observer.tee(o.emit, {
+    runId, agentId, streamId: o.streamId || '', surface: o.surface || '', trigger, lineId: workflowLine || '', dockId: o.dockId || '',
+    projectRoot: o.projectRoot || '',
+    prompt: () => require('./observer.js').lastUserText(messages)
+  });
   const emit = o.broadcast
     ? (name, payload) => {
         try { rawEmit(name, payload); } catch (_) {}
@@ -20662,6 +21250,17 @@ async function runOnceCore(o) {
     }
     billed = adm.managed === true;
   }
+  /* THE RUN'S CAP IS ITS CREW'S CAP (bug d3a76db3: a $0.05 PER RUN cap ran $0.24 through four team.spawn workers).
+     A run starts a spend pool at its own per-run cap; a worker it delegates to arrives with that pool in
+     o.spendPool (orchestration.js passes the host-minted ctx.spendPool — a JSON body can never carry one) and JOINS
+     it, so the lead and all its workers draw from one cap and each stops at its call boundary when the pool is spent
+     (run-spend-pool.js). A lead on a flat subscription (unmetered: no default $ cap of its own) still bounds the
+     metered crew it starts by the PER RUN setting. A pool with one member decides nothing: a run that never
+     delegates is governed by its loop's own check exactly as before. */
+  const spendPoolCapUsd = (runCapUsd > 0 && isFinite(runCapUsd)) ? runCapUsd
+    : ((providerUnmetered && effectiveCaps.perRun > 0 && isFinite(effectiveCaps.perRun)) ? effectiveCaps.perRun : Infinity);
+  const spendPool = RunSpendPool.isRunSpendPool(o.spendPool) ? o.spendPool : RunSpendPool.makeRunSpendPool({ capUsd: spendPoolCapUsd });
+  spendPool.join(runId);
 
   // never for /v1 (o.toolsOptional): its taskKey is per-AGENT, so a durable brief left clarifying by one client would
   // swallow the next client's request as the answer (#96 follow-up). Each /v1 request carries its own messages.
@@ -20704,7 +21303,9 @@ async function runOnceCore(o) {
   }
 
   // ---- tools (registered fresh per run; cheap) ----
-  const registry = makeRegistry();
+  // The clock lets a tool timeout that team.spawn / team.dispatch pause while the run's spend pool holds a worker
+  // (tools/registry.js PAUSABLE DEADLINE) resume with exactly what was left (bug d3a76db3).
+  const registry = makeRegistry({ clock: { now: () => Date.now() } });
   const internalBriefTools = taskBriefState && taskBrief.status !== 'cancelled'
     ? registerTaskBriefTools(registry, taskBriefStore, taskBriefState, {
         now: () => Date.now(),
@@ -20720,7 +21321,7 @@ async function runOnceCore(o) {
   // offer (disabled, or its gear absent) is never served either.
   let runRecipes = [];
   const openrouterToolKey = providerId === 'openrouter' ? runKey : runtimeKey;
-  const studioRoute = ImageTask.resolveRoute({
+  const studioInput = {
     providerId: providerUsesCodex(providerId) ? 'codex' : providerId, runKey, providerBaseUrl: baseUrl,
     managedKey: providerRuntimeKey('starnet', ''),
     managedBaseUrl: providerRuntimeBaseUrl('starnet', ''),
@@ -20731,7 +21332,19 @@ async function runOnceCore(o) {
     // the station's ChatGPT sign-in renders gpt-image-2 on the plan (image.js codex-responses); a known-dead
     // sign-in is not a route, so the blocker names the real fix instead of a 401 mid-run
     codexSignedIn: !!(codexTokens && codexTokens.access_token) && !codexAuthDead
-  });
+  };
+  let studioRoute = ImageTask.resolveRoute(studioInput);
+  // #146: any OTHER OpenRouter key the station holds (the key a browser page saved in Settings, engine-credential.js;
+  // an OPENROUTER_API_KEY env) fills the gap only when no image route exists at all. The desktop keychain push /
+  // OPENROUTER_KEY above keep their rank, and StarNet credits, an OpenAI key or a ChatGPT sign-in that already rendered
+  // images keep rendering (and billing) exactly where they did.
+  const stationOpenRouterFill = providerRuntimeKey('openrouter', '');
+  if (!studioRoute.ok && stationOpenRouterFill && stationOpenRouterFill !== runtimeKey) {
+    studioRoute = ImageTask.resolveRoute(Object.assign({}, studioInput, {
+      stationOpenRouterKey: stationOpenRouterFill,
+      stationOpenRouterBaseUrl: providerRuntimeBaseUrl('openrouter', '', stationOpenRouterFill)
+    }));
+  }
   // web_search/web_fetch (DDG/Jina, OR fallback) + web_request. `accessSurface` is host authority: it comes
   // from the run host, never from tool args. An authenticated owner DM has the same stored-key reach as the
   // desktop; an ordinary autonomous caller remains restricted to explicitly unattended-approved keys.
@@ -20771,6 +21384,20 @@ async function runOnceCore(o) {
     keysCatalog: serviceKeysCatalog,
     signInUnavailable: connectorSignInUnavailable
   }).register(registry);
+  // A KEY PASTED INTO CHAT (keys.save): the value is found only in the directive the COMMANDER typed for this run — the
+  // same origin facts as TrustedLearning.eligible (keys.js ownerRun). A group session, a recipe template, a work-line
+  // hop, self-talk, a trigger/forwarded entry, a paired phone or guest, a delegated/child run, a recovery or a routine
+  // has no owner text, so the tool is not offered and can save nothing there (release review F9).
+  const keyOwnerRun = KeyTools.ownerRun(Object.assign({}, o, { internal, hostPowerWithheld, untrustedEntry: untrustedEntryRun }),
+    { eligible: TrustedLearning.eligible, isHandoff: Pipeline.isHandoff, latestText: latestUserText(messages) });
+  const keyOwnerTexts = () => keyOwnerRun ? recentUserTexts(messages, KeyTools.OWNER_TURNS) : null;
+  let keySavedThisRun = false;   // releases the run transcript's hold (runTranscript below)
+  KeyTools.makeKeyTools({
+    ownerTexts: keyOwnerTexts,
+    save: saveServiceKeyFromChat,
+    tainted: () => !!execution.taintedBy(),
+    onSaved: () => { keySavedThisRun = true; }
+  }).register(registry);
   // HARNESS SELF-KNOWLEDGE: always-present COMPUTER grant, local/read-only and secret-free. The reader
   // closes over this run's identity while every mutable section is collected fresh at call time from the
   // same helpers that serve /api/version, /api/cron, /api/connectors and /api/diagnostics.
@@ -20802,10 +21429,17 @@ async function runOnceCore(o) {
     pendingMediaCosts.push(Object.assign({ model: mediaModel }, cost));
   };
   let auxVisionProvider = null;
+  // the run's PRIMARY provider: the catalog the studio route's pinned vision model (`model` below) came from. Bound with
+  // auxVisionProvider before the loop; onFallback moves only auxVisionProvider (vision-input 2026-10-23).
+  let studioModelProvider = null;
   const auxVisionCall = async (req) => {
     if (!auxVisionProvider) throw new Error('session provider not ready');
-    // a provider that cannot take an image would answer about a picture it never saw (QA 2026-10-02; Claude Code can since 10-08)
-    if (typeof auxVisionProvider.supportsImages === 'function' && !auxVisionProvider.supportsImages()) throw new Error('no vision route: this agent\'s model cannot see images — connect an OpenRouter key in SETTINGS › AI & MODELS for image analysis');
+    // a provider that cannot take an image would answer about a picture it never saw (QA 2026-10-02; Claude Code can since 10-08).
+    // supportsImages(model) is false only when the catalog says this model is text-only (or it refused an image); null =
+    // unknown, which still tries — the adapters strip images only for a known text-only model (vision-input 2026-10-23).
+    // The fix it names works on every route: "connect an OpenRouter key" could not (a StarNet-credits run's studio route is
+    // the managed link whatever station key exists — image-task resolveRoute — and an OpenRouter run has its key already).
+    if (typeof auxVisionProvider.supportsImages === 'function' && auxVisionProvider.supportsImages(model) === false) throw new Error('no vision route: this agent\'s model cannot see images — the Commander can pick a vision model in the COMMS model dock');
     const ac = new AbortController();
     const t = setTimeout(() => { try { ac.abort(); } catch (_) {} }, Math.max(5000, Number(req && req.timeoutMs) || 55000));
     // the RUN's stop ends this call too (it ran on for up to 55 s after STOP), and its usage is booked like any media
@@ -20831,6 +21465,14 @@ async function runOnceCore(o) {
   const imageTools = makeImageTools({ openrouter: studioRoute.ok ? { apiKey: studioRoute.key, model, baseUrl: studioRoute.baseUrl, provider: studioRoute.provider, protocol: studioRoute.protocol,
     getToken: studioRoute.protocol === 'codex-responses' ? ensureCodexAccessToken : undefined,
     renewToken: studioRoute.protocol === 'codex-responses' ? forceRefreshCodexAccessToken : undefined } : null, fsp, pathMod: path, root: WORKSPACES, imageModel: String(ENV('IMAGE_MODEL') || '').trim() || undefined, auxVision: auxVisionCall, signal, onUsage: recordMediaUsage,
+    // vision-input 2026-10-23: the run's own model is the studio route's vision model only while its catalog does not call
+    // it text-only; on false, image.js asks its default vision model instead of sending the picture to a model that
+    // answers 404 "No endpoints found that support image input" on every image_analyze / browser.vision call. `m` is the
+    // model image.js will post (the `model` copied above), never the live `model`: promoteToolCapable / onFallback move
+    // that one later, and judging it sent the picture to the original text-only model. It is asked of the PRIMARY provider
+    // (studioModelProvider), never the live one: after a provider fallback the new catalog does not list `m` (null), and
+    // the picture went to the known text-only model again.
+    runModelSeesImages: (m) => ((studioModelProvider && typeof studioModelProvider.supportsImages === 'function') ? studioModelProvider.supportsImages(m) : null),
     // #118: the host list above (plan route only) and the run's own model, read at tool time (a Codex run only)
     codexHostModels: studioRoute.protocol === 'codex-responses' ? codexHostModels : undefined, codexRunModel: () => (usingCodex ? model : ''),
     // issue #77: the SAME path-trust guard fs.* gets (runPathTrust is bound below; this thunk only runs at tool time), so a
@@ -21568,6 +22210,16 @@ async function runOnceCore(o) {
          carry why and how to enable it. An unknown signal leaves the tool advertised.
      KILL SWITCH: SKYNET_TOOL_SEARCH=0 advertises everything, these included, exactly as before deferral. */
   const deferralOff = String((process.env && process.env.SKYNET_TOOL_SEARCH) || '').trim() === '0';
+  /* keys.save rides ONLY a task run whose Commander's own recent turns hold a key-shaped string. There it is ADVERTISED
+     (a model that must first think to search for it would never save the paste); on every other run it is not granted
+     at all, so the request, the deferred index and tool.search stay byte-identical to before. */
+  let keySaveOffered = false;
+  if (resolved.tools.indexOf('keys.save') >= 0) {
+    resolved.deferred = (resolved.deferred || []).filter(n => n !== 'keys.save');
+    const ownerTexts = keyOwnerTexts();
+    keySaveOffered = !!(isTask && ownerTexts && KeyTools.hasKeyCandidate(ownerTexts));
+    if (!keySaveOffered) resolved.tools = resolved.tools.filter(n => n !== 'keys.save');
+  }
   /* DIRECT-DOMAIN WITHHOLDING — what a bounded one-host check may not even see: delegation and open web search, the
      two typo-cascade routes. web_request (issue #58) and the browser stay ADVERTISED; the dispatch guards below
      confine their URL-taking calls to the named host + subdomains (DomainTask.isTargetRequest / isTargetNavigate).
@@ -21748,6 +22400,8 @@ async function runOnceCore(o) {
     deliveryOrigin: o.deliveryOrigin || (streamId ? { streamId: streamId, sessionId: streamId, sessionTitle: o.sessionTitle || '' } : null),
     authorize: userControlAuthority.authorize,
     userControl: userControlAuthority,
+    // Host-minted: the worker runs team.spawn / dispatch / resume start join THIS run's spend pool (bug d3a76db3)
+    spendPool,
     // Delegation carries a live, MCP-only authority bridge alongside the existing consent broker.
     // The worker still applies its own equipment/profile, toolset, taint and consent gates.
     connectorAuthority: {
@@ -21871,7 +22525,7 @@ async function runOnceCore(o) {
     provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, key: runKey, baseUrl, reasoningEffort });
   }
   let activeProviderId = providerId;
-  auxVisionProvider = provider;   // late-bind the aux vision route to the run's real provider (see makeImageTools above)
+  auxVisionProvider = provider; studioModelProvider = provider;   // late-bind the aux vision route + the studio model's catalog to the run's real provider (see makeImageTools above)
   let cost = makeCostEngine({ priceOf: provider.priceOf });
 
   // Settings selects from the OpenRouter catalog. Its saved model strings therefore name OpenRouter routes,
@@ -21882,8 +22536,9 @@ async function runOnceCore(o) {
   // SETTINGS→Models persisted chain (effectiveFallbackChain: saved-or-env); env SKYNET_FALLBACK_MODELS remains the
   // default when nothing is saved. On overload/5xx/404/auth/billing/rate_limit the loop retries the turn on the
   // next model instead of dying (errorClass shouldFallback/shouldRotateCredential). Empty = off.
+  // a saved chain names OpenRouter routes (see above): its batch-only ids run on their base models, like the primary's
   const fallbackModels = (Array.isArray(o.fallbackModels) ? o.fallbackModels : effectiveFallbackChain())
-    .map(s => String(s || '').trim()).filter(Boolean);
+    .map(s => chatModelId(Array.isArray(o.fallbackModels) || fallbackSaved == null ? providerId : 'openrouter', String(s || '').trim())).filter(Boolean);
   const savedProviderFallbacks = !Array.isArray(o.fallbackModels) && fallbackSaved != null && providerId !== 'openrouter' && providerId !== 'starnet'
     ? fallbackModels.splice(0).map(m => ({ provider: 'openrouter', model: m })) : [];
   for (let i = fallbackModels.length - 1; i >= 0; i--) if (fallbackModels[i] === model) fallbackModels.splice(i, 1);
@@ -21933,7 +22588,7 @@ async function runOnceCore(o) {
       if (warm) {
         activePrimaryKey = warm;
         provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, key: warm, baseUrl, reasoningEffort });
-        auxVisionProvider = provider;
+        auxVisionProvider = provider; studioModelProvider = provider;
         ordered.splice(ordered.indexOf(warm), 1);
         ordered.push(runKey);   // the cooling primary becomes the LAST resort rather than the first try
       }
@@ -21953,7 +22608,7 @@ async function runOnceCore(o) {
     const onAccount = a => a.id ? selectProvider({ provider: providerId, configDir: a.dir, reasoningEffort }) : selectProvider({ provider: providerId, reasoningEffort });
     const first = byKey.get(ordered[0]);
     activePrimaryKey = first.credKey;
-    if (first.id) { provider = onAccount(first); auxVisionProvider = provider; }
+    if (first.id) { provider = onAccount(first); auxVisionProvider = provider; studioModelProvider = provider; }
     rotationFallbacks = ordered.slice(1).map(k => { const a = byKey.get(k); return { provider: onAccount(a), providerId, model, credKey: k, account: a.label }; });
   }
   if (oauthAccounts && oauthAccounts.length > 1) {
@@ -21965,7 +22620,7 @@ async function runOnceCore(o) {
   for (const fb of rawProviderFallbacks) {
     if (!fb || typeof fb !== 'object') continue;
     const fbProviderId = normalizeProvider(fb.provider || providerId);
-    const fbModel = String(fb.model || '').trim();
+    const fbModel = chatModelId(fbProviderId, String(fb.model || '').trim());   // a batch-only id runs on its base model, like the primary's
     if (!fbModel || (fbProviderId === providerId && fbModel === model)) continue;
     const fbBaseUrl = providerRuntimeBaseUrl(fbProviderId, fb.baseUrl || fb.base_url || '');
     const fbKey = providerRuntimeKey(fbProviderId, fb.key || fb.apiKey || fb.api_key || '');
@@ -22023,7 +22678,14 @@ async function runOnceCore(o) {
   const knownRunWindow = CONTEXT_LIMIT_OVERRIDE ? 0 : await catalogRunWindow(provider, model);
   // RUN_CONTEXT_DEFAULTS (context.js): fold at 65% of the window; the verbatim tail is a TOKEN budget (20% of the
   // window), not six turns — six turns of big results outweighed a 64k window and a fold freed nothing.
-  const ctxMgr = makeContext(Object.assign({ contextLimit: CONTEXT_LIMIT_OVERRIDE || knownRunWindow || COLD_CATALOG_CONTEXT_TOKENS }, RUN_CONTEXT_DEFAULTS));
+  // THE WINDOW STOPS AT THE PRICE TIER (context-cost-1023): a model that bills a dearer rate above a prompt size the
+  // spend caps do not price (prices.js promptTierCeiling: Haiku 5.5 100K, Gemini Pro and grok 200k) works in a window of
+  // that size, so its turns fold before they cross it. The manager reads it on every use, so a fallback's route and model
+  // bring their own ceiling even when the fallback's catalog is cold. An unmetered run (a flat subscription, a local
+  // model: exempt from every $ cap, runBudget below) and an OpenRouter run (its billed usage.cost prices every tier) keep
+  // the model's whole window.
+  const runWindowCeiling = () => promptTierCeiling(activeProviderId, model, providerUnmetered);
+  const ctxMgr = makeContext(Object.assign({ contextLimit: CONTEXT_LIMIT_OVERRIDE || knownRunWindow || COLD_CATALOG_CONTEXT_TOKENS, windowCeiling: runWindowCeiling }, RUN_CONTEXT_DEFAULTS));
   // PER-RUN TOOL-OUTPUT CAP, scaled to the window. The flat 120KB cap (~30k tokens) sat far BELOW the compaction
   // threshold (0.65 × window — ~130k tokens on a 200k model), so the one event that resets the budget
   // (agent.compact, see loopEmit) could never fire: after ~120KB of reads the agent went blind — every later
@@ -22071,8 +22733,20 @@ async function runOnceCore(o) {
      first model call), each loop durable boundary (onCheckpoint below: the assistant tool-call turn before tools
      dispatch, the results after), the compaction tiers' strict drain, and run end — which then appends only what
      is left. Directive text is captured pre-loop (runTranscript.setDirective below). */
+  // A run that offers keys.save holds its rows until keys.save succeeds or the run ends (transcript-run.js o.hold), and
+  // its directive row names a saved key ([NAME saved in KEYS]) where the store's redaction would only say [redacted-secret].
+  const runTranscriptStore = keySaveOffered ? Object.assign({}, transcriptStore, {
+    appendStrict: (e) => transcriptStore.appendStrict(Object.assign({}, e, {
+      content: e && e.role === 'user' && typeof e.content === 'string' ? KeyTools.nameSavedKeys(e.content, liveServiceKeys()) : (e && e.content),
+      taint: e ? e.taint : null   // runTranscript's own stamp (taintNow()), forwarded unchanged
+    }))
+  }) : transcriptStore;
+  /* SELF-TALK IS FILED AS SELF-TALK (bug 4dee26ba). A reason-only internal run with no workstream (the quiet title, the goal
+     judge, pitch, autopilot, …) lands in the shared 'global' stream; its rows are stamped 'internal' so recall never quotes
+     them as the Commander's words (transcriptstore selfTalk). A dispatch envelope's own state wins. */
+  const transcriptState = (o.dispatchDelivery && o.dispatchDelivery.state) || (internal && !o.streamId ? 'internal' : undefined);
   const runTranscript = makeRunTranscript({
-    store: transcriptStore, streamId: o.streamId, agentId, runId, from: o.delegatedBy || '', dispatchState: o.dispatchDelivery && o.dispatchDelivery.state,
+    store: runTranscriptStore, hold: keySaveOffered ? () => !keySavedThisRun : null, streamId: o.streamId, agentId, runId, from: o.delegatedBy || '', dispatchState: transcriptState,
     // rows written after untrusted content entered this run carry its taint source (sec-taint 09-25)
     taint: () => execution.taintedBy() || (typeof o.connectorAuthority?.taintedBy === 'function' ? o.connectorAuthority.taintedBy() : null),
     // mid-run write failures never kill the run or reorder dialogue: the rows stay pending (and in the run journal)
@@ -22104,7 +22778,20 @@ async function runOnceCore(o) {
   // The dispatch receipt names where this run's charge will show (provider/model it started on, managed or not) and the
   // per-run limit it started with, so an interrupted run can be settled by the Commander from the right dashboard.
   const runReceiptMeta = () => ({ provider: providerId, model, managed: managedRun, runCapUsd });
-  const runBudget = { check: (spentThisRun) => providerUnmetered ? null : budget.check(runId, agentId, spentThisRun, Date.now(), emit, runReceiptMeta) };
+  // The run's spend pool answers first (bug d3a76db3): once this run has workers, the lead and every worker stop at
+  // their call boundary when the shared PER RUN cap is spent, and wait (a hold) while the calls in flight leave no room.
+  // Its stop is scope 'run' with the cap of the run that started the pool, so the stop line names the cap the Commander
+  // set. nextCallUsd is the most the call about to go out can cost (loop.js: its prompt plus the most output it can
+  // bill — the model's output ceiling or a reported window's room — at catalog prices): the pool reserves it while the
+  // call is in flight.
+  const runBudget = { check: (spentThisRun, nextCallUsd) => {
+    if (providerUnmetered) return null;
+    const pooled = spendPool.admit(runId, spentThisRun, nextCallUsd);
+    if (pooled) return pooled;
+    const b = budget.check(runId, agentId, spentThisRun, Date.now(), emit, runReceiptMeta);
+    if (b) spendPool.withdraw(runId);   // stopped by a day/global pool: this run's call never goes out
+    return b;
+  } };
 
   // a task needs tool calls — refuse a model we KNOW can't call tools, up front, with an actionable message
   // (supportsTools returns null when the catalog is cold, so this never false-refuses a real model).
@@ -22434,6 +23121,9 @@ async function runOnceCore(o) {
     // A name no registered tool answers to: the registry's "unknown tool" reply names the closest tools THIS run can
     // call (advertised + deferred wire names), never an ungranted one (loop-breaker.js counts these as strikes).
     if (!liveTool) dctx = Object.assign({}, dctx, { toolNames: Array.from(fromWire.keys()) });
+    // FILES BEFORE THE SHELL (2026-10-25): a shell.exec path refusal names fs_read / fs_list / fs_search as the way in only
+    // when THIS run carries them — an agent without an INTEL CAB is never sent to a tool it does not have
+    if (c.name === 'shell.exec' && fromWire.has('fs_read')) dctx = Object.assign({}, dctx, { fileToolsOnWire: true });
     // CREW SEATED MID-TASK START FROM THE ANSWERS (review 10-14): station.control hands group.add what the Commander already
     // answered in this run's Task Brief (host-composed, their own words), so the kickoff in the group never re-asks it
     if (/^station[._]control$/.test(String(c.name || '')) && taskBriefState && taskBriefState.brief) {
@@ -22699,9 +23389,18 @@ async function runOnceCore(o) {
     + 'After any action that changes the world, VERIFY it took effect with a read-back tool (e.g. now-playing after play, a listing after a write, a probe after a start) before reporting done. '
     + 'A tool error is information: read it and change strategy — never repeat the identical failing call. Escalate automatically through safe authorized routes, and disclose a more visible or consequential route when its own consent boundary requires it. '
     + 'Blocked sites, dead links and throttled engines are ordinary web weather: route around them, and mention an obstacle in your reply only if it changed the outcome — never narrate routine obstacles as failures, and never apologize for them. ';
+  /* FILES BEFORE THE SHELL (2026-10-25, a v0.14.0 report on gpt-5.6-luna): this block used to OPEN with "when the Commander
+     names a local project folder, first anchor shell_exec.cwd", and the file tools came up only as "inspect before editing" —
+     so with an INTEL CAB and a WORKBENCH both on the wire a Codex-trained model listed and read files with dir / Select-String /
+     type: an approval card per read, and a C:\ path refused AFTER its card read as "the files are inaccessible". Reading is
+     the file tools' job (they take a full path); the shell runs things. Paid for in place (payload.budget had ~20 chars of
+     headroom): the shell-listing diagnostic is gone from both lines, and the "no Bash-style /c paths" sentence that sat
+     further down rides the cwd rule it was about. */
   const workDisciplineNote = ''
-    + (hasShellExec ? 'When the Commander names a local project folder, first anchor shell_exec.cwd to that exact folder, then keep later shell paths relative to it. After a path or cwd failure, run one small working-directory diagnostic plus a listing, and change strategy instead of retrying the same bad path. ' : '')
-    + (hasReadTools ? 'Inspect before editing with fs_search/fs_list/fs_read, or one small shell diagnostic when the file tools cannot see the project; do not guess file contents or shotgun failed paths. ' : '')
+    + (hasReadTools ? 'Read, list and search files with fs_read / fs_list / fs_search, full paths the Commander names included'
+      + (hasShellExec ? ', not shell_exec (dir, type, cat, Get-Content, Select-String): the shell is for running tests, builds, git and scripts' : '') + '. ' : '')
+    + (hasShellExec ? 'To run commands in a folder the Commander names, anchor shell_exec.cwd to that exact folder as given (never a guessed Bash-style /c path) and use relative paths; after a path or cwd failure, change strategy instead of retrying the same bad path. ' : '')
+    + (hasReadTools ? 'Inspect before editing with fs_search/fs_list/fs_read; do not guess file contents or shotgun failed paths. ' : '')
     + (hasWriteTools ? (hasPatchTool
       ? 'For source changes, prefer fs_patch for multi-line edits and fs_edit only for small exact replacements. Avoid temporary patch scripts, giant quoted shell rewrites, or minified/quoting-mangled edits unless the normal file tools cannot do the job; leave code readable. '
       : 'For source changes, prefer fs_edit/fs_write over giant quoted shell rewrites, and leave code readable. ') : '')
@@ -22749,7 +23448,6 @@ async function runOnceCore(o) {
       + (hasWriteTools ? 'Save substantive deliverables (reports, code, notes) to your workspace with fs_write / fs_append. ' : '')
       + (hasNotebookWrite ? 'Save explicit preferences, corrections, and approved reusable design requirements with notebook_write before claiming they are remembered. Read an existing memory before correcting it; use replaceId and previousBody to update it rather than appending an opposite fact. Pin approved requirements within their intended scope, retain artifact/reference paths, and re-read approved artifacts before making variants. Current user instructions override recalled context. ' : '')
       + workDisciplineNote
-      + (hasShellExec ? 'Do not guess Bash-style /c paths for Windows when the Commander gave you a real Windows path. ' : '')
       + (hasWriteTools ? 'Saving a file shows the Commander a quick one-click approval prompt — so just CALL the write tool when you are ready; do not ask permission in chat or claim you cannot save. If they decline, carry on without it. ' : '')
       + 'Keep working across as many tool calls as the task needs; when it is fully done, give the Commander a clear '
       + 'final report of what you found/did' + (hasWriteTools ? ' and which files you saved.' : '.')
@@ -22928,6 +23626,8 @@ async function runOnceCore(o) {
   // An owner-trusted chat-app turn (the Commander on their phone) gets only a pointer to manual.read — never the 6K index.
   const manualBlock = (isTask && surface === 'interactive') ? (coreNames.indexOf('manual.read') >= 0 ? starnetManualIndex() : starnetManual())
     : (isTask && ownerTrusted && coreNames.indexOf('manual.read') >= 0) ? starnetManualPointer() : '';
+  // A terminal (CLI) task turn gets the terminal pointer instead: the desktop manual's "open X / place Y" has no meaning there.
+  const operatorManual = (isTask && o.viewer === 'terminal') ? starnetManualTerminal() : manualBlock;
   const runtimeVersion = computeVersionSurface();
   const runtimeBlock = runtimeIdentityBlock({ provider: providerId, model, agentId, runId, surface, trigger, fallbackModels, harness: runtimeVersion.harness, app: runtimeVersion.app, now: Date.now(), shell: shellRuntime });
   // RUNTIME SKILL LIBRARY (skill-builder-gap): index the agent's own authored skills + preload any it invokes,
@@ -23098,13 +23798,13 @@ async function runOnceCore(o) {
   // Cache only the reusable prefix across runs. All task-specific context still follows verbatim;
   // the explicit Claude boundary precedes changing context, while runtime identity remains last
   // for generic providers that automatically reuse matching prefixes.
-  const cacheSystemPrefix = (system || '') + toolNote + teamNote + manualBlock
+  const cacheSystemPrefix = (system || '') + toolNote + teamNote + operatorManual
     // A tool deferred as CERTAINLY unavailable (resolved.unavailable: no image connection, no Spotify token, no PTY...)
     // is not a power this run has, even though it stays searchable. The ground-truth block must not claim it while the
     // unavailable line above says it can't work. Connector tools deferred only for SIZE still work via tool_search.
     + summarizeCapabilities((resolved.unavailable && Object.keys(resolved.unavailable).length)
         ? Object.assign({}, resolved, { tools: resolved.tools.filter(n => !Object.prototype.hasOwnProperty.call(resolved.unavailable, n)) })
-        : resolved, { surface, ownerTrusted, unrestrictedHost: unrestrictedHostNow(), delegatedBy: o.delegatedBy || '', toolless: !isTask,
+        : resolved, { surface, ownerTrusted, unrestrictedHost: unrestrictedHostNow(), delegatedBy: o.delegatedBy || '', viewer: o.viewer || '', toolless: !isTask,
           // ROOM SCOPE facts: the TOOLSETS switches resolveTools applied and the routine's own toolset list enforceEnabledToolsets
           // applied (gear either one leaves out is no room fix), and the image route makeImageTools was built from (without one
           // a STUDIO only analyzes images)
@@ -23398,6 +24098,12 @@ async function runOnceCore(o) {
         || (name === 'agent.run.end' && payload.reason === 'cancelled')) briefAnswerHold = null;
     }
     execution.observeToolEvent(name, payload);
+    // SPEND POOL (bug d3a76db3): each reconciled cost lands in the shared pool as it is booked, so a worker that starts
+    // while this run is mid-turn sees its latest call; the first tool call after a model call means that call is over
+    if (payload && payload.runId === runId) {
+      if (name === 'agent.cost' && !providerUnmetered) spendPool.booked(runId, Number(payload.usd) || 0);
+      else if (name === 'agent.tool_call') spendPool.idle(runId);
+    }
     // LINE WATCH: the loop's own run.start is the normal path's — it must name the bay/crate like every early-exit
     // start above does, or the floor pairs a multi-bay agent's run with its OLDEST crate and lights the wrong bay.
     // (and a voice turn's route, so COMMS can say once why a voice model was passed over)
@@ -23718,13 +24424,23 @@ async function runOnceCore(o) {
     const backfilled = Math.max(0, ((result && result.usd) || 0) - (mediaUsd || 0)) === 0 && finalUsd > (mediaUsd || 0);
     const runUnpriced = !runUnmetered && !backfilled && Array.isArray(result && result.unpricedUsage)
       && result.unpricedUsage.some(u => ((Number(u && u.tokensIn) || 0) + (Number(u && u.tokensOut) || 0)) > 0);
-    try { ledger.record({ runId, agentId, turns: finalTurns, usd: finalUsd, tokens: finalTokens, cachedTokens: finalCachedTokens, model: finalModel, unmetered: runUnmetered && mediaUsd === 0, unpriced: runUnpriced }); } catch (_) {}
+    /* A STOP MID-ANSWER IS NOT A KNOWN FIGURE (bug 80de2a75). The Stop cut a model call off after it began streaming
+       (loop.js streamCut), so that call's usage never arrived and the booked spend is short of what the provider bills.
+       Both rows say so with usageMissing (additive: usd is a floor, the booked part still counts everywhere). A run that
+       booked nothing at all also carries spendUnknown on its run row, so no reader shows it as a $0 run. Never the
+       'unpriced' flag: that one means "no published price", which is not true of these models. */
+    const usageMissing = !runUnmetered && !!result && result.reason === 'cancelled' && result.streamCut === true;
+    const cutSpendUnknown = usageMissing && !(finalUsd > 0) && !(finalTokens > 0);
+    try { ledger.record({ runId, agentId, turns: finalTurns, usd: finalUsd, tokens: finalTokens, cachedTokens: finalCachedTokens, model: finalModel, unmetered: runUnmetered && mediaUsd === 0, unpriced: runUnpriced, usageMissing }); } catch (_) {}
+    // the shared PER RUN pool takes this run's final spend before the run that started it reads the result (d3a76db3)
+    spendPool.settle(runId, runUnmetered ? 0 : finalUsd);
     // managed-credit SETTLE: reconcile the reservation to the real spend — refund the unused headroom to the
     // account (billing.js caps finalUsd at the reservation). Inert/no-op unless this run actually reserved credit.
     if (billed) { try { credits.finishRun({ runId, agentId, usd: finalUsd, tokens: finalTokens, turns: finalTurns, reason: (result && result.reason) || 'done' }); } catch (_) {} }
     // record the run OUTCOME (durable history) — reason + a short title from the triggering user message. Fail-open.
     try {
-      const title = o.syntheticTrigger ? String(o.sessionPrompt || '') : latestUserText(msgs);   // synthetic reviews are not Commander messages
+      // synthetic reviews are not Commander messages; a key saved from the message (keys.save) is named, never kept
+      const title = KeyTools.nameSavedKeys(o.syntheticTrigger ? String(o.sessionPrompt || '') : latestUserText(msgs), liveServiceKeys());
       let deliveryText = '';
       if (o.sessionTitle && result && Array.isArray(result.messages)) {
         for (let i = result.messages.length - 1; i >= 0; i--) {
@@ -23736,7 +24452,7 @@ async function runOnceCore(o) {
         }
       }
       const runEndedAt = Date.now();
-      runStore.record({ runId, parentRunId: o.parentRunId || '', delegatedBy: o.delegatedBy || '', agentId, provider: activeProviderId, reason: ((result && result.reason) || 'done'), clarifying: taskQuestionAsked, turns: finalTurns, tokens: finalTokens, cachedTokens: finalCachedTokens, usd: finalUsd, title: title, streamId: o.streamId || '', sessionTitle: o.sessionTitle || '', deliveryPrompt: o.syntheticTrigger ? '' : (o.sessionPrompt || ''), deliveryText, dispatchDelivery: o.dispatchDelivery, recipeId: o.recipeId || '', projectRoot: o.projectRoot || '', deliverable: deliverableNotes.take(runId), model: finalModel, reasoningEffort: internalEffortRan() || reasoningEffort, unmetered: runUnmetered && mediaUsd === 0, unpriced: runUnpriced, artifacts: execution.artifactList(), toolsOk: execution.toolsOk(), toolTrace: execution.toolTraceList(), failureStage: execution.failureStage(), failureCode: execution.failureCode(), uncertainMutations: execution.uncertainMutations(), cancelledWhile: (result && result.cancelledWhile) || null, completionEvidence: finalCompletionEvidence, recoveryAttempts: execution.recoveryAttempts(), startedAt: runStartedAt, endedAt: runEndedAt, durationMs: runEndedAt - runStartedAt, identityFallback, internal, surface, ownerDirective, recoveryOf: o.recovery ? String(o.recovery.sourceRunId || '') : '', handoffEdited: o.handoffEdited === true, stepTest: o.stepTest === true, lineId: o.lineId || '', dockId: o.dockId || '', cronJobId: trigger === 'schedule' ? String(o.cronJobId || '') : '', pageClosed: pageClosedRuns.get(runId) || null, steerNotes: steerBufs.ledgerOf(runId), taintedBy: execution.taintedBy() || '' });   // execution terminal stays separate from the neutral Task Brief outcome used by progression; recoveryOf links a continuation to the interrupted run it resumed
+      runStore.record({ runId, parentRunId: o.parentRunId || '', delegatedBy: o.delegatedBy || '', agentId, provider: activeProviderId, reason: ((result && result.reason) || 'done'), clarifying: taskQuestionAsked, turns: finalTurns, tokens: finalTokens, cachedTokens: finalCachedTokens, usd: finalUsd, title: title, streamId: o.streamId || '', sessionTitle: o.sessionTitle || '', deliveryPrompt: o.syntheticTrigger ? '' : (o.sessionPrompt || ''), deliveryText, dispatchDelivery: o.dispatchDelivery, recipeId: o.recipeId || '', projectRoot: o.projectRoot || '', deliverable: deliverableNotes.take(runId), model: finalModel, reasoningEffort: internalEffortRan() || reasoningEffort, unmetered: runUnmetered && mediaUsd === 0, unpriced: runUnpriced, usageMissing, spendUnknown: cutSpendUnknown, artifacts: execution.artifactList(), toolsOk: execution.toolsOk(), toolTrace: execution.toolTraceList(), failureStage: execution.failureStage(), failureCode: execution.failureCode(), uncertainMutations: execution.uncertainMutations(), cancelledWhile: (result && result.cancelledWhile) || null, completionEvidence: finalCompletionEvidence, recoveryAttempts: execution.recoveryAttempts(), startedAt: runStartedAt, endedAt: runEndedAt, durationMs: runEndedAt - runStartedAt, identityFallback, internal, surface, ownerDirective, recoveryOf: o.recovery ? String(o.recovery.sourceRunId || '') : '', handoffEdited: o.handoffEdited === true, stepTest: o.stepTest === true, lineId: o.lineId || '', dockId: o.dockId || '', cronJobId: trigger === 'schedule' ? String(o.cronJobId || '') : '', pageClosed: pageClosedRuns.get(runId) || null, steerNotes: steerBufs.ledgerOf(runId), taintedBy: execution.taintedBy() || '' });   // execution terminal stays separate from the neutral Task Brief outcome used by progression; recoveryOf links a continuation to the interrupted run it resumed
 
       // P0.1/H1.1: persist the full DIALOGUE (not just the outcome) — a durable server-side transcript for EVERY
       // run, incl. headless ones (cron/Telegram/delegated). Append the triggering user directive, then EVERY new
@@ -23762,8 +24478,8 @@ async function runOnceCore(o) {
           console.warn('[run-journal] retained unsettled run for review:', runId, retirement.state && retirement.state.status);
         }
       } else {
-        if (title && !retryDirective && !o.syntheticTrigger && !runTranscript.directiveWritten()) transcriptStore.append({ streamId: o.streamId, agentId, role: 'user', taint: execution.taintedBy() || null, content: title, from: o.delegatedBy || undefined, sourceRunId: o.dispatchDelivery ? runId : undefined, dispatchState: o.dispatchDelivery && o.dispatchDelivery.state });
-        if (result && Array.isArray(result.messages)) transcriptStore.appendNew(o.streamId, agentId, result.messages, { taint: execution.taintedBy(), sourceRunId: o.dispatchDelivery ? runId : undefined, dispatchState: o.dispatchDelivery && o.dispatchDelivery.state });
+        if (title && !retryDirective && !o.syntheticTrigger && !runTranscript.directiveWritten()) transcriptStore.append({ streamId: o.streamId, agentId, role: 'user', taint: execution.taintedBy() || null, content: title, from: o.delegatedBy || undefined, sourceRunId: o.dispatchDelivery ? runId : undefined, dispatchState: transcriptState });
+        if (result && Array.isArray(result.messages)) transcriptStore.appendNew(o.streamId, agentId, result.messages, { taint: execution.taintedBy(), sourceRunId: o.dispatchDelivery ? runId : undefined, dispatchState: transcriptState });
       }
     } catch (_) {}
     transcriptLiveRuns.delete(runId);   // H2: settled (or retained in the journal) — its rows are ordinary history now
@@ -23871,9 +24587,11 @@ async function runOnceCore(o) {
   // failure-review: reflection's exact gate shape on the FAILURE side — o.reflect (real-work hosts only; delegated
   // workers stay off), the live config master-switch, the personalization PAUSE (checked here so a paused station
   // never even offers the candidate — runFailureReview re-checks the same authority), a salience floor (≥1 tool
-  // call or ≥2 turns: an instant stub teaches nothing), the in-flight guard, and its own per-agent cooldown.
+  // call or ≥2 turns: an instant stub teaches nothing), the in-flight guard, and its own per-agent cooldown. A run the
+  // PROVIDER refused (Failreview.providerRefused) is never reviewed on it: same content, same refusal (xai-403-1023).
   const _gateFailReview = !!(o.reflect && memoryConfig.failureReviewEnabled && _auxFail
       && Failreview.failureSalient({ toolTrace: execution.toolTraceList(), turns: (result && result.turns) || 0 })
+      && !Failreview.providerRefused({ failureStage: execution.failureStage(), failureCode: execution.failureCode(), unsupportedPart: !!(result && result.failureUnsupportedPart) }, { separateModel: !!reflectModel })
       && personalizationStore.read().enabled
       && !failReviewingNow.has(agentId) && (Date.now() - (lastFailReviewAt.get(agentId) || 0) >= memoryConfig.failureReviewCooldownMs));
   const _gateStudy = !!(Study && o.reflect && memoryConfig.studyEnabled && isTask && _auxDone && !_lineHop && Study.studySalient(result.messages, o.recurring)
@@ -24071,6 +24789,8 @@ async function handleConsent(req, res) {
     if (!persisted) decision = 'deny';
   }
   if (finish) finish(decision);
+  // answered from the terminal: the page that shows this card is told on the run's own stream (askHuman's announce)
+  if (finish && body.via === 'terminal' && typeof finish.announce === 'function') finish.announce(decision);
   /* GONE (soak 10-15): the station holds no such ask any more — answered on another surface, expired, withdrawn, or lost to
      a restart. Said apart from a refusal (additive), so a surface that still shows its keys lets it go and says it is no
      longer waiting, instead of "try again" on a key nothing can answer. Never said while the ask still waits under another
@@ -24094,6 +24814,7 @@ async function handleConsentAnswer(req, res) {
   const pend = pendingByRun.get(body.runId);
   const finish = pend && pend.get(body.promptId);
   if (finish && text) finish({ __clarify: true, text });
+  if (finish && text && body.via === 'terminal' && typeof finish.announce === 'function') finish.announce('once');   // the desk's question card lets go
   if(body.receipt === true) return respondJson(res,200,{ok:!!(finish && text)});
   res.writeHead(200); res.end('ok');
 }
@@ -24827,7 +25548,8 @@ function openAskCount() {
   return n;
 }
 async function awayBriefingInputs(since, now, tzOffsetMin) {
-  let runs = []; try { runs = runStore.list(null, { limit: 500, since: Math.max(0, since - 1) }) || []; } catch (_) { runs = []; }
+  // a deleted session's runs are not reported back (qa/bugs/3e926b6a)
+  let runs = []; try { runs = (runStore.list(null, { limit: 500, since: Math.max(0, since - 1) }) || []).filter(r => !sessionRunForgotten(r)); } catch (_) { runs = []; }
   // the run row keeps deliveryText only for session-scoped runs; a routine/loop's own words live in its durable
   // transcript — read the LAST assistant turn of each briefed stream (bounded) so the excerpt is the run's real output.
   // Read ONCE per stream: every iteration of a loop shares its loop- stream, so 50 overnight iterations were 50 reads
@@ -25164,7 +25886,7 @@ async function handleLiveDoctor(req, res) {
 
   // SELECTED MODEL: one tiny inference through the exact provider adapter + credential source a normal run uses.
   const providerId = normalizeProvider((rec && rec.provider) || (runtimeKey ? 'openrouter' : (codexTokens && codexTokens.access_token ? 'codex' : 'openrouter')));
-  const model = String((rec && rec.model) || '').trim();
+  const model = chatModelId(providerId, String((rec && rec.model) || '').trim());   // the model a run really uses (a saved :batch id runs on its base)
   const reasoningEffort = resolveReasoningEffort(providerId, rec && rec.reasoningEffort);
   targets.push({ kind: 'provider', id: providerId, label: providerId + (model ? ' / ' + model : ''), probe: async () => {
     const profile = getProviderProfile(providerId);
@@ -26248,7 +26970,8 @@ async function listModelsForProvider(providerId, opts) {
     provider = selectProvider({ provider: id, fetch: globalThis.fetch, key, baseUrl });
   }
   const models = await provider.listModels();
-  return models.filter(item => ImageTask.isAgentModel(id, item && item.id));
+  // a batch-only variant (providers/provider.js isBatchOnlyModel) can never run a chat turn: no picker or CLI offers one
+  return models.filter(item => ImageTask.isAgentModel(id, item && item.id) && !isBatchOnlyModel(id, item && item.id));
 }
 
 async function handleProviderModels(req, res) {
@@ -26264,7 +26987,16 @@ async function handleProviderModels(req, res) {
   if (!getProviderProfile(id)) return json(404, { models: [], error: 'unknown provider' });
   try {
     const models = await listModelsForProvider(id, { baseUrl });
-    json(200, { provider: id, models: models.map(publicModel) });
+    // runWindow (context-cost-1023): the window a run on THIS route works in — the model's own, stopped at the
+    // long-context price tier the spend caps do not price (prices.js promptTierCeiling, as runOnceCore sizes the run's
+    // context manager). /compress names it, so "Chat memory" never measures against a 1M window a run folds inside 200k.
+    const unmetered = !!(getProviderProfile(id) || {}).unmetered;
+    json(200, { provider: id, models: models.map(m => {
+      const row = publicModel(m);
+      const tier = promptTierCeiling(id, row.id, unmetered);
+      if (row.context_length > 0) row.runWindow = (tier > 0 && tier < row.context_length) ? tier : row.context_length;
+      return row;
+    }) });
   } catch (e) {
     json(200, { provider: id, models: [], error: (e && e.message) || 'model catalog unavailable', code: (e && e.code) || '' });
   }
@@ -27019,7 +27751,10 @@ function serveSaveLoad(req, res) {
     // path can disclose a damaged/restored save instead of silently presenting the pristine first-run ceremony.
     // EL-11 FIX 1 (GB-9): also surface workspaceDegraded at boot-read time, not only on the first refused write.
     const recovery = (typeof saveStore.recoveryNotice === 'function') ? (saveStore.recoveryNotice(agent) || null) : null;
-    json(200, { save: doc || null, recovery: recovery, lineage: publicWorkspaceLineage(), degraded: workspaceDegraded ? true : undefined });
+    // head: the window that wrote this save and its request time, when the store can prove it (savestore vouchedHead) — a
+    // reopening page compares its own cached save against it (cloudsave reconcile)
+    json(200, { save: doc || null, head: state.head ? { client: state.head.client, requestUpdatedAt: state.head.at, revision: state.head.revision } : undefined,
+      recovery: recovery, lineage: publicWorkspaceLineage(), degraded: workspaceDegraded ? true : undefined });
   } catch (e) { json(503, { error: 'Could not read the saved station. Retry to recover it.', unreadable: true }); }
 }
 // POST /api/save/recovery-ack { agent? } — the frontend has SHOWN the honest quarantine/recovery notice; clear
@@ -27031,6 +27766,173 @@ async function handleSaveRecoveryAck(req, res) {
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(agent)) return json(400, { error: 'agentId must be 1-40 chars of [A-Za-z0-9_-]' });
   try { json(200, { ok: true, cleared: !!saveStore.clearRecoveryNotice(agent) }); }
   catch (e) { json(200, { ok: false, error: (e && e.message) || 'ack failed' }); }
+}
+// GET /api/save/conflicts[?after=<ms>] — the window saves a refused write preserved beside the station file, for the boot
+// offer (support report 2026-10-21): newest first, each with how many of its sessions a restore would bring back, STOPPING
+// at the first one that would bring any back. Read-only; never the docs themselves.
+// COST (review 10-23 #3d: every boot parsed every snapshot and deep-cloned the station per file, 787 ms of sidecar thread):
+// nothing preserved = one readdir; the station is read only when a snapshot is; a snapshot found to bring nothing back
+// (all there, deleted on purpose, or erased work) is SETTLED in the store's durable memo and not read again while it is
+// unchanged, across app launches too (r2 #4/#5); after the first snapshot, no further one is read once ~30 ms of snapshot
+// reading have passed (`more: true`: the page asks again and carries on past the ones settled here).
+// NOT NOW is a watermark (r2 #6): `after` = the newest dismissed copy's time; nothing saved at or before it is offered.
+// DELETED sessions: the sidecar's own uncapped ledger (session-tombstones.js) is consulted, time-scoped, not only the
+// save's capped list.
+function serveSaveConflicts(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  try {
+    const after = Math.floor(Number(new URL(req.url, 'http://127.0.0.1').searchParams.get('after')) || 0);
+    const all = saveStore.conflictFiles('agent');
+    const settled = saveStore.settledConflicts('agent');
+    const files = all.filter(f => Math.floor(f.mtimeMs) > after && !settled(f));
+    if (!files.length) return json(200, { conflicts: [] });
+    const state = saveStore.loadState('agent');
+    if (state.status === 'unreadable') return json(503, { error: 'Saved station is temporarily unreadable. Retry to recover it.', unreadable: true });
+    const restore = require('./save-restore.js');
+    const tombs = (typeof sessionTombstones !== 'undefined' && sessionTombstones && typeof sessionTombstones.forgotten === 'function') ? sessionTombstones : null;
+    const forgotten = tombs ? ((id, ts) => tombs.forgotten(id, ts)) : null;
+    const conflicts = [], settle = [];
+    let more = false, read = 0;
+    const started = Date.now();   // the budget is for snapshots: a big station's own read never spends it (r2 #5)
+    for (const f of files) {
+      if (read && Date.now() - started > 30) { more = !!state.doc; break; }   // no station = nothing settles: never "more"
+      read++;
+      const got = saveStore.readConflictState('agent', f.name);
+      // a copy that could not be READ this instant (locked, EBUSY/EACCES) may still hold lost work: never settled — settling it
+      // hid it from every later boot while it stayed unchanged — and never `more` either (a copy that stays unreadable made
+      // the page ask 25 times, each ask re-reading the whole station: re-review N2). A later boot reads it again.
+      if (got.status === 'unreadable') continue;
+      const doc = got.doc;
+      if (!doc) { if (state.doc) settle.push(f); continue; }   // gone, or does not parse: nothing it could offer
+      // a copy from before a station RESET, while the station is from after it, is erased work: listed, never offered back
+      const predatesReset = saveStore.predatesReset(doc, state.doc);
+      const n = state.doc && !predatesReset ? restore.restorable(state.doc, doc, { forgotten }) : 0;
+      conflicts.push({ file: f.name, savedAt: f.mtimeMs, sessions: Array.isArray(doc.workstreams) ? doc.workstreams.length : 0,
+        restorable: n, ...(predatesReset ? { predatesReset: true } : {}) });
+      if (n > 0) break;
+      if (state.doc) settle.push(f);   // nothing to bring back into this station (erased work included): settled
+    }
+    if (settle.length) saveStore.settleConflicts('agent', settle, all.map(f => f.name));
+    json(200, { conflicts, ...(more ? { more: true } : {}) });
+  } catch (e) { json(503, { error: 'Could not read the preserved saves. Retry.', unreadable: true }); }
+}
+// POST /api/save/conflicts/restore { file } — bring that preserved save's sessions into the station. Additive only
+// (save-restore.js): nothing the station holds is removed. The station file is copied aside first, and the merged save
+// is written as the station's next revision, so any open window's next save is refused and preserved, never lost.
+// Afterwards that copy holds nothing the station lacks: it is settled for the boot offer (r2 #5).
+async function handleSaveConflictRestore(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 4096)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  const file = String(body.file || '');
+  if (!/^agent\.save-conflict-[A-Za-z0-9_-]{1,80}\.json$/.test(file)) return json(400, { error: 'file must name a preserved save' });
+  if (workspaceDegraded) return json(200, { ok: false, error: 'workspace written by newer StarNet', degraded: true });
+  try {
+    const state = saveStore.loadState('agent');
+    if (state.status === 'unreadable') return json(200, { ok: false, error: 'the station file is unreadable right now', unreadable: true });
+    if (!state.doc) return json(200, { ok: false, error: 'there is no station file to restore into' });
+    const row = saveStore.conflictFiles('agent').find(f => f.name === file);   // its stat BEFORE the read: what gets settled
+    const preserved = saveStore.readConflict('agent', file);
+    if (!preserved) return json(200, { ok: false, error: 'that preserved save is gone' });
+    if (saveStore.predatesReset(preserved, state.doc)) return json(200, { ok: false, error: 'that copy is from before this computer’s station was reset', predatesReset: true });
+    // a session the Commander deleted stays deleted: the sidecar's own uncapped ledger (time-scoped), not only the save's list
+    const tombs = (typeof sessionTombstones !== 'undefined' && sessionTombstones && typeof sessionTombstones.forgotten === 'function') ? sessionTombstones : null;
+    const r = require('./save-restore.js').plan(state.doc, preserved, { forgotten: tombs ? ((id, ts) => tombs.forgotten(id, ts)) : null });
+    const settle = () => { try { if (row) saveStore.settleConflicts('agent', [row]); } catch (e) { failNote('save.restore.settle', e); } };
+    if (!r.added.length && !r.extended.length && !r.copied.length) { settle(); return json(200, { ok: true, added: 0, extended: 0, copied: 0, revision: Number(state.doc._saveRevision) || 0 }); }
+    const at = Date.now();
+    const backup = saveStore.backup('agent', 'restore-' + at);
+    const doc = Object.assign(r.doc, { updatedAt: Math.max(at, (Number(state.doc.updatedAt) || 0) + 1), _saveClient: 'restore-' + at, _saveDirty: false });
+    const result = saveStore.save('agent', doc, { compareRevision: true });
+    if (!result || result.ok !== true) return json(200, { ok: false, error: result && result.conflict ? 'the station changed during the restore; try again' : 'the station refused the restore', backup });
+    try { seedSaveMemos('agent', doc); } catch (e) { failNote('save.restore.seed-memos', e); }
+    settle();
+    json(200, { ok: true, added: r.added.length, extended: r.extended.length, copied: r.copied.length, revision: result.revision, backup });
+  } catch (e) { json(200, { ok: false, error: (e && e.message) || 'restore failed' }); }
+}
+/* POST /api/save/adopt { ...envelope, _saveAdoptBy } — a reopening window's unsent save that cannot land as it is (support
+   reports 10-15…10-25: one window, the station "went back", every save refused as another window's). The window's browser
+   cache held work on another revision than the station file: from a build that never named the window that wrote it
+   (0.14.0 and earlier), behind a head another window or a terminal wrote, or reading older than its own window's head.
+   Refusing it froze the station file for the whole session. Instead, at boot only, before the window resumes:
+     • THE BASE is the station file whenever the store can name its writer (savestore vouchedHead) — unless that writer is
+       this very window and its cached save is newer than that write (its own later work). Only a station file that cannot
+       name its writer (written before 0.14.1) gives the base to whichever side was saved last. A stale second tab is never
+       the base over a live one (hostile review 10-25 #2);
+     • every session of the other side comes back into the base (save-restore.js: additive — a session deleted on purpose
+       stays deleted, a diverged conversation is kept beside as a restored copy);
+     • the station file is copied aside first (<agent>.save-before-adopt-<ms>.json) and, when it is the base, the window's
+       whole save is kept beside it under its own name (agent.save-conflict-kept-<ms>-<window>.json), so nothing either
+       side held is lost;
+     • the station's growth projection never goes back (its rating watermark is kept when it is ahead), and a terminal's
+       approval change (the head written by `approval-…`) keeps its approval modes;
+     • a merge that would bring nothing into the station file writes nothing (a second window booting on the same old
+       cache must not move the station under the first), and one too big for POST /api/save to take is refused;
+     • the merge is written as `adopt-<the asking page's id>` (_saveAdoptBy, a wire field only): never as that page or the
+       cached window, so no later save of either can pass for the merge's own writer (review #1), and a page whose answer
+       never came can tell its own merge landed;
+     • a copy of another station (another founding) or from before this computer's station was reset is refused.
+   Answers { ok, revision, updatedAt, doc, base, added, extended, copied, backup, kept }: the window resumes `doc`. Any
+   refusal ({ ok:false, … }) leaves the station file untouched; the window then takes the ordinary path (its save is preserved
+   as a conflict copy). */
+function keepStationGrowth(doc, station) {
+  const mark = d => Math.max(0, Number(d && d.stationStats && d.stationStats.ratingSyncAt) || 0);
+  if (!(mark(station) > mark(doc))) return;
+  doc.stationStats = station.stationStats;
+  const rows = d => [d && d.agent].concat(Array.isArray(d && d.agents) ? d.agents : []).filter(x => x && typeof x === 'object');
+  const theirs = new Map(rows(station).map(x => [String(x.id || ''), x]));
+  for (const row of rows(doc)) { const s = theirs.get(String(row.id || '')); if (s && Object.prototype.hasOwnProperty.call(s, 'stats')) row.stats = s.stats; }
+}
+function keepTerminalApprovals(doc, station) {
+  if (!/^approval-/.test(String(station && station._saveClient || ''))) return;
+  const rows = d => [d && d.agent].concat(Array.isArray(d && d.agents) ? d.agents : []).filter(x => x && typeof x === 'object');
+  const theirs = new Map(rows(station).map(x => [String(x.id || ''), x]));
+  for (const row of rows(doc)) { const s = theirs.get(String(row.id || '')); if (s && (s.approvalMode === 'full' || s.approvalMode === 'ask')) row.approvalMode = s.approvalMode; }
+}
+async function handleSaveAdopt(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body; try { body = JSON.parse(await readBody(req, 16 << 20)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || body.schema !== 'starnet.save' || !body.agent || typeof body.agent !== 'object') return json(400, { error: 'a save envelope object is required' });
+  const by = /^[A-Za-z0-9_-]{1,72}$/.test(String(body._saveAdoptBy || '')) ? body._saveAdoptBy : null;
+  if (Object.prototype.hasOwnProperty.call(body, '_saveAdoptBy')) { body = Object.assign({}, body); delete body._saveAdoptBy; }
+  if (workspaceDegraded) return json(200, { ok: false, error: 'workspace written by newer StarNet', degraded: true });
+  try {
+    const state = saveStore.loadState('agent');
+    if (state.status === 'unreadable') return json(200, { ok: false, error: 'the station file is unreadable right now', unreadable: true });
+    const station = state.doc;
+    if (!station) return json(200, { ok: false, error: 'there is no station file to merge into', absent: true });   // the ordinary save seeds it
+    if (Number(station.version) > Number(body.version)) return json(200, { ok: false, error: 'the station file is a newer save format' });
+    if (saveStore.predatesReset(body, station)) return json(200, { ok: false, error: 'that copy is from before this computer’s station was reset', predatesReset: true });
+    // a copy of ANOTHER station (a different founding) is never merged into this one
+    const founded = d => Number(d && d.agent && d.agent.createdAt);
+    if (!(founded(body) === founded(station) || (Number.isNaN(founded(body)) && Number.isNaN(founded(station))))) return json(200, { ok: false, error: 'that copy is of another station', otherStation: true });
+    const writer = /^[A-Za-z0-9_-]{1,80}$/.test(String(body._saveClient || '')) ? body._saveClient : null;   // the cached save's window (none: before 0.14.1)
+    const head = state.head || null;   // the station file's writer, when the store can prove it
+    const windowBase = head ? (!!writer && writer === head.client && Number(body.updatedAt) > Number(head.at)) : Number(body.updatedAt) > Number(station.updatedAt);
+    const base = windowBase ? Object.assign({}, body) : station, other = windowBase ? station : body;
+    const tombs = (typeof sessionTombstones !== 'undefined' && sessionTombstones && typeof sessionTombstones.forgotten === 'function') ? sessionTombstones : null;
+    const r = require('./save-restore.js').plan(base, other, { forgotten: tombs ? ((id, ts) => tombs.forgotten(id, ts)) : null });
+    const doc = r.doc;
+    if (windowBase) { keepStationGrowth(doc, station); keepTerminalApprovals(doc, station); }
+    const at = Date.now();
+    const added = r.added.length + r.extended.length + r.copied.length;
+    // too big for POST /api/save to take: refused BEFORE anything is written (the window's save is then preserved once, by the
+    // ordinary path — never a kept copy too, on every boot)
+    if ((windowBase || added) && Buffer.byteLength(JSON.stringify(doc)) > (16 << 20) - (64 << 10)) return json(200, { ok: false, error: 'the merged station would be too large to save', tooLarge: true });
+    // the station file is the base: the window's crew, floor and settings changes are not in the merge, so its whole save is
+    // kept beside the station under a name of its own (restorable and downloadable, like a refused save's copy)
+    const kept = windowBase ? null : saveStore.preserve('agent', Object.assign({}, body, { _saveClient: ('kept-' + at + (writer ? '-' + writer : '')).slice(0, 80) }));
+    if (!windowBase && !added) return json(200, { ok: true, revision: Number(station._saveRevision) || 0, updatedAt: Number(station.updatedAt) || 0, doc: station,
+      base: 'station', added: 0, extended: 0, copied: 0, backup: null, ...(kept ? { kept } : {}) });
+    const backup = saveStore.backup('agent', 'adopt-' + at);
+    Object.assign(doc, { updatedAt: Math.max(at, (Number(station.updatedAt) || 0) + 1, (Number(body.updatedAt) || 0) + 1),
+      _saveRevision: Number(station._saveRevision) || 0, _saveClient: 'adopt-' + (by || at), _saveDirty: false });
+    const result = saveStore.save('agent', doc, { compareRevision: true });
+    if (!result || result.ok !== true) return json(200, { ok: false, error: result && result.conflict ? 'the station changed during the merge; try again' : 'the station refused the merge', backup, ...(kept ? { kept } : {}) });
+    try { seedSaveMemos('agent', doc); } catch (e) { failNote('save.adopt.seed-memos', e); }
+    observeDeletedSessions(doc);
+    json(200, { ok: true, revision: result.revision, updatedAt: result.updatedAt, doc: Object.assign({}, doc, { updatedAt: result.updatedAt, _saveRevision: result.revision }),
+      base: windowBase ? 'window' : 'station', added: r.added.length, extended: r.extended.length, copied: r.copied.length, backup, ...(kept ? { kept } : {}) });
+  } catch (e) { json(200, { ok: false, error: (e && e.message) || 'merge failed' }); }
 }
 // POST /api/save { agent?, ...envelope } — write through the localStorage save to durable disk. The body IS the
 // save envelope (with its schema/version/updatedAt); `agent` selects the record (defaults to 'agent'). The
@@ -27061,6 +27963,9 @@ async function handleSaveWrite(req, res) {
     const result = saveStore.save(agentId, body, { compareRevision: true });
     // a memo seed is a cache refresh: it may never turn a landed save into an error reply
     if (result && result.ok === true) { try { seedSaveMemos(agentId, body); } catch (e) { failNote('save.seed-memos', e); } }
+    // the station save carries the page's deleted-session lists: the sidecar forgets a session the Commander deleted the
+    // moment the save that deletes it lands (qa/bugs/3e926b6a). Never turns a landed save into an error reply.
+    if (result && result.ok === true && agentId === 'agent') observeDeletedSessions(body);
     json(200, result);
   } catch (e) { json(400, { error: (e && e.message) || 'save failed' }); }
 }

@@ -83,7 +83,8 @@ const NY = require('../frontend/app/needsyou.js');
   const keys = i => [...k(i).matchAll(/data-ny-act="([a-z-]+)"[^>]*>([^<]+)</g)].map(m => m[1] + ':' + m[2]).join(' · ');
   // (Andrew 10-15) the row is the door: a wait whose only action was Open has no key (a click on its row opens it)
   A.eq(keys(step), '', 'STEP-IN → no key, its row opens it');
-  A.eq(keys(att), 'attest-yes:Confirm · attest-no:Not yet', 'a quest attest → Confirm / Not yet (the QUESTS card\'s own words, without its fallback-font ✓)');
+  // (Andrew 10-19, the inbox: "keep only the safe one-tap actions") a quest's verdict is given on the QUESTS card the row opens
+  A.eq(keys(att), '', 'a quest attest → no key, its row opens the QUESTS card where its verdict is given');
   A.eq(keys(byKind('loop')[0]), '', 'loop review → no key, its row opens it');
   A.eq(keys(byKind('extension')[0]), '', 'extensions → no key, its row opens it');
   A.eq(keys(byKind('build')[0]), '', 'a build → no key, its row opens it');
@@ -94,7 +95,8 @@ const NY = require('../frontend/app/needsyou.js');
   A.eq((twoBuilds.match(/class="ny-item /g) || []).length, 1, 'two builds from one agent are one card');
   A.ok(/<span class="ny-verb">2 builds to keep or discard<\/span> · Pricing page v2<\/div>/.test(twoBuilds) && /<span class="ny-count">2<\/span>/.test(twoBuilds) && /data-ny-n="2"/.test(twoBuilds),
     '…that leads with how many wait (where the two-line clamp cannot cut it), names the build its click opens (the oldest), and holds both waits');
-  A.ok(/class="ny-face"[^>]*data-ny-aid=/.test(twoBuilds), 'each card carries the agent\'s portrait well');
+  A.ok(/<span class="ny-face" aria-hidden="true" data-ny-aid="writer">/.test(twoBuilds) && /<span class="ny-grp-t">Builds to review<\/span><span class="ny-grp-n">2<\/span>/.test(twoBuilds) && !/ny-strip/.test(twoBuilds),
+    '…with VEX\'s portrait, under the BUILDS TO REVIEW strip that counts both (Andrew 10-19, B: one panel by kind)');
 
   // the doors
   NY.openKey('stepin:h1'); A.eq(opened.pop(), ['stepin', 'h1'], 'STEP-IN opens its window on THAT handoff');
@@ -132,12 +134,12 @@ const NY = require('../frontend/app/needsyou.js');
   A.ok(!NY.dismissKey('stepin:h1') && !NY.dismissKey(att.key), 'a wait is never dismissed away — only failed work has Dismiss (as on the rail)');
   A.ok(NY.canDismiss({ kind: 'failed' }) && !NY.canDismiss(step), 'canDismiss follows the rail');
 
-  // Confirm / Not yet answer through the quest store, once
+  // the rail gives no verdict: the QUESTS card does (its own Confirm / Not yet, through QuestLedgerStore.confirm)
   const hostless = NY._internals;
   A.ok(hostless, 'internals');
   {
     const src = read('frontend/app/needsyou.js');
-    A.ok(/QuestLedgerStore\.confirm\(i\.questId, kind === 'attest-yes'\)/.test(src), 'Confirm / Not yet answer through QuestLedgerStore.confirm (the QUESTS card\'s own path)');
+    A.ok(!/QuestLedgerStore\.confirm/.test(src) && !/attest-yes|attest-no/.test(src), 'NEEDS YOU never confirms a quest itself: the verdict is the QUESTS card\'s');
   }
 
   // a forced re-read asked for while a read is on its way is never dropped: the earlier read may predate the decision

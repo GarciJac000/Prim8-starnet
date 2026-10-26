@@ -239,6 +239,94 @@ module.exports = (async () => {
     A.eq(sizes, [32768], 'an already-loaded window is kept (no reload to a smaller one)');
     A.eq(N.loadedWindow({ models: [{ name: 'q', context_length: 8192 }] }, 'other'), 0, 'a model that is not loaded has no window to adopt');
   }
+  // THE 64k LOCK (user report 10-25): qwen3:4b ran at 64k after one big request and never came down; /api/ps showed it
+  // 50% on the CPU and a ~17k task prompt timed out at the 300 s ceiling. A held window bigger than the request needs
+  // steps back down once Ollama shows the model spilling; while it fits the GPU it is kept (no needless reload).
+  {
+    const M = 'qwen3:4b-instruct-2507-q4_K_M';
+    const half = { models: [{ name: M, size: 12e9, size_vram: 6e9, context_length: 65536 }] };
+    const full = { models: [{ name: M, size: 12e9, size_vram: 12e9, context_length: 65536 }] };
+    A.eq(N.spillsToCpu(half, M), true, 'half on the GPU is a spill');
+    A.eq(N.spillsToCpu({ models: [{ name: M, size: 3e9, size_vram: 0 }] }, M), true, 'all on the CPU is a spill');
+    A.eq(N.spillsToCpu(full, M), false, 'fully on the GPU is not');
+    A.eq(N.spillsToCpu({ models: [] }, M) || N.spillsToCpu(null, M), false, 'a model not listed (or no status) is no evidence of a spill');
+    // /api/ps lists nothing until the first request loads the model, then shows it at `loaded`
+    const run = async (base, loaded) => {
+      const sizes = [];
+      const fetch = async (url, init) => {
+        if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+        if (url.endsWith('/api/ps')) return new Response(JSON.stringify(sizes.length ? loaded : { models: [] }), { status: 200 });
+        if (url.endsWith('/api/chat')) { sizes.push(JSON.parse(init.body).options.num_ctx); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+        return new Response('{}', { status: 200 });
+      };
+      const mk = () => makeOpenAICompatibleProvider({ fetch, baseUrl: base, nativeOllama: true, maxTokens: 4096 });
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(200000) }] });   // ~50k: locks 64k
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });    // ~17k task
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });
+      await collect(mk(), { model: M, messages: [{ role: 'user', content: 'hello' }], isTask: false });   // a greeting
+      return sizes;
+    };
+    const after = await run('http://lock.test:11434/v1', half);
+    A.eq(after, [65536, 32768, 32768, 32768], 'spilling at 64k: the ~17k task steps down to 32k and stays there, and a greeting rides it (no reload down to 8k)');
+    const kept = await run('http://fits.test:11434/v1', full);
+    A.eq(kept, [65536, 65536, 65536, 65536], 'fully on the GPU: the 64k window is kept (no reload)');
+    // StarNet restarted while Ollama holds a spilling 64k load: it is not adopted for a request that fits 32k.
+    const sizes = [];
+    const fetch = async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+      if (url.endsWith('/api/ps')) return new Response(JSON.stringify(half), { status: 200 });
+      if (url.endsWith('/api/chat')) { sizes.push(JSON.parse(init.body).options.num_ctx); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+      return new Response('{}', { status: 200 });
+    };
+    await collect(makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://adopt.test:11434/v1', nativeOllama: true, maxTokens: 4096 }), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });
+    A.eq(sizes, [32768], 'a spilling loaded window is not adopted when a smaller one holds the request');
+  }
+  // Review F1 (0.14.1): a DENSE prompt (digit-heavy logs, CJK) beats the chars/4 estimate. On a CPU-only server (every
+  // model "spills") the step-down picked 32k, Ollama refused (it counts ~40k) and the window went back to 64k: two
+  // reloads and a lost KV cache on EVERY task turn. Once Ollama has refused a window, the step-down never goes below it.
+  {
+    const M = 'qwen3:4b-dense';
+    const cpu = { models: [{ name: M, size: 3e9, size_vram: 0, context_length: 65536 }] };
+    const sizes = [];
+    let loaded = false;
+    const fetch = async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+      if (url.endsWith('/api/ps')) return new Response(JSON.stringify(loaded ? cpu : { models: [] }), { status: 200 });
+      if (url.endsWith('/api/chat')) {
+        const b = JSON.parse(init.body);
+        sizes.push(b.options.num_ctx); loaded = true;
+        const real = JSON.stringify(b.messages).length > 150000 ? 50000 : 40000;   // Ollama's own count, denser than the estimate
+        if (b.options.num_ctx < real + 4096) return new Response(JSON.stringify({ error: 'request (' + real + ' tokens) exceeds the available context size (' + b.options.num_ctx + ' tokens), try increasing it' }), { status: 400 });
+        return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop', prompt_eval_count: real, eval_count: 1 }]);
+      }
+      return new Response('{}', { status: 200 });
+    };
+    const mk = () => makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://dense.test:11434/v1', nativeOllama: true, maxTokens: 4096 });
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(200000) }], tools: TOOLS });   // ~50k: holds 64k
+    sizes.length = 0;
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: '7'.repeat(68000) }], tools: TOOLS });   // estimate ~21k, real ~44k
+    A.eq(sizes, [32768, 65536], 'turn 1: the estimate steps down, Ollama refuses with its own count, the window resizes back up');
+    sizes.length = 0;
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: '7'.repeat(68000) }], tools: TOOLS });
+    A.eq(sizes, [65536], 'turn 2: no second step-down — the window Ollama proved necessary is kept (no reload, KV cache intact)');
+  }
+  // The connect ceiling (300 s for Ollama) has an env override; the default is unchanged.
+  {
+    A.eq(require('../sidecar/providers/registry.js').getProviderProfile('ollama').connectTimeoutMs, 300000, 'the Ollama default stays 300 s');
+    const prev = process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS;
+    process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS = '40';
+    try {
+      const fetch = async (url, init) => {
+        if (url.endsWith('/api/chat')) return new Promise((_, reject) => { init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }); });
+        return new Response('{"models":[]}', { status: 200 });
+      };
+      const t0 = Date.now();
+      let err = null;
+      try { await collect(factory.selectProvider({ provider: 'ollama', baseUrl: 'http://envtimeout.test:11434/v1', fetch }), { model: 'm', messages: [{ role: 'user', content: 'hi' }], preStreamRetries: 0 }); } catch (e) { err = e; }
+      A.ok(err && /timed out after 40ms/.test(err.message), 'SKYNET_OLLAMA_CONNECT_TIMEOUT_MS sets the connect ceiling (' + (err && err.message.slice(0, 60)) + ')');
+      A.ok(Date.now() - t0 < 20000, 'and the request gives up at that ceiling, not 300 s');
+    } finally { if (prev == null) delete process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS; else process.env.SKYNET_OLLAMA_CONNECT_TIMEOUT_MS = prev; }
+  }
   // A screenshot is megabytes of base64 but a fixed handful of tokens: it must not size the window to the ceiling.
   {
     const img = { role: 'user', content: [{ type: 'text', text: 'what is this' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(2000000) } }] };
@@ -282,6 +370,35 @@ module.exports = (async () => {
     A.eq('think' in seen.pop(), false, 'a model that cannot think is never sent the field');
   }
 
+  // Reasoning OFF reaches a thinking model as think:false on Commander turns and tasks too (#116): 'none' put nothing on
+  // the wire, so qwen3 thought on every turn behind an OFF switch. (Ollama's registry default IS off; the host resolves
+  // it to 'none' before the provider is built — a provider built with no effort at all keeps the model default above.)
+  {
+    const seen = [];
+    const mkFetch = (caps) => async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(40960, caps);
+      if (url.endsWith('/api/chat')) { seen.push(JSON.parse(init.body)); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+      return new Response('{"models":[]}', { status: 200 });
+    };
+    const msg = [{ role: 'user', content: 'hi' }];
+    const ollama = (effort, caps) => factory.selectProvider(Object.assign({ provider: 'ollama', fetch: mkFetch(caps || ['completion', 'tools', 'thinking']) }, effort == null ? {} : { reasoningEffort: effort }));
+    A.eq(factory.defaultReasoningEffortForProvider('ollama'), 'none', 'fixture: Ollama\'s default effort is OFF');
+    await collect(ollama('none'),{ model: 'q', messages: msg, isTask: false });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a Commander greeting is sent think:false');
+    await collect(ollama('none'), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a task is sent think:false');
+    await collect(ollama('none'), { model: 'q', messages: msg });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a background call stays think:false');
+    await collect(ollama('high'), { model: 'q', messages: msg, tools: TOOLS, isTask: true, reasoningEffort: 'none' });
+    A.eq(seen.pop().think, false, 'a per-request OFF beats the provider effort');
+    await collect(ollama('high'), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq(seen.pop().think, true, 'a real effort still turns thinking on');
+    await collect(ollama('none'), { model: 'q', messages: msg, tools: TOOLS, isTask: true, reasoningEffort: 'high' });
+    A.eq(seen.pop().think, true, 'a per-request effort beats a provider OFF');
+    await collect(ollama('none', ['completion', 'tools']), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq('think' in seen.pop(), false, 'Reasoning OFF never sends the field to a model that cannot think');
+  }
+
   // A silent local model reports placement evidence without inventing its loading or prompt-reading stage.
   {
     const ps = (vram) => ({ models: [{ name: 'qwen3:8b', size: 10e9, size_vram: vram, context_length: 32768 }] });
@@ -315,7 +432,9 @@ module.exports = (async () => {
     try { await collect(p, { model: 'qwen3:8b', messages: [{ role: 'user', content: 'x' }], preStreamRetries: 0 }); } catch (e) { err = e; }
     A.ok(err && /timed out/.test(err.message), 'a silent local model still times out');
     A.ok(err && /entirely on the CPU/.test(err.message), 'and the error says the model runs on the CPU (from /api/ps)');
-    A.eq(errorClass.classifyApiError(err, { model: 'qwen3:8b' }).reason, 'timeout', 'the explanation does not change how it classifies');
+    // #99 follow-up: a model /api/ps listed as loaded is not re-sent (test/ollama-loaded-timeout.test.js has the ladder)
+    const loadedVerdict = errorClass.classifyApiError(err, { model: 'qwen3:8b' });
+    A.eq([loadedVerdict.reason, loadedVerdict.retryable], ['local_timeout', false], 'a timeout on a loaded model classifies as local_timeout, not retried');
     statusBody = { models: [] };
     let absentErr = null;
     try { await collect(p, { model: 'qwen3:8b', messages: [{ role: 'user', content: 'x' }], preStreamRetries: 0 }); } catch (e) { absentErr = e; }

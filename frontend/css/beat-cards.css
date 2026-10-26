@@ -402,7 +402,7 @@ body #chat-panel #chat-log > .dg-line .dg-lamp {
   flex: none; width: 10px; height: 10px; border-radius: 2px; background: rgba(var(--ph-rgb), .22);
   box-shadow: 0 0 0 1px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.3);
 }
-body #chat-panel #chat-log > .dg-line .dg-lamp.working { background: var(--ph); animation: dg-breathe 1.6s ease-in-out infinite; }
+body #chat-panel #chat-log > .dg-line .dg-lamp.working { background: var(--ph); animation: dg-breathe 1.6s steps(8, jump-none) infinite; }
 body #chat-panel #chat-log > .dg-line .dg-lamp.queued { background: rgba(var(--ph-rgb), .45); }
 body #chat-panel #chat-log > .dg-line .dg-lamp.waiting { background: var(--gold); }
 body #chat-panel #chat-log > .dg-line .dg-lamp.done { background: var(--ok); }
