@@ -511,8 +511,11 @@
       }
     };
 
+    // impact 'none' STATED (#155): undeclared, the fail-closed classifier filed it as external-unknown and stripped it from
+    // every unattended ASK routine — the only runs it works in. Declared on THIS def, not the 'routinescratch' cap: a
+    // connector/plugin re-registering the name replaces the whole registry entry and keeps its own (external-unknown) class.
     const notepadTool = {
-      name: 'routine.notepad', capability: 'routinescratch', scope: 'write', requiresConsent: false,
+      name: 'routine.notepad', capability: 'routinescratch', scope: 'write', requiresConsent: false, impact: 'none',
       description: 'Read or replace the bounded private scratchpad for THIS scheduled routine. The host selects the job from the current scheduled run; no job id is accepted, so one routine cannot read or write another routine\'s notes. Notes survive restart. Use action=write with empty text to clear it.',
       schema: {
         type: 'object', required: ['action'],
