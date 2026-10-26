@@ -196,6 +196,10 @@ textarea {
   background-color: #000; border: 1px solid var(--ph-dim); border-radius: 4px; padding: 8px 11px; outline: none;
 }
 textarea::placeholder { color: var(--ph-dim); opacity: 1; }
+/* the corner grip of a resizable field is OS paint too (grey hatching on the APPS / WORKFLOWS fields): two phosphor ticks */
+textarea::-webkit-resizer {
+  background: linear-gradient(135deg, transparent 0 50%, var(--ph-dim) 50% 58%, transparent 58% 70%, var(--ph-dim) 70% 78%, transparent 78%);
+}
 /* buttons: neutralize the OS paint and NOTHING else. No box metrics, no radius, no shadow —
    measured the hard way: a draft of this block that also set border-radius/box-shadow leaked
    onto id-styled, class-less buttons (#ws-new, #estop-btn) that declare no radius of their
