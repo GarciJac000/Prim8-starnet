@@ -5129,8 +5129,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         const items = streams.filter(s => s.lane === lane);
         return '<div class="kb-col"><h4>' + label + ' <i>' + items.length + '</i>' +
           (lane === 'active' ? activeAggregate(items) : '') + '</h4>' +
-          '<p class="kb-lane-note">' + ({todo:'Planned tasks, ready when you are.',active:'Ongoing work and results to open.',shipped:'Tasks you marked complete.'}[lane]) + '</p>' +
-          (items.length ? items.map(card).join('') : kbEmpty(lane)) + '</div>';
+          // an empty lane's own empty card already says what goes there; the note above it said it twice (UX night 10-25)
+          (items.length ? '<p class="kb-lane-note">' + ({todo:'Planned tasks, ready when you are.',active:'Ongoing work and results to open.',shipped:'Tasks you marked complete.'}[lane]) + '</p>' + items.map(card).join('') : kbEmpty(lane)) + '</div>';
       }).join('') +
       '</div>' +
       // the dead-end this footnote kills (2026-07-16): "a run finished while you were away" sent users
