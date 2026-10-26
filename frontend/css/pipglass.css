@@ -1610,21 +1610,25 @@ body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-states .gc-state.bad
        legible — 15px in the muted text colour, the drawn caret for its fold, bright while open
      · the fold's run record was 11px dim phosphor: it reads at 14px (its lead line now names who ran it and tells the
        footer's time — chat.js telemetryRun / hydrateRunTelemetry)
+   QUIET AGAIN (Andrew 10-25: "make the RUN COMPLETE footer and step rows quiet again like 0.13.5"): the 10-18/10-19 sizes
+   put the machinery at the speech's volume (16px bright caps under 18px speech), so a reply no longer stood apart from its
+   run. Back to 0.13.5's register — dim phosphor, lowercase tool names, the footer at half strength — at 14px (0.13.5 had
+   12.5/11px, under the 10-19 "text not too small" ask). Kept: the steady glyph, the drawn carets, the honest lead line.
    ============================================================ */
-/* the step rail: the indented phosphor line the run's steps hang from */
-body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-rail { gap: 4px; border-left-color: rgba(var(--ph-rgb), .28); }
-/* a step: the 2px box, matte, no entrance glow */
+/* the step rail: the indented line the run's steps hang from (0.13.5's dark rule) */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-rail { gap: 3px; }
+/* a step: a 2px box, matte, no entrance glow */
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip {
-  border: 1px solid rgba(var(--ph-rgb), .2); border-radius: 2px; background: rgba(0, 0, 0, .25); box-shadow: none;
+  border: 1px solid rgba(var(--ph-rgb), .2); border-radius: 2px; box-shadow: none;
 }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip:hover { border-color: rgba(var(--ph-rgb), .45); background: rgba(var(--ph-rgb), .06); }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-head {
-  align-items: center; gap: 8px; min-height: 30px; padding: 4px 10px; font-size: var(--sn-type-meta); line-height: 1.2; letter-spacing: .3px; color: var(--text);
+  align-items: center; gap: 6px; padding: 3px 8px; font-size: 14px; line-height: 1.35; letter-spacing: .3px; color: var(--ph-dim);
 }
-/* the tool's name reads as the terminal's opcode: tracked caps in the bright phosphor */
-body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-name { color: var(--ph-bright); letter-spacing: 1.4px; text-transform: uppercase; }
-body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-args { color: var(--text); opacity: .8; }
-body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-stat { font-size: 15px; color: var(--cg-mute, var(--text)); opacity: 1; }
+/* the tool's name: plain lowercase phosphor, one step above its args */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-name { color: var(--ph); letter-spacing: .4px; text-transform: none; }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-args { color: var(--ph-dim); opacity: .85; }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-stat { font-size: 13px; color: var(--ph-dim); opacity: .85; }
 /* the state glyph: steady (a running step no longer blinks — the working line's meter already says the run is live) */
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-glyph { flex: 0 0 auto; width: 1.1em; text-align: center; text-shadow: none; animation: none; opacity: 1; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip.pending .tc-glyph { color: var(--ph-bright); }
@@ -1633,8 +1637,8 @@ body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip.err :is(.tc-g
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip.held :is(.tc-glyph, .tc-stat) { color: var(--ph-dim); }
 /* "open me" is a drawn caret (DELEGATED's), never the same ▸ the running state shows at the row's start */
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-exp {
-  flex: 0 0 auto; width: 7px; height: 7px; margin: 0 3px 2px 2px; font-size: 0; opacity: 1;
-  border-right: 2px solid rgba(var(--ph-rgb), .7); border-bottom: 2px solid rgba(var(--ph-rgb), .7); transform: rotate(-45deg);
+  flex: 0 0 auto; width: 6px; height: 6px; margin: 0 3px 2px 2px; font-size: 0; opacity: .8;
+  border-right: 2px solid rgba(var(--ph-rgb), .5); border-bottom: 2px solid rgba(var(--ph-rgb), .5); transform: rotate(-45deg);
 }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip.open .tc-exp { transform: translateY(-2px) rotate(45deg); border-color: var(--ph-bright); }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-detail {
@@ -1645,26 +1649,26 @@ body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-d-res { c
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-d-res.err { color: var(--bad); }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip .tc-d-res.held { color: var(--ph-dim); }
 
-/* RUN COMPLETE: still the reply's quiet footer (Andrew 10-03), legible: 15px in the muted text colour at full strength
-   (it was 14px at half opacity), its fold key the same drawn caret */
+/* RUN COMPLETE: the reply's quiet footer (Andrew 10-03) — 0.13.5's 14px at half strength again (10-25), bright on hover
+   or open; its fold key the same drawn caret */
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved {
-  font-size: var(--sn-type-meta); letter-spacing: 1px; line-height: 1.35; color: var(--cg-mute, var(--text)); opacity: .9; padding: 2px 0;
+  font-size: 14px; letter-spacing: .6px; line-height: 1.4; color: var(--text); opacity: .5; padding: 1px 0;
 }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved.has-fold:is(:hover, :focus-visible),
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved.open { color: var(--ph-bright); opacity: 1; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved.err { color: var(--bad); opacity: 1; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved.stopped { color: var(--gold); opacity: 1; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved .cp-chev {
-  display: inline-block; width: 7px; height: 7px; margin: 0 0 2px 10px; font-size: 0; opacity: 1; vertical-align: middle;
+  display: inline-block; width: 6px; height: 6px; margin: 0 0 2px 8px; font-size: 0; opacity: .8; vertical-align: middle;
   border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform var(--t-fast, .12s) ease;
 }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .comms-presence.resolved.open .cp-chev { transform: translateY(-2px) rotate(45deg); }
-/* the fold's run record: the steps' size, one line per run, its head in the bright phosphor */
+/* the fold's run record: the steps' size, one line per run, dim phosphor with its head one step up (0.13.5's register) */
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry {
-  margin: 6px 0 8px; padding: 6px 10px; border-left: 1px solid rgba(var(--ph-rgb), .28);
-  font-size: 14px; line-height: 1.4; letter-spacing: .5px; color: var(--cg-mute, var(--text));
+  margin: 4px 0 7px; padding: 6px 9px; border-left: 1px solid color-mix(in srgb, var(--ph-dim) 55%, transparent);
+  font-size: 14px; line-height: 1.35; letter-spacing: .45px; color: var(--ph-dim);
 }
-body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry .rt-run-head { color: var(--ph-bright); letter-spacing: .6px; }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry .rt-run-head { color: var(--ph); letter-spacing: .45px; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry .rt-tool { margin: 3px 0 0 12px; opacity: 1; }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry .rt-tool.err { color: var(--bad); }
 body.glass-demo:not(.hud-mode) #screen-game #chat-panel .run-telemetry .rt-tool.held { color: var(--ph-dim); }
