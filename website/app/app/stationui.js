@@ -8192,7 +8192,10 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // ADVANCED — env-only runtime knobs, now editable + persisted server-side (P1-9). PRECEDENCE is spelled out
       // in the card: an explicit environment variable ALWAYS wins over a value saved here (a deploy stays in control).
       '<h4 class="ms-h">Runtime limits <span class="dim">— optional ceilings and timeouts</span></h4>' +
-      '<p class="set-about">Optional. StarNet sets no limits by default: fill in a number only when you want one, and blank a field to remove it. Most take effect after a restart; each line says when it differs. <b>An environment variable always overrides a value saved here</b>.</p>' +
+      // R30 (0.14.1 readiness review): say what the code does. Some fields HAVE defaults (CONSENT TIMEOUT 120000, ROUTINE TICK
+      // 60000, both token ceilings 2,000,000 in index.js resolveKnob), and a cleared box saves null = back to that default,
+      // never "no limit" (0 is what switches a ceiling off).
+      '<p class="set-about">Optional. Each box shows the value in use, marked default until you save your own; type a number to change it, or clear the box to go back to its default. By default nothing caps the steps in a run or the agents working at once, and the two token ceilings stop a run at 2,000,000 tokens (0 switches one off). Most take effect after a restart; each line says when it differs. <b>An environment variable always overrides a value saved here</b>.</p>' +
       '<div class="mc-form" id="adv-form"><div class="dim" id="adv-loading">reading runtime settings…</div></div>' +
       '<div id="adv-msg" class="msg"></div>' +
       // DATA / STATION BACKUP — export the whole station config to one JSON file, import it back, reset a section.

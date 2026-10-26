@@ -179,7 +179,7 @@
       docsUrl: 'https://docs.stripe.com/api', apiBase: 'https://api.stripe.com/v1',
       authHint: 'Authorization: Bearer ${STRIPE_API_KEY}',
       blurb: 'Payments, customers, invoices, subscriptions.',
-      note: 'Prefer a restricted key. Stripe also has a one-click MCP connector in CATALOG — use that if you want tools instead of raw REST.' },
+      note: 'Prefer a restricted key. Stripe also has a one-click MCP connector in APPS — use that if you want tools instead of raw REST.' },
 
     // ── Email & Messaging ──
     { id: 'resend', name: 'Resend', category: 'Email & Messaging', envVar: 'RESEND_API_KEY',
@@ -215,7 +215,7 @@
       docsUrl: 'https://developers.notion.com/reference/intro', apiBase: 'https://api.notion.com/v1',
       authHint: 'Authorization: Bearer ${NOTION_API_KEY}',
       blurb: 'Pages, databases, and blocks.',
-      note: 'Notion also has a one-click OAuth connector in CATALOG — that is usually the easier route.' },
+      note: 'Notion also has a one-click OAuth connector in APPS — that is usually the easier route.' },
 
     // ── Developer Tools ──
     { id: 'jina', name: 'Jina', category: 'Developer Tools', envVar: 'JINA_API_KEY',
@@ -227,7 +227,7 @@
       docsUrl: 'https://docs.github.com/rest', apiBase: 'https://api.github.com',
       authHint: 'Authorization: Bearer ${GITHUB_API_KEY}',
       blurb: 'Repos, issues, pull requests, actions.',
-      note: 'GitHub also has a one-click MCP connector in CATALOG.' },
+      note: 'GitHub also has a one-click MCP connector in APPS.' },
 
     { id: 'porkbun', name: 'Porkbun', category: 'Developer Tools', envVar: 'PORKBUN_API_KEY',
       docsUrl: 'https://porkbun.com/api/json/v3/documentation', apiBase: 'https://api.porkbun.com/api/json/v3',

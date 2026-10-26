@@ -163,6 +163,6 @@
     .then(render)
     .catch(function () {
       status.className = 'mk-status mk-err';
-      status.textContent = 'Could not load the skill catalog right now. Refresh to try again, or browse it in the app under ABILITIES › DISCOVER › SKILL MARKET.';
+      status.textContent = 'Could not load the skill catalog right now. Refresh to try again, or browse it in the app under CONNECT › ABILITIES › SKILL MARKET.';
     });
 }());

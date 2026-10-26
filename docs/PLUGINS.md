@@ -4,7 +4,7 @@ A plugin is one folder with a single approval. It can add **windows** (your own 
 windows), **code that runs in the station in its own process** (tools for your crew, hooks on every run, background
 jobs, a backend for its windows), and a **terminal** that stands in the station as its body, or any mix of those.
 
-- **Where plugins live:** `<workspaces>/plugins/<id>/`. ABILITIES → CREATE / ADVANCED → EXTENSIONS → **COPY FOLDER PATH** shows the exact folder.
+- **Where plugins live:** `<workspaces>/plugins/<id>/`. CONNECT › ABILITIES › EXTENSIONS → **COPY PLUGINS FOLDER PATH** shows the exact folder.
 - **Fastest start:** EXTENSIONS → **Create a plugin**. It writes a working starter (a window with notes saved by the
   station and a KIT tab showing every component) and opens that window. Edit the files from there.
 - **Approval:** approval is locked to a hash of **every file** in the folder. Change one character anywhere and the

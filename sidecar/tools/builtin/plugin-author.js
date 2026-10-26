@@ -259,7 +259,7 @@ function makePluginAuthorTools(deps) {
         await fsp.rename(staging, dst);
         await afterInstall(id);
         return {
-          content: (replacing ? 'Replaced' : 'Installed') + ' the "' + id + '" plugin — it is OFF until the Commander approves it: ABILITIES → CREATE / ADVANCED → EXTENSIONS → APPROVE & ENABLE. '
+          content: (replacing ? 'Replaced' : 'Installed') + ' the "' + id + '" plugin — it is OFF until the Commander approves it: CONNECT › ABILITIES › EXTENSIONS → APPROVE & ENABLE. '
             + 'Tell them that, and what it does. Once on, its window opens from EXTENSIONS' + (r.main ? ', and any tools reach agents through its PLUGIN TERMINAL (placed automatically in the lead\'s room)' : '') + '.',
           summary: (replacing ? 'replaced' : 'installed') + ' plugin ' + id + ' (awaiting approval)'
         };

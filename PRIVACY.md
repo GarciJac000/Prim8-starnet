@@ -115,7 +115,7 @@ installed. You can stop automatic checks by turning off **AUTO-CHECK FOR UPDATES
 
 ### 7. The Skill Market — when you open it, and while you use its skills
 
-When you open **ABILITIES › DISCOVER › SKILL MARKET**, the app downloads the public skill catalog from
+When you open **CONNECT › ABILITIES › SKILL MARKET**, the app downloads the public skill catalog from
 `https://starnetos.com/.well-known/starnet-skills.json`, and when you install a skill it downloads
 that skill's files from `https://starnetos.com/skills/`. These are plain `GET`s for static files:
 **no user data, no identifier and no telemetry are sent.** While at least one skill you installed from the
@@ -135,7 +135,7 @@ service carries them and cannot read them. With Remote off, none of this is cont
 ### 9. Other services you connect
 
 If you connect a service under **CONNECT > ABILITIES** — a catalog connector, an MCP service you attach
-by URL, or an API key saved under **SAVED API CONNECTIONS** — StarNet calls that service's own address, with
+by URL, or an API key saved under **CONNECTED › API KEYS** — StarNet calls that service's own address, with
 the credentials you gave it, when an agent uses it or when the app checks that it is connected. A service you have
 not connected is never contacted.
 
