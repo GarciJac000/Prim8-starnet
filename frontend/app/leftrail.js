@@ -391,4 +391,20 @@
     const cur = parseInt(getComputedStyle(game).getPropertyValue('--crew-w'), 10);
     if (cur) applyW(cur);
   });
+
+  // SESSIONS / PROJECTS that don't fit (Andrew 10-25 circled the + key sitting on PROJECTS): pipglass.css spaces the tabs
+  // by the strip's width, but a width rule only guesses at the words. This reads the real thing — any tab cut at its own
+  // edge marks the strip .tabs-tight (the narrowest rail's spacing). Unmarked first, so a strip that has room again
+  // gets its spacing back.
+  const head = document.querySelector('#left .ws-head');
+  if (head) {
+    const fitTabs = () => {
+      head.classList.remove('tabs-tight');
+      const cut = Array.from(head.querySelectorAll('.ws-tab')).some(t => t.offsetWidth && t.scrollWidth > t.clientWidth + 1);
+      if (cut) head.classList.add('tabs-tight');
+    };
+    if (typeof ResizeObserver === 'function') new ResizeObserver(fitTabs).observe(head);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitTabs, () => {});
+    fitTabs();
+  }
 })();

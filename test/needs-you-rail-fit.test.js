@@ -131,9 +131,9 @@ for (const label of ['Deny', 'Retry', 'Dismiss', 'Running']) A.ok(keyWidth(label
 /* ---- the rails (px, and whether TEXT SIZE's zoom is counter-zoomed out of their width) ---- */
 const [desk] = px(appCss, /grid-template-columns: calc\(var\(--crew-w, (\d+)px\) \* var\(--cz\)\) 1fr/, 'a desktop window keeps its counter-zoomed default rail');
 const [laptop] = px(read('frontend/css/comms-layout.css'), /@media \(min-width: 861px\) and \(max-width: 1440px\), \(min-width: 861px\) and \(max-height: 740px\) \{\s*body #screen-game\.active \{[^}]*grid-template-columns: calc\(var\(--crew-w, (\d+)px\) \* var\(--cz\)\)/, 'a laptop window keeps its counter-zoomed default rail');
-const [narrow] = px(appCss, /@media \(max-width: 860px\) \{\s*#screen-game\.active \{[^}]*grid-template-columns: (\d+)px 1fr;/, 'a browser window of 860px or less keeps its fixed rail (not counter-zoomed: it grows with TEXT SIZE)');
+const [narrow] = px(appCss, /@media \(max-width: 860px\) \{\s*#screen-game\.active \{[^}]*grid-template-columns: calc\((\d+)px \* var\(--cz\)\) 1fr;/, 'a browser window of 860px or less keeps its counter-zoomed rail (one visual width at every TEXT SIZE, like the SESSIONS / PROJECTS strip in it)');
 const [dragMin, dragMax] = px(read('frontend/app/leftrail.js'), /WMIN = (\d+), WMAX = (\d+),/, 'the rail seam keeps its range');
-const RAILS = [{ px: narrow, cz: false, name: narrow + 'px narrow window' }, { px: laptop, cz: true, name: laptop + 'px laptop' },
+const RAILS = [{ px: narrow, cz: true, name: narrow + 'px narrow window' }, { px: laptop, cz: true, name: laptop + 'px laptop' },
   { px: desk, cz: true, name: desk + 'px desktop' }, { px: dragMin, cz: true, name: dragMin + 'px dragged (narrowest)' }, { px: dragMax, cz: true, name: dragMax + 'px dragged (widest)' }];
 A.ok(/#left > h3, #chat-panel > h3, \.ws-head \{ zoom: var\(--sn-unzoom, 1\); --cz: 1; \}/.test(appCss) && !/#left[^{]*\.ws-needs[^{]*\{[^}]*zoom:/.test(glass),
   'NEEDS YOU is not counter-zoomed: its text grows with TEXT SIZE inside the rail');

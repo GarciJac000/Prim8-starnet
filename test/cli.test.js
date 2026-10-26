@@ -103,6 +103,38 @@ const lineage = require('../sidecar/workspace-lineage.js');
   A.eq(P(null), '', 'null-safe');
 }
 
+// ---- what the app logged about this terminal (its --background start and every join, with the session's pid) ----
+{
+  const J = core.joinOutcome;
+  // the exact lines src-tauri/src/main.rs writes (setup's start line; join_terminal_session's four outcomes)
+  const started = 'startup: started by starnet (--background, terminal pid 4242) — the station runs with the app\'s keys; the window stays parked until someone opens StarNet';
+  const joined = 'second-launch --background: starnet session pid 4242 joins the station the terminal started';
+  const starting = 'second-launch --background: starnet session pid 4242 joins once StarNet has started';
+  const closing = 'second-launch --background: starnet session pid 4242 arrived while StarNet is closing (its starnet sessions ended); start StarNet again once it has quit';
+  const notTracked = 'second-launch --background: starnet session pid 4242: this StarNet is a person\'s or stays in the tray; a terminal ending never closes it';
+  A.eq(J(started, 4242), 'started-for', 'the start line names the terminal it was started for');
+  A.eq(J(joined, 4242), 'joined', 'a join it took');
+  A.eq(J(starting, 4242), 'starting', 'a join that arrived while it was still starting (tracked once it has)');
+  A.eq(J(closing, 4242), 'closing', 'a join that arrived while it closes: start it again');
+  A.eq(J(notTracked, 4242), 'not-tracked', 'a person\'s StarNet, or one staying in the tray');
+  A.eq(J(joined.replace('4242', '42420'), 4242), null, 'another pid (even one that starts with ours) is not ours');
+  A.eq(J([started, closing].join('\n'), 4242), 'closing', 'the LAST line about the pid wins');
+  A.eq(J([joined, 'close-request: close_to_tray=false', notTracked.replace('4242', '7')].join('\r\n'), 4242), 'joined', 'other pids\' lines and CRLF are ignored');
+  A.eq(J('', 4242), null, 'an empty log says nothing');
+  A.eq(J(null, 4242), null, 'null-safe');
+  // the app still writes those words: rewording a line there would leave every join here unconfirmed
+  const mainRs = require('fs').readFileSync(require('path').join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
+  for (const line of [started, joined, starting, closing, notTracked]) {
+    const shape = line.replace('4242', '{pid}').replace(/ — .*$/, '');
+    A.ok(mainRs.indexOf(shape) >= 0, 'main.rs still writes: ' + shape);
+  }
+  // one number on both sides: the app's EXIT_START_CANCELLED is what the CLI reads as "you cancelled"
+  const rs = require('fs').readFileSync(require('path').join(__dirname, '..', 'src-tauri', 'src', 'terminal_session.rs'), 'utf8');
+  const rust = Number((/pub const EXIT_START_CANCELLED: i32 = (\d+);/.exec(rs) || [])[1]);
+  A.eq(core.APP_EXIT_START_CANCELLED, rust, 'the CLI and the app agree on the cancelled-start exit code (' + rust + ')');
+  A.ok(rust !== 0, 'and it is never 0, which is a hand-off');
+}
+
 // ---- discovery parsers --------------------------------------------------------------------------
 {
   const netstat = [

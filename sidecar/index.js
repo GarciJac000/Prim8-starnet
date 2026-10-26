@@ -21384,11 +21384,12 @@ async function runOnceCore(o) {
     keysCatalog: serviceKeysCatalog,
     signInUnavailable: connectorSignInUnavailable
   }).register(registry);
-  // A KEY PASTED INTO CHAT (keys.save): the value is found only in the COMMANDER'S OWN turns of this run. A run that
-  // did not come from them — self-talk, a trigger/forwarded/group entry, a paired phone or non-owner sender (host power
-  // withheld), a delegated worker, a routine — has no owner texts, so the tool can save nothing there.
-  const keyOwnerRun = !internal && !untrustedEntryRun && !hostPowerWithheld && !o.delegatedBy && !o.syntheticTrigger
-    && (surface === 'interactive' || ownerTrusted);
+  // A KEY PASTED INTO CHAT (keys.save): the value is found only in the directive the COMMANDER typed for this run — the
+  // same origin facts as TrustedLearning.eligible (keys.js ownerRun). A group session, a recipe template, a work-line
+  // hop, self-talk, a trigger/forwarded entry, a paired phone or guest, a delegated/child run, a recovery or a routine
+  // has no owner text, so the tool is not offered and can save nothing there (release review F9).
+  const keyOwnerRun = KeyTools.ownerRun(Object.assign({}, o, { internal, hostPowerWithheld, untrustedEntry: untrustedEntryRun }),
+    { eligible: TrustedLearning.eligible, isHandoff: Pipeline.isHandoff, latestText: latestUserText(messages) });
   const keyOwnerTexts = () => keyOwnerRun ? recentUserTexts(messages, KeyTools.OWNER_TURNS) : null;
   let keySavedThisRun = false;   // releases the run transcript's hold (runTranscript below)
   KeyTools.makeKeyTools({

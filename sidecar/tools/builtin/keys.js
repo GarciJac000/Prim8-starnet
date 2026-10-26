@@ -39,7 +39,9 @@
 
   const KEY_MIN = 16;          // shorter than any real API key we know of; keeps ids, SHAs-as-typed and words out
   const KEY_MAX = 512;
-  const OWNER_TURNS = 6;       // how far back a paste is still "the one the Commander just gave you"
+  // Only THIS run's directive (release review F9, 2026-10-25): an earlier turn's author cannot be proven — a recipe launch
+  // leaves its template in the thread's history as a "user" turn — so a key pasted a turn earlier is pasted again.
+  const OWNER_TURNS = 1;
   const HINT_MIN = 3;
 
   const str = v => String(v == null ? '' : v).trim();
@@ -76,6 +78,24 @@
 
   function hasKeyCandidate(texts) {
     return (Array.isArray(texts) ? texts : []).slice(0, OWNER_TURNS).some(t => findKeyCandidates(t).length > 0);
+  }
+
+  /* ownerRun(origin, deps) -> bool — is this run's directive the COMMANDER'S OWN words (release review F9, 2026-10-25)?
+     The same host-minted origin facts TrustedLearning.eligible already uses for "the Commander gave this directive":
+     the watched COMMS directive they typed (ownerDirective — never a recipe template or a retry of one) or an
+     owner-admitted channel DM, minus every run whose "user" turn is somebody else's words — a group session (the
+     shared transcript, other agents' replies included), a line hand-off, a delegated or child run, a recovery replay,
+     a routine, a guest. A work-line hop is refused outright by its host-set lineId: its user turn is the previous
+     stage's output whether or not it wears the hand-off frame (a parallel part turn does not). Pure: the caller
+     injects the real eligible / isHandoff and the run's latest user text. */
+  function ownerRun(origin, deps) {
+    const o = origin || {}, d = deps || {};
+    if (o.lineId || o.parallelBranch) return false;
+    if (typeof d.eligible !== 'function') return false;
+    const handoff = typeof d.isHandoff === 'function' && !!d.isHandoff(typeof d.latestText === 'string' ? d.latestText : '');
+    const source = o.ownerDirective === true ? 'interactive-owner'
+      : (o.channelSender === true && o.channelSenderOwner === true ? 'channel-owner' : '');
+    return d.eligible(Object.assign({}, o, { handoff, source })) === true;
   }
 
   // What the Commander's bubble (and the saved chat) shows where the pasted key was. One ASCII form everywhere.
@@ -171,5 +191,5 @@
     };
   }
 
-  return { makeKeyTools, findKeyCandidates, hasKeyCandidate, keyPlaceholder, nameSavedKeys, OWNER_TURNS };
+  return { makeKeyTools, findKeyCandidates, hasKeyCandidate, keyPlaceholder, nameSavedKeys, ownerRun, OWNER_TURNS };
 });

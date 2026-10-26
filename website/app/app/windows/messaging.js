@@ -109,7 +109,7 @@
         okMsg: '✓ connected — DM your Slack app' },
 
       { id: 'matrix', title: 'MATRIX', pre: 'mx', accent: '#5bd18d',
-        tagline: 'Reach your agent from any Matrix client (Element, …) on any homeserver.',
+        tagline: 'Reach your agent from any Matrix client (Element or another) on any homeserver.',
         verb: 'syncing',
         steps: [
           'Create a Matrix account for the agent (e.g. on <b>matrix.org</b> or your homeserver).',
