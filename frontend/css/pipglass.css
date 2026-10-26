@@ -2115,12 +2115,12 @@ body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row:not(.asking) :is(.cr
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.working:not(.asking) .crew-status { color: var(--ph); }
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row:not(.asking) .crew-clock { color: var(--cg-mute, var(--text)); }
 body.glass-demo:not(.hud-mode) #screen-game #left > h3 #crew-sum { --sn-type-meta: 14px; --sn-type-compact: 14px; color: var(--cg-mute, var(--text)); }
-/* the crew card, a little shorter (67 → 62px: "a bit taller than that", "go 62") — the same two lines, a 46×54 well */
+/* the crew card, a little shorter (67 → 62px: "a bit taller than that", "go 62") — the same two lines, a 46×55 well (62 measured at TEXT SIZE 90), the working meter tucked so a working card is the same height */
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row { padding-top: 6px; padding-bottom: 6px; margin-top: 3px; margin-bottom: 3px; }
-body.glass-demo:not(.hud-mode) #screen-game #crew .crew-portrait { width: 46px; height: 54px; }
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-portrait { width: 46px; height: 55px; }
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-portrait img { width: 38px; height: 48px; }
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-main { row-gap: 2px; }
-body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.working .crew-prog { margin-top: 5px; }
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.working .crew-prog { margin-top: 2px; }
 /* gold only where it waits: a waiting session row says so with its icon (NEEDS YOU above tells the rest), so its
    "Approval needed" / "Reply needed" chip no longer doubles the row */
 body.glass-demo:not(.hud-mode) #screen-game #left #workstreams .ws-row.attn > .ws-meta { display: none; }

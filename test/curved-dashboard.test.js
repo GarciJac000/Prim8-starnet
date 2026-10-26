@@ -63,7 +63,7 @@ A.ok(!/!important/.test(mat), 'the glass wins by its selectors, not by !importan
 const pass = glass.slice(glass.indexOf('THE DASHBOARD PASS'));
 A.ok(glass.indexOf('THE DASHBOARD PASS') > 0 && !/!important/.test(pass), 'the pass exists and wins by its selectors');
 A.ok(/#crew :is\(\.crew-status, \.crew-step, \.crew-clock\) \{ --sn-type-meta: 14px;/.test(pass), 'the rail reads in two weights: status, step and clock on the quiet 14px line');
-A.ok(/#crew \.crew-portrait \{ width: 46px; height: 54px; \}/.test(pass) && /#crew \.crew-row \{ padding-top: 6px; padding-bottom: 6px;/.test(pass), 'the crew card is the 62px card ("go 62")');
+A.ok(/#crew \.crew-portrait \{ width: 46px; height: 55px; \}/.test(pass) && /#crew \.crew-row \{ padding-top: 6px; padding-bottom: 6px;/.test(pass), 'the crew card is the 62px card ("go 62")');
 A.ok(/#left #workstreams \.ws-row\.attn > \.ws-meta \{ display: none; \}/.test(pass), 'a waiting session row no longer doubles its wait with a chip');
 A.ok(/\.ny-item:not\(:has\(> \.ny-keys\)\) \{ grid-template-columns: 34px minmax\(0, 1fr\) 14px; \}/.test(pass), 'a keyless NEEDS YOU row keeps only the caret\'s width');
 A.ok(/#comms-presence\.paused:not\(\.resolved\) \{ border: 0;[^}]*box-shadow: inset 3px 0 0 rgba\(var\(--gold-rgb\), \.8\);/.test(pass), 'COMMS: the waiting line is a gold rail, not a second framed box');
