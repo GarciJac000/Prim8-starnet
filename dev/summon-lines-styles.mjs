@@ -63,8 +63,25 @@ try {
     return true;
   })()`);
   await sleep(6000);   // workers walk to their desks, links grow
+  const PERF = process.argv.includes('--perf');
+  if (PERF) {
+    // PERF: the station's own render probe (World.renderPace: drawCostMs = this frame's draw cost; draws = frames drawn)
+    // sampled over 8 s for the same scene with the plates on, the plates off, and the runs ended (nothing working)
+    const sample = async (label) => {
+      const a = await evalJS(cdp, 'World.renderPace()'); const t0 = Date.now(); const costs = [];
+      while (Date.now() - t0 < 8000) { await sleep(200); costs.push((await evalJS(cdp, 'World.renderPace()')).drawCostMs); }
+      const b = await evalJS(cdp, 'World.renderPace()');
+      const avg = costs.reduce((x, y) => x + y, 0) / costs.length, max = Math.max.apply(null, costs);
+      console.log(label.padEnd(22), 'fps', ((b.draws - a.draws) / ((Date.now() - t0) / 1000)).toFixed(1), ' drawMs avg', avg.toFixed(2), ' max', max.toFixed(2), ' mode', b.mode);
+    };
+    await sample('plates + links ON');
+    await evalJS(cdp, 'World.setOverlays(false)'); await sample('overlays OFF');
+    await evalJS(cdp, 'World.setOverlays(true)');
+    await evalJS(cdp, `(() => { ${JSON.stringify(ids)}.forEach((id, i) => U.bus.emit('agent.run.end', { agentId: id, runId: 'r' + i, reason: 'done', turns: 1, usd: 0 })); U.bus.emit('agent.run.end', { agentId: 'agent', runId: 'r-lead', reason: 'done', turns: 1, usd: 0 }); return 1; })()`);
+    await sleep(3000); await sample('runs ended (idle)');
+  }
   mkdirSync(OUT, { recursive: true });
-  for (const st of [9]) {   // one shot: the style knob is gone (Andrew picked IDENTITY)
+  for (const st of (PERF ? [] : [9])) {   // one shot: the style knob is gone (Andrew picked IDENTITY)
     await evalJS(cdp, `window.__plateStyle = ${st}`);
     await sleep(700);
     const r = await cdp.send('Page.captureScreenshot', { format: 'png', clip: { x: 478, y: 300, width: 604, height: 420, scale: 2 } });
