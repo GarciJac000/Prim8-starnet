@@ -2595,6 +2595,9 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
   animation: coach-in .35s ease-out;
 }
 .nav-coach[hidden] { display: none; }
+/* a window on screen means a dock was found: the hint steps back instead of lying over the window's corner (the sweep
+   10-25), and comes back with the empty station if it was never retired */
+body:has(#terms > .term:not(.term-min-hidden)) #nav-coach { visibility: hidden; }
 .nav-coach b { color: var(--ph-bright); font-weight: normal; }
 .nav-coach-x {
   flex: 0 0 auto; font-family: inherit; font-size: 12px; letter-spacing: 1px; cursor: pointer;

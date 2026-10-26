@@ -165,3 +165,14 @@
 .manual-win :is(.fm-entry-h,.fm-mission h3)::after { display: none; }
 
 .dlv-review .ob-primary { display: flex; flex-wrap: wrap; gap: 9px; margin-bottom: 18px; }
+/* the chapter tabs in even rows (the sweep 10-25 caught HELP alone on a second row): 8 across where they fit, else two
+   rows of 4, else four rows of 2 — never a straggler */
+.manual-win .fm-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.manual-win .fm-tab { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@container (min-width: 1040px) { .manual-win .fm-tabs { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+@container (max-width: 520px) { .manual-win .fm-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* the loop-kind cards in one row share their name and badge rows (subgrid): "Build · Test · Verify" wrapping to two lines
+   no longer drops its badge below its neighbour's (the sweep 10-25) */
+.sn-menu .lp-shapes { grid-auto-rows: auto; }
+.sn-menu .lp-shape { grid-row: span 2; grid-template-rows: subgrid; row-gap: 4px; }
+.sn-menu .lp-shape :is(.lp-shape-n, .lp-shape-r) { align-self: start; }

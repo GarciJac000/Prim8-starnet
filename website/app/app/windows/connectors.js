@@ -327,7 +327,7 @@
     ];
     const secRouter =
       '<details class="ab-router" id="ab-router">' +
-        '<summary class="ab-router-q"><span>＋ ADD AN ABILITY</span><small>Choose a service, server, channel or model provider</small></summary>' +
+        '<summary class="ab-router-q"><span>ADD AN ABILITY</span><small>Choose a service, server, channel or model provider</small></summary>' +
         '<div class="ab-router-grid">' +
           ROUTES.map((r, i) =>
             '<button type="button" class="ab-route" style="--ci:' + i + '"' +
