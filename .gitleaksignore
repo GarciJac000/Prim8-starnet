@@ -139,3 +139,12 @@ d43ab06e62b5b3a51c4a37820477fd7b06a2dc9a:test/onepassword.test.js:generic-api-ke
 9b2b1c9352f0dfb05bce280dc241ebfe2174b637:test/vision-input.test.js:generic-api-key:297
 cff098ae174fb5a68c63e88c2483dbcef4272386:test/vision-input.test.js:generic-api-key:117
 cff098ae174fb5a68c63e88c2483dbcef4272386:test/vision-input.test.js:generic-api-key:153
+# 0.14.1 synthetic test fixtures (keys.save pasted-key tests, group-session key tests, the engine-stderr redaction test's sample RSA block): verified fake, 2026-10-26
+15e30d25ca7d31a8e910fa87ebce0950c285f007:src-tauri/src/sidecar_output.rs:private-key:678
+2daafc8d4e155f0fad2cd91813b9081c7534c495:test/keys-save.http.test.js:generic-api-key:51
+2daafc8d4e155f0fad2cd91813b9081c7534c495:test/keys-save.http.test.js:generic-api-key:59
+2daafc8d4e155f0fad2cd91813b9081c7534c495:test/keys-save.test.js:generic-api-key:142
+2daafc8d4e155f0fad2cd91813b9081c7534c495:test/keys-save.test.js:stripe-access-token:31
+c4562420ac38ceea615d78d1d77c9760e18fb649:test/group-sessions.http.test.js:generic-api-key:8
+c4562420ac38ceea615d78d1d77c9760e18fb649:test/group-sessions.http.test.js:generic-api-key:9
+c4562420ac38ceea615d78d1d77c9760e18fb649:test/keys-save.http.test.js:generic-api-key:62
