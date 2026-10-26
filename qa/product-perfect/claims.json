@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "69bb1946af81ef724bc1fbd3008ade8522a8470d",
+    "sourceCommit": "484e31e7fcbbb92bd8b8f0a8a168b2132818f42b",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -353,8 +353,8 @@
       },
       {
         "path": "frontend/app/chat.js",
-        "bytes": 891254,
-        "sha256": "e7a99da59e25b28f17c946eddfbbbebcf887e09a6141ce4c16aec3b483bb43fe"
+        "bytes": 896665,
+        "sha256": "0da8c0765b451a29056e0b88c9236ffa2d7f806038d4148bc93a96fdbe7bcfac"
       },
       {
         "path": "frontend/app/chatresize.js",
@@ -1258,8 +1258,8 @@
       },
       {
         "path": "frontend/app/toolprops.js",
-        "bytes": 4604,
-        "sha256": "af6cd0cedef3e03c7749b8e09609c33849bafbd3323822cf21e707ada6cc8334"
+        "bytes": 4706,
+        "sha256": "1fba49df7fd6948aab772f31dab14986ccab0e270720dade97440a4ce4046f70"
       },
       {
         "path": "frontend/app/tooltip.js",
@@ -1668,8 +1668,8 @@
       },
       {
         "path": "frontend/css/pipglass.css",
-        "bytes": 184931,
-        "sha256": "efb19376937c54c476716082244e527b608b36269cce23ab9023262aa6b741c4"
+        "bytes": 185273,
+        "sha256": "46a835ecd5e309be19f22bdac866a6060271b631a3d40ea63a750341641f36ff"
       },
       {
         "path": "frontend/css/plugins.css",
