@@ -82,10 +82,14 @@
   const BUILDER_KIT = [{ instanceId: 'builder_lent', objectType: 'builder' }];
   const kitFor = lent => (lent ? WORKER_KIT.concat(BUILDER_KIT) : WORKER_KIT);
   const canLendBuilder = ctx => { try { const r = ctx && typeof ctx.canUse === 'function' ? ctx.canUse({ name: 'station.build' }) : null; return !!(r && r.ok); } catch (_) { return false; } };
-  // isFile: the worker run's own file probe (deps.fileProbe) — the dispatcher and the worker's run answer ONE way
+  // isFile: the worker run's own file probe (deps.fileProbe) — the dispatcher and the worker's run answer ONE way.
+  // Only a PURE one-host read is bounded (starnet-releases#5): a brief that also asks the worker to write, fix, test,
+  // run, save, build or implement keeps the ordinary worker budgets — 3 tools and 45s cut engineering work off mid-job.
   const boundedDomainTask = (text, isFile) => {
-    try { return domainTask && typeof domainTask.classify === 'function' ? domainTask.classify(text, isFile ? { isFile } : undefined) : null; }
-    catch (_) { return null; }
+    try {
+      const policy = domainTask && typeof domainTask.classify === 'function' ? domainTask.classify(text, isFile ? { isFile } : undefined) : null;
+      return policy && policy.pureRead ? policy : null;
+    } catch (_) { return null; }
   };
 
   // abort without ever throwing out of a timer callback (AbortController.abort(reason) is not universal).
