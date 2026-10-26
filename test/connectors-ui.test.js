@@ -196,7 +196,7 @@ function fakeStack(tools) {
 
   // ---------- 3. CONNECTOR CATALOG tab (one-click browse-and-add) ----------
   // the tab exists and is fed by the catalog route
-  A.ok(/id:\s*'catalog'/.test(station) && /label:\s*'CATALOG'/.test(station), 'CATALOG tab registered on the connectors console');
+  A.ok(/id:\s*'catalog', label:\s*'APPS'/.test(station), 'the catalog is the APPS section of the connectors console (ONE FLAT LIST 2026-10-26)');
   A.ok(/id="cc-list"/.test(station), 'catalog list container present');
   A.ok(/\/api\/connectors\/catalog/.test(station), 'catalog pane fetches GET /api/connectors/catalog');
   A.ok(/function ccCard/.test(station) && /function ccGroupHTML/.test(station), 'catalog card + category-group renderers present');
@@ -314,15 +314,18 @@ function fakeStack(tools) {
     'platform cards are identity-namespaced so GitHub/Notion/Stripe cannot collide with same-id MCP cards');
   A.ok(!/id="ky-catalog"/.test(station) && /CONNECTED API KEYS/.test(station),
     'KEYS shows connected credentials and no longer hides the curated platform catalog inside its add form');
-  const routeSource = /const ROUTES = (\[[\s\S]*?\n\s*\]);/.exec(station);
-  const routes = routeSource ? vm.runInNewContext(routeSource[1]) : [];
-  const podRoute = routes.find(r => /print.on.demand|\bPOD\b/i.test(r.title + ' ' + r.blurb));
-  A.ok(podRoute && podRoute.to === 'catalog',
-    'the ABILITIES front door routes POD discovery through CATALOG before the KEYS setup path');
-  A.eq(routes.filter(r => r.to === 'catalog').length, 1,
-    'service and platform discovery share one catalog route');
-  A.ok(/to: 'catalog', title: 'Connect a service you use'/.test(station) && /entry\.platformApi \? 'keys' : 'mcp'/.test(station),
-    'one service front door preserves the correct platform-key and connector management paths');
+  /* ONE FLAT LIST (UX night 2026-10-26, Andrew: CONNECT should be "more like the setting menu where u can see all the
+     different options"): the ROUTES front door and its INSTALLED / DISCOVER / CREATE switch are gone. The rail IS the
+     front door, APPS first, so every service and platform (print-on-demand included) is found in APPS before anyone
+     reaches the API KEYS form; a platform card's MANAGE lands on the API KEYS block, a service's on its CONNECTED row. */
+  A.ok(!/const ROUTES = \[/.test(station) && !/secRouter|id="ab-routes"/.test(station), 'no router front door above the rail');
+  const railSrc = station.slice(station.indexOf("mountConsole(body, 'connectors', ["), station.indexOf("searchLabel: 'Search abilities'"));
+  A.eq([...railSrc.matchAll(/\{ id: '([a-z-]+)', label: '([A-Z ]+)'/g)].map(m => m[2]).join(' / '), 'APPS / CONNECTED / TOOLS / EXTENSIONS',
+    'the rail reads APPS first, then CONNECTED, then (after the skills lane) TOOLS and EXTENSIONS');
+  A.ok(/lanes\.reduce\(\(acc, l\) => acc\.concat\(l\.sections\), \[\]\)/.test(railSrc) && !/groups:/.test(railSrc), 'the skills lane joins the same flat rail, with no intent groups');
+  A.ok(/id="ab-keys"><span class="sec-l">API KEYS/.test(station) && /secMcp \+ secKeys/.test(railSrc), 'API KEYS is a block of CONNECTED, under its services');
+  A.ok(/if \(act === 'manage'\) \{[\s\S]{0,200}#con-tab-connectors-mcp[\s\S]{0,120}if \(entry\.platformApi\) \{[^\n]*#ab-keys/.test(station),
+    'MANAGE on a platform card lands on CONNECTED, scrolled to API KEYS; a service lands on its CONNECTED row');
 
   const availabilitySource = A.fnBody(station, 'function tsAvailability(');
   const availability = vm.runInNewContext('(' + availabilitySource + ')');

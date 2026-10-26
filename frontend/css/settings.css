@@ -24,8 +24,14 @@
 .settings-console .set-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 22px 0 10px; border: 0; }
 .settings-console .set-sub-k { font-size: 14px; color: var(--ph-bright); }
 .settings-console .set-sub-d { font-size: 14px; line-height: 1.4; }
+/* AI & MODELS' four provider groups (UX night 10-26): the first sits snug under the jump chips; while a search filters the
+   cards a heading would stand over nothing, so the headings step aside and the hits read as one list */
+.settings-console .prov-list > .prov-group:first-child { margin-top: 4px; }
+.con-searching .prov-group { display: none; }
 .settings-console .settings-jumps { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 18px; }
-.settings-console .settings-jumps button { border: 1px solid rgba(var(--ph-rgb), .17); border-radius: 7px; padding: 8px 10px; font: inherit; font-size: 12px; color: var(--ph-dim); background: rgba(var(--ph-rgb), .035); cursor: pointer; }
+/* one case for the row: the chips read their sub-headings, and "New agent defaults" / "Runtime limits" sat in sentence case
+   beside API KEYS and POWER (UX night 10-25) */
+.settings-console .settings-jumps button { border: 1px solid rgba(var(--ph-rgb), .17); border-radius: 7px; padding: 8px 10px; font: inherit; font-size: 12px; color: var(--ph-dim); background: rgba(var(--ph-rgb), .035); cursor: pointer; text-transform: uppercase; }
 .settings-console .settings-jumps button:hover { color: var(--ph-bright); border-color: var(--ph); }
 .settings-console .set-row { margin: 12px 0; line-height: 1.5; }
 .settings-console .mc-form { gap: 0; }

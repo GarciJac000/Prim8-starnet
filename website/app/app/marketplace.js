@@ -2577,7 +2577,7 @@ const Marketplace = (() => {
      A one-click path for a Commander arriving from OpenClaw or hermes-agent: detect installs (or pick a folder),
      preview exactly what the scan found, then RECRUIT mints a StarNet agent with the persona/orders/memory
      pre-filled. Every field shown comes straight from /api/harness/scan — nothing is invented (truthful telemetry).
-     Keys are NEVER read or transferred; the preview says so and ABILITIES › SAVED API CONNECTIONS is where the Commander re-enters them.
+     Keys are NEVER read or transferred; the preview says so and ABILITIES › CONNECTED › API KEYS is where the Commander re-enters them.
      Backend routes (built in parallel this session): POST /api/harness/detect, POST /api/harness/scan. The folder
      fallback reuses the existing POST /api/projects/pickfolder. If a route is missing the flow degrades to an honest
      empty/error state — it never fakes a detection or a scan. */
@@ -2744,7 +2744,7 @@ const Marketplace = (() => {
     // warnings: render every entry the scan returned verbatim, and ALWAYS state the keys-never-transfer truth
     // (added only if the scan didn't already say it).
     const warns = Array.isArray(s.warnings) ? s.warnings.slice() : [];
-    if (!warns.some(w => /key/i.test(w) && /transfer/i.test(w))) warns.push('keys never transfer — re-enter them in ABILITIES › INSTALLED › SAVED API CONNECTIONS');
+    if (!warns.some(w => /key/i.test(w) && /transfer/i.test(w))) warns.push('keys never transfer — re-enter them in CONNECT › ABILITIES › CONNECTED › API KEYS');
     const warnHTML = warns.map(w => '<div class="mkt-r-warn dim">⚠ ' + esc(w) + '</div>').join('');
     return '<div class="mkt-save mkt-imp mkt-imp-preview">' +
       '<div class="mkt-save-h">⇪ IMPORT — ' + esc(s.name || H) + '</div>' +

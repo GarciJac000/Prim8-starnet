@@ -1531,6 +1531,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     let activeId = consoleSection[key];
     if (key === 'settings' && activeId === 'nightshift') activeId = 'autonomy';   // folded into AUTONOMY (ONE WORD: AUTONOMY)
     if (key === 'settings' && (activeId === 'models' || activeId === 'livevoice')) activeId = activeId === 'models' ? 'providers' : 'appearance';   // the same aliases openTerm applies (a remembered LIVE VOICE reopened on AI & MODELS)
+    const retired = SECTION_ALIAS[key] && SECTION_ALIAS[key][activeId];   // a remembered section that became a block (ONE FLAT LIST)
+    if (retired) activeId = retired[0];
     if (!sections.some(s => s.id === activeId)) activeId = sections[0] && sections[0].id;
 
     // ---- left: optional rail-top slot (e.g. the dossier roster) + optional search + the section rail (role=tablist) ----
@@ -1712,9 +1714,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
 
     // ---- search: filter rows across every section, dim empty sections, group matches ----
     if (searchInput) {
+      let lastQuery = '';
       const doFilter = () => {
         const q = (searchInput.value || '').trim().toLowerCase();
         body.classList.toggle('con-searching', !!q);
+        // new results start at the top: the pane kept the scroll of whatever was read before, so the first hit sat
+        // cut off above the fold ("gmail" in CONNECT, UX night 10-25)
+        if (q !== lastQuery) { lastQuery = q; if (q) host.scrollTop = 0; }
         if (!q) {
           if (searchEmpty) searchEmpty.hidden = true;
           // restore: show the active section only, clear all row dimming + section flags
@@ -2085,7 +2091,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       { lbl: 'ACCESS',    val: 'checking effective access…', dim: false, go: 'ag-approval-card',  tip: 'change it in CONFIG › ACCESS' },
       { lbl: 'PROFILE',   val: prof.label.toLowerCase(),  dim: false,               go: 'ag-execution-card', tip: 'change it in CONFIG › ACCESS' },
       { lbl: 'VOICE',     val: voice || 'station default', dim: !voice,             go: 'ag-voice',          tip: 'opens SETTINGS › LOOK & SOUND › VOICE FOR this agent' },
-      { lbl: 'SKILLS',    val: 'its own procedures',       dim: true,               go: 'ag-skills',         tip: 'opens ABILITIES › AGENT SKILLS for this agent' },
+      { lbl: 'SKILLS',    val: 'its own procedures',       dim: true,               go: 'ag-skills',         tip: 'opens ABILITIES › SKILLS › LEARNED SKILLS for this agent' },
       { lbl: 'AWAY WORK', val: (a && a.workshop) ? 'on'  : 'off', dim: !(a && a.workshop), go: 'ag-workshop-card',  tip: 'opens AUTOMATE › AWAY WORK' }
     ];
     return '<div class="ag-setup" role="group" aria-label="How this agent is set up">' +
@@ -2376,9 +2382,12 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           '<button class="bb sm" data-access-manage>MANAGE ABILITIES</button> <button class="bb sm" data-access-settings>STATION PERMISSIONS</button> <button class="bb sm" data-access-refresh>REFRESH ACCESS</button>';
         // BRIEF's compact line: how many toolsets are ready, which ones, and the approval mode — one jump to the full grid
         const ready = view.toolsets.filter(x => x.available);
-        const compactHtml = '<p class="ag-can-do"><b>' + ready.length + ' of ' + view.toolsets.length + ' toolsets ready</b>'
+        // in the words TOOLS and the ACCESS tile use (UX night 10-26): "7 of 8 tools ready · CHECK WITH ME", never the
+        // sidecar's "ASK — standing grants apply"
+        const postureWord = authority.unrestricted ? 'FULL POWER' : (askingPosture() === 'custom' ? 'custom access' : askingPosture());
+        const compactHtml = '<p class="ag-can-do"><b>' + ready.length + ' of ' + view.toolsets.length + ' tools ready</b>'
           + (ready.length ? ' · ' + ready.slice(0, 6).map(x => esc(x.label)).join(', ') + (ready.length > 6 ? ' +' + (ready.length - 6) : '') : '')
-          + ' · ' + esc(authority.approvalLabel) + '</p><button class="bb sm" data-access-full>SEE FULL ACCESS</button>';
+          + ' · ' + esc(postureWord) + '</p><button class="bb sm" data-access-full>SEE FULL ACCESS</button>';
         targets.forEach(target => {
           if (typeof target.hasAttribute === 'function' && target.hasAttribute('data-access-compact')) {
             target.innerHTML = compactHtml;
@@ -3275,9 +3284,11 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         : (j.granted && j.shiftsPaused) ? 'shifts paused — scheduling is OFF (AUTOMATE › SCHEDULES › TURN SCHEDULING ON)'
         : (j.granted && nextAt)
         ? (due <= 60000 ? 'next shift: due now' : 'next shift in ' + rel(due))
-        : (j.granted ? 'shift not scheduled yet' : 'shifts are off (grant above)');
+        : (j.granted ? 'shift not scheduled yet' : 'shifts are off — switch on the queue above');
+      // the station's cadence is minutes ('every 360m'); a whole number of hours reads as hours (UX night 10-25)
+      const every = String(j.shiftEvery || '').replace(/(\d+)m\b/, (m, n) => (+n >= 60 && +n % 60 === 0) ? (+n / 60) + 'h' : m);
       h += '<div class="ws-bl-foot">' +
-        '<span class="dim" style="font-size:11px;">' + esc(next) + (j.shiftEvery ? ' · repeats ' + esc(String(j.shiftEvery).replace(/^every /, 'every ')) : '') + '</span>' +
+        '<span class="dim" style="font-size:11px;">' + esc(next) + (every ? ' · repeats ' + esc(every) : '') + '</span>' +
         (j.granted && items.some(it => it.state === 'queued') ? '<button class="bb sm" id="ag-ws-now">⚒ build now</button>' : '') +
         '</div>';
       const ls = lastShiftLine(j.lastShift);
@@ -3802,28 +3813,31 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       ? '<label class="mc-hint" for="sk-agent-pick">Skills of</label><select id="sk-agent-pick" class="ab-agent-pick" aria-label="Show the skills of agent">' +
         present.map(x => '<option value="' + esc(x.id) + '"' + (x.id === agentId ? ' selected' : '') + '>' + esc(x.name || x.id) + '</option>').join('') + '</select>'
       : '';
+    // "recipes" here collided with the ❒ RECIPES dock feature (audit finding 2) — these are PROCEDURES: how-to
+    // guides an agent follows mid-task, not launchable jobs. The intro that restated the desc folded into it (UX night 10-25).
     const secLibrary =
-      // "recipes" here collided with the ❒ RECIPES dock feature (audit finding 2) — these are PROCEDURES: how-to
-      // guides an agent follows mid-task, not launchable jobs.
-      '<p class="sk-note sk-lib-intro">Enable skills for the whole station. Agents use them when relevant, with the tools and service access they already have.</p>' +
       '<div id="sk-lib" class="sk-lib"><div class="sk-loading"><span class="loading pulse">loading the skill library…</span></div></div>';
-    const secAgent =
-      agentPicker +
+    const secAgent =   // the agent picker leads the whole SKILLS section now: it steers the library, these skills and the market
       '<p class="sk-note sk-lib-intro" id="sk-agent-intro">' + skillsIntro(a) + '</p>' +
       '<div id="sk-agent" class="sk-lib"><div class="sk-loading">loading agent skills…</div></div>';
+    // ONE FIELD, ONE BUTTON (UX night 10-26, Andrew: "pretend these users are like 5"): a link and INSPECT are the whole
+    // job, and what INSPECT finds shows right under them. An exported package file and skill registries ("taps") are
+    // power tools: folded under MORE WAYS, every id unchanged, so wireSkillExchange() is untouched.
     const secExchange =
-      '<p class="sk-note sk-lib-intro">Install a complete open skill package from a public HTTPS or GitHub <b>SKILL.md</b>. StarNet freezes the instructions and support files under one SHA-256 before review. Missing, oversized, unsafe, or partial packages are refused.</p>' +
-      '<div class="sk-exchange-form"><label for="sk-exchange-url">SKILL.MD SOURCE</label>' +
+      '<p class="sk-note sk-lib-intro">Paste a link to a skill’s <b>SKILL.md</b> file, for example on GitHub. StarNet checks the whole package and shows you what it does before anything installs; unsafe or broken packages are refused.</p>' +
+      '<div class="sk-exchange-form"><label for="sk-exchange-url">LINK TO A SKILL.md</label>' +
         '<div class="sk-exchange-row"><input id="sk-exchange-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/owner/repo/blob/main/SKILL.md">' +
-        '<button id="sk-exchange-inspect" class="consent-btn" type="button">INSPECT</button></div>' +
-        '<label class="consent-btn" for="sk-exchange-import">IMPORT EXPORTED PACKAGE</label><input id="sk-exchange-import" type="file" accept=".json,.starnet-skill.json,application/json" hidden></div>' +
-      '<div class="sk-exchange-form"><label for="sk-registry-url">REGISTRY / TEAM TAP</label>' +
-        '<div class="sk-exchange-row"><input id="sk-registry-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/skills/index.json">' +
-        '<input id="sk-registry-query" type="search" autocomplete="off" placeholder="search or browse all">' +
-        '<button id="sk-registry-search" class="consent-btn" type="button">BROWSE</button>' +
-        '<button id="sk-registry-discover" class="consent-btn" type="button">DISCOVER SITE</button>' +
-        '<button id="sk-registry-save" class="consent-btn" type="button">SAVE TAP</button></div><div id="sk-registry-sources"></div><div id="sk-registry-results"></div></div>' +
-      '<div id="sk-exchange-preview" class="sk-exchange-preview" role="status" aria-live="polite"><div class="sk-loading">Paste a source to inspect its instructions, provenance, and guard verdict.</div></div>';
+        '<button id="sk-exchange-inspect" class="consent-btn" type="button">INSPECT</button></div></div>' +
+      '<div id="sk-exchange-preview" class="sk-exchange-preview" role="status" aria-live="polite"><div class="sk-loading">Paste a link, then INSPECT. You see what the skill does, and whether it is safe, before anything installs.</div></div>' +
+      '<details class="mc-add-fold sk-more-ways"><summary>More ways to add a skill <span class="dim">(advanced)</span></summary>' +
+        '<div class="sk-exchange-form"><label class="consent-btn" for="sk-exchange-import">IMPORT EXPORTED PACKAGE</label><input id="sk-exchange-import" type="file" accept=".json,.starnet-skill.json,application/json" hidden></div>' +
+        '<div class="sk-exchange-form"><label for="sk-registry-url">REGISTRY / TEAM TAP</label>' +
+          '<div class="sk-exchange-row"><input id="sk-registry-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/skills/index.json">' +
+          '<input id="sk-registry-query" type="search" autocomplete="off" placeholder="search or browse all">' +
+          '<button id="sk-registry-search" class="consent-btn" type="button">BROWSE</button>' +
+          '<button id="sk-registry-discover" class="consent-btn" type="button">DISCOVER SITE</button>' +
+          '<button id="sk-registry-save" class="consent-btn" type="button">SAVE TAP</button></div><div id="sk-registry-sources"></div><div id="sk-registry-results"></div></div>' +
+      '</details>';
     /* Fill the LIVE VOICE section from the sidecar's real voice list and persist the pick.
        Truthful by construction: if the provider has no native voice endpoint we say so rather than
        offering choices that would do nothing, and the note about WHEN a change takes effect is shown
@@ -3831,8 +3845,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
 
     // SKILL MARKET (2026-09-29): the curated StarNet catalog, browsed as the same glass card grid the connectors
     // CATALOG uses. The catalog is fetched when this section loads, never in the background.
+    // the second intro paragraph restated the desc and the shelves' own notes; its one new fact moved into the desc
     const secMarket =
-      '<p class="set-about"><b>Add skills to your whole crew.</b> StarNet Originals are written by StarNet for your station; community picks are credited to their authors. Installing adds the skill to your SKILL LIBRARY and switches it on.</p>' +
       '<div class="cc-filters" id="skm-filters" role="group" aria-label="Filter the skill market">' +
         '<button type="button" class="cc-filter active" data-skm-filter="all" aria-pressed="true">ALL</button>' +
         '<button type="button" class="cc-filter" data-skm-filter="originals" aria-pressed="false">STARNET ORIGINALS</button>' +
@@ -3845,11 +3859,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div id="skm-list" class="cc-list"><span class="loading pulse">loading the skill market…</span></div>';
 
     const frag = html => (el => { el.innerHTML = html; });
+    // ONE FLAT LIST (UX night 10-26, Andrew: "more like the settings menu where u can see all the different options"):
+    // SKILL EXCHANGE is SKILL MARKET's FROM A LINK block and AGENT SKILLS is the LEARNED block of SKILLS. Every element id
+    // is unchanged, so wire() below runs as before, and the retired section ids land here via SECTION_ALIAS.
+    const block = (id, label) => '<div class="sec" id="' + id + '"><span class="sec-l">' + label + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>';
     const sections = [
-      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'Browse StarNet Originals and credited community skills, and install one for the whole crew in one click.', build: frag(secMarket) },
-      { id: 'library', label: 'SKILL LIBRARY', glyph: '▤', desc: 'The procedures your agents follow when a task matches: the ones built into StarNet and the ones you installed from the market.', build: frag(secLibrary) },
-      { id: 'agent', label: 'AGENT SKILLS', glyph: '✎', desc: 'Each agent keeps its own skill library. Pick whose to see.', build: frag(secAgent) },
-      { id: 'exchange', label: 'SKILL EXCHANGE', glyph: '⇩', desc: 'Inspect and install open SKILL.md procedures with provenance and guard review.', build: frag(secExchange) }
+      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'New skills for your crew, from StarNet and the community. Installing one switches it on for every agent.', build: frag(secMarket + block('ab-exchange', 'ADD FROM A LINK') + secExchange) },
+      { id: 'library', label: 'SKILLS', glyph: '▤', desc: 'What your crew knows how to do. Switch a skill on or off; agents use it when a task needs it, with the tools they already have.', build: frag(agentPicker + secLibrary + block('ab-agent-skills', 'LEARNED SKILLS') + secAgent) }
     ];
     function wire() {
       loadSkillMarket(agentId);
@@ -3880,6 +3896,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // names an object the Commander can't find
   const skmGear = g => SK_OBJ_NAME[g] || String(g).toUpperCase();
   let skmFilter = 'all';
+  // CATEGORY FOLDS (UX night 10-25): each shelf lists its categories as one-line folds (102 cards were one ~20,000px
+  // scroll). A fold the Commander opens stays open across the market's re-renders (an install repaints every card).
+  const skmFoldOpen = new Set();
   const skmBusy = new Map();   // slug -> 'install' | 'uninstall' while a request is in flight (survives re-renders)
   let skmResult = null;        // { slug, text, ok } — the last install/remove result, shown on that card
   let skmFocus = '';           // slug whose action button takes focus after the next render
@@ -3921,7 +3940,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       action = btn('uninstall', 'REMOVE'); hint = 'Installed · v' + esc(e.installedVersion || e.version) + '.' + needs;
     } else if (e.status === 'bundled') {
       action = '<span class="cc-badge cc-official">BUILT IN</span>';
-      hint = 'Came with StarNet (v' + esc(e.builtInVersion || e.version) + '). Switch it on or off in SKILL LIBRARY.';
+      hint = 'Came with StarNet (v' + esc(e.builtInVersion || e.version) + '). Switch it on or off in SKILLS.';
     } else if (e.status === 'update') {
       action = btn('install', 'UPDATE');
       hint = e.builtIn && !e.delisted && e.installedVersion === e.builtInVersion
@@ -3966,6 +3985,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // ones with a newer version waiting. A pulled or tampered skill shows under INSTALLED with its warning.
   function skmApplyFilter(list) {
     if (!list || list.dataset.skmOk !== '1') return;   // a failed/refused load has no cards: no filter claims about it
+    const searching = !!list.closest('.con-searching');   // while searching, the console search owns the folds
     list.querySelectorAll('.cc-group').forEach(g => {
       let vis = 0;
       g.querySelectorAll('.cc-card').forEach(c => {
@@ -3977,6 +3997,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       });
       g.hidden = vis === 0;
       const tag = g.querySelector('.sec-tag'); if (tag) tag.textContent = String(vis);
+      // INSTALLED / UPDATES are already the short list: their categories show their cards; ALL is the index again
+      if (!searching && g.matches('details')) g.open = (skmFilter === 'installed' || skmFilter === 'update') || skmFoldOpen.has(g.dataset.fold);
+    });
+    list.querySelectorAll('.skm-shelf').forEach(s => {
+      const n = s.querySelectorAll('.cc-card:not([hidden])').length;
+      s.hidden = n === 0;
+      const tag = s.querySelector(':scope > .sec .sec-tag'); if (tag) tag.textContent = String(n);
     });
     let none = list.querySelector('.cc-nores');
     const shown = list.querySelectorAll('.cc-card:not([hidden])').length;
@@ -4005,11 +4032,18 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       return;
     }
     const shelves = [['originals', 'StarNet Originals', 'Written by StarNet for your station\'s gear and tools.'], ['community', 'Community picks', 'Open skills by other authors, adapted for StarNet and credited.']];
+    // Originals still lead (DECISIONS: the Skill Market); inside a shelf, its categories in A-Z order, one fold each
     const html = shelves.map(([id, label, note]) => {
       const rows = d.entries.filter(e => e.shelf === id);
       if (!rows.length) return '';
-      return '<div class="cc-group"><div class="sec"><span class="sec-l">' + esc(label) + '</span><span class="sec-tag">' + rows.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
-        '<p class="mc-hint">' + esc(note) + '</p><div class="cc-grid">' + rows.map(skmCard).join('') + '</div></div>';
+      const cats = [...new Set(rows.map(e => String(e.category || 'Other')))].sort((a, b) => a.localeCompare(b));
+      return '<div class="skm-shelf" data-shelf="' + esc(id) + '"><div class="sec"><span class="sec-l">' + esc(label) + '</span><span class="sec-tag">' + rows.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+        '<p class="mc-hint">' + esc(note) + '</p>' + cats.map(cat => {
+          const inCat = rows.filter(e => String(e.category || 'Other') === cat), key = id + '/' + cat;
+          return '<details class="cc-group" data-fold="' + esc(key) + '"' + (skmFoldOpen.has(key) ? ' open' : '') + '>' +
+            '<summary class="sec"><span class="sec-l">' + esc(cat) + '</span><span class="sec-tag">' + inCat.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></summary>' +
+            '<div class="cc-grid">' + inCat.map(skmCard).join('') + '</div></details>';
+        }).join('') + '</div>';
     }).join('');
     const pulled = d.entries.filter(e => e.status === 'pulled');
     const banner = pulled.length
@@ -4022,7 +4056,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (skmFocus) {
       const f = host.querySelector('[data-skm="' + CSS.escape(skmFocus) + '"] .cc-acts button:not([disabled])') || host.querySelector('[data-skm="' + CSS.escape(skmFocus) + '"] .cc-acts');
       skmFocus = '';
-      if (f && f.focus) { if (!f.matches('button')) f.setAttribute('tabindex', '-1'); f.focus({ preventScroll: false }); }
+      // the card's category may have folded in this repaint (a search opened it): open it again before focusing, as the
+      // search's own fold when searching, else as the Commander's (they just acted inside it)
+      const fold = f && f.closest('details.cc-group');
+      if (fold && !fold.open) { fold.open = true; if (host.closest('.con-searching')) fold.dataset.searchOpened = '1'; else skmFoldOpen.add(fold.dataset.fold); }
+      // focus a tick later: while searching, a repainted card's group stays display:none until the caller re-applies the
+      // search (loadSkillMarket, right after this render), and focusing a hidden button silently drops to <body>
+      if (f && f.focus) setTimeout(() => { if (!f.isConnected) return; if (!f.matches('button')) f.setAttribute('tabindex', '-1'); f.focus({ preventScroll: false }); }, 0);
     }
   }
   function loadSkillMarket(agentId, refresh) {
@@ -4049,6 +4089,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       skmApplyFilter($('#skm-list'));
     });
     host.addEventListener('click', async ev => {
+      // the Commander's own fold choice (the click lands before the fold toggles)
+      const head = ev.target.closest('summary'), fold = head && head.parentElement;
+      if (fold && fold.matches('details.cc-group') && fold.dataset.fold) { if (fold.open) skmFoldOpen.delete(fold.dataset.fold); else skmFoldOpen.add(fold.dataset.fold); return; }
       const place = ev.target.closest('[data-place]');
       const shownId = host.dataset.agent || agentId;
       if (place) { sfx('click'); placeGearForSkill(place.dataset.place, (typeof App !== 'undefined' && App.agentName) ? App.agentName(shownId) : ''); return; }
@@ -4191,6 +4234,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     return { ready: ready, needsGear: needsGear, off: off };
   }
 
+  let skLibOffOpen = false;   // the TURNED OFF fold, as the Commander last left it
   function renderSkillLibrary(host, skills, agentId, placed) {
     if (!skills.length) { host.innerHTML = '<div class="sk-loading">No skills in the library yet.</div>'; return; }
     const placedSet = {}; (placed || []).forEach(p => placedSet[p] = true);
@@ -4240,13 +4284,16 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           '</div>' +
         '</div>';
     };
-    const section = (label, list) => list.length
-      ? '<div class="sec sk-state-sec"><span class="sec-l">' + label + '</span><span class="sec-tag">' + list.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' + list.map(card).join('')
-      : '';
+    const head = (label, list) => '<span class="sec-l">' + label + '</span><span class="sec-tag">' + list.length + '</span><span class="sec-r"></span><span class="sec-nd"></span>';
+    const section = (label, list) => list.length ? '<div class="sec sk-state-sec">' + head(label, list) + '</div>' + list.map(card).join('') : '';
     html += section('READY TO USE', groups.ready);
     html += section('NEEDS GEAR', groups.needsGear);
-    html += section('TURNED OFF', groups.off);
+    // TURNED OFF is one line (UX night 10-25): the library opened on 5 skills in use and then a wall of the 69 that are
+    // not. Opened, it stays open while the Commander switches skills on (every switch repaints the library).
+    if (groups.off.length) html += '<details class="sk-fold"' + (skLibOffOpen ? ' open' : '') + '><summary class="sec sk-state-sec">' + head('TURNED OFF', groups.off) + '</summary>' + groups.off.map(card).join('') + '</details>';
     host.innerHTML = html;
+    const offFold = host.querySelector('details.sk-fold');
+    if (offFold) offFold.querySelector('summary').addEventListener('click', () => { skLibOffOpen = !offFold.open; });
     host.querySelectorAll('[data-toggle]').forEach(btn => btn.addEventListener('click', () => {
       const slug = btn.dataset.toggle, next = btn.dataset.enabled !== 'true';
       btn.classList.add('busy');
@@ -4337,9 +4384,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (!input || !button || !host || !Harness.skillExchangeInspect) return;
     const inspect = async () => {
       const url = String(input.value || '').trim();
-      if (!url) { host.innerHTML = '<div class="sk-loading">Enter a public HTTPS URL to a SKILL.md file.</div>'; return; }
+      if (!url) { host.innerHTML = '<div class="sk-loading">Paste a link first: a public https:// address of a SKILL.md file.</div>'; return; }
       button.classList.add('busy'); button.textContent = 'INSPECTING…';
-      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">fetching and scanning exact source bytes…</span></div>';
+      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">downloading the skill and checking it…</span></div>';
       const r = await Harness.skillExchangeInspect(url);
       button.classList.remove('busy'); button.textContent = 'INSPECT';
       if (r && r.ok && r.preview) renderSkillExchangePreview(host, r.preview, shownAgent());
@@ -4349,7 +4396,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); inspect(); } });
     if (importer && Harness.skillExchangeImport) importer.addEventListener('change', async () => {
       const file = importer.files && importer.files[0]; if (!file) return;
-      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">verifying exported package bytes…</span></div>';
+      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">checking the package file…</span></div>';
       let envelope = ''; try { envelope = await file.text(); } catch (_) {}
       const r = envelope ? await Harness.skillExchangeImport(envelope) : { ok: false, error: 'That file could not be read.' };
       importer.value = '';
@@ -4604,7 +4651,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   function renderAgentSkills(host, skills, agentId, review) {
     review = review || {};
     if (!skills.length && !(review.candidates || []).length && !review.error) {
-      host.innerHTML = '<div class="sk-loading">No agent-created skills yet.</div>'; return;
+      // the agent by name, like the line above it (UX night 10-26)
+      const who = (present.find(x => x && x.id === agentId) || {}).name || 'This agent';
+      host.innerHTML = '<div class="sk-loading">' + esc(who) + ' has not learned any skills yet. Skills it writes or learns while working show up here.</div>'; return;
     }
     const active = skills.filter(s => s.state !== 'archived').length;
     const archived = skills.length - active;
@@ -5099,8 +5148,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         const items = streams.filter(s => s.lane === lane);
         return '<div class="kb-col"><h4>' + label + ' <i>' + items.length + '</i>' +
           (lane === 'active' ? activeAggregate(items) : '') + '</h4>' +
-          '<p class="kb-lane-note">' + ({todo:'Planned tasks, ready when you are.',active:'Ongoing work and results to open.',shipped:'Tasks you marked complete.'}[lane]) + '</p>' +
-          (items.length ? items.map(card).join('') : kbEmpty(lane)) + '</div>';
+          // an empty lane's own empty card already says what goes there; the note above it said it twice (UX night 10-25)
+          (items.length ? '<p class="kb-lane-note">' + ({todo:'Planned tasks, ready when you are.',active:'Ongoing work and results to open.',shipped:'Tasks you marked complete.'}[lane]) + '</p>' + items.map(card).join('') : kbEmpty(lane)) + '</div>';
       }).join('') +
       '</div>' +
       // the dead-end this footnote kills (2026-07-16): "a run finished while you were away" sent users
@@ -5774,9 +5823,34 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     return '<span class="prov-logo' + (id === 'starnet' ? ' prov-logo-starnet' : '') + '" aria-hidden="true" style="--provider-icon:url(&quot;' + esc(new URL('assets/brand/' + asset, document.baseURI).href) + '&quot;)"></span>';
   }
 
+  /* AI & MODELS IN FOUR PLAIN GROUPS (UX night 10-26, Andrew: "pretend these users are like 5"). Nineteen cards stood in
+     one column, each led by an API address ("generativelanguage.googleapis.com/v1beta"). They are the same cards, every
+     one still drawn (the visibleProviders law) and in PROVIDERS order inside its group, under the one question a newcomer
+     can answer: do you have StarNet credits, a subscription, an API key, or your own model server? A card leads with
+     what you need; its address rides the tip. The group with no id list takes every provider the others do not name. */
+  const PROVIDER_GROUPS = [
+    { id: 'credits', label: 'STARNET CREDITS', note: 'link this station once, nothing to paste', ids: ['starnet'] },
+    { id: 'subscription', label: 'A SUBSCRIPTION YOU HAVE', note: 'sign in, no API key', ids: ['codex', 'grok', 'kimi', 'claude-cli'] },
+    { id: 'key', label: 'AN API KEY', note: 'paste a key from the service’s website' },
+    { id: 'own', label: 'YOUR OWN MODELS', note: 'on this computer, or a server you run', ids: ['ollama', 'custom'] }
+  ];
+  const providerGroupOf = id => PROVIDER_GROUPS.find(g => g.ids && g.ids.indexOf(id) >= 0) || PROVIDER_GROUPS.find(g => !g.ids);
+  function groupedProviders() {
+    const shown = visibleProviders();
+    return PROVIDER_GROUPS.reduce((out, g) => out.concat(shown.filter(p => providerGroupOf(p.id) === g)), []);
+  }
+  function providerGroupHead(cards, i) {
+    const g = providerGroupOf(cards[i].id);
+    if (i > 0 && providerGroupOf(cards[i - 1].id) === g) return '';
+    return '<div class="set-sub prov-group" data-group="' + esc(g.id) + '"><span class="set-sub-k">' + esc(g.label) + '</span><span class="set-sub-d">' + esc(g.note) + '</span></div>';
+  }
+  // what the card says under its name: the subscription for a sign-in provider ("ChatGPT subscription"), else the blurb
+  const providerNeed = p => /^OAuth · /.test(p.endpoint) ? p.endpoint.slice('OAuth · '.length) : p.blurb;
   function providersHtml() {
     const active = activeProv();
-    return visibleProviders().map((p, pi) => {
+    const cards = groupedProviders();
+    return cards.map((p, pi) => providerGroupHead(cards, pi) + providerCardHtml(p, pi)).join('');
+    function providerCardHtml(p, pi) {
       // The credits provider has its own card: no key to paste, no sign-in, and a status line that
       // states the BALANCE, because a paid provider reading "connected" at $0.00 would be a lie of
       // exactly the kind this panel exists to avoid.
@@ -5845,7 +5919,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           providerLogoHtml(p.id) +
           '<span class="prov-main">' +
             '<span class="prov-name">' + esc(p.name) + (runnable ? '<span class="prov-badge">ACTIVE</span>' : '') + '</span>' +
-            '<span class="prov-ep">' + esc(p.endpoint) + ' · ' + esc(p.blurb) + '</span>' +
+            '<span class="prov-ep" data-tip="' + esc(p.endpoint + ' · ' + p.blurb) + '">' + esc(providerNeed(p)) + '</span>' +
           '</span>' +
         '</button>' +
           '<span class="prov-stat"><span class="prov-stat-t">' + stat + statWhy + (credentialSaved && !isOAuthProvider(p.id) ? '<i>' + n + (n === 1 ? ' key' : ' keys') + '</i>' : '') + '</span></span>' +   // org P03: the reason sits right under the verdict it explains, above the key count
@@ -5874,7 +5948,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
             '</div>'
           : '') +
         '</div>';
-    }).join('');
+    }
   }
   // The STARNET MANAGED card. Same shape as every other provider row so it reads as one of them, but its
   // action routes to the STORE rather than owning a second copy of the pairing flow.
@@ -5892,7 +5966,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         providerLogoHtml(p.id) +
         '<span class="prov-main">' +
           '<span class="prov-name">' + esc(p.name) + (runnable ? '<span class="prov-badge">ACTIVE</span>' : '') + '</span>' +
-          '<span class="prov-ep">' + esc(p.endpoint) + ' · ' + esc(p.blurb) + '</span>' +
+          '<span class="prov-ep" data-tip="' + esc(p.endpoint) + '">' + esc(providerNeed(p)) + '</span>' +
         '</span>' +
       '</button>' +
         '<span class="prov-stat"><span class="prov-stat-t">' + stat + '</span></span>' +
@@ -7494,9 +7568,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // saved overrides. Precedence (env > saved > default) is enforced + reported by the sidecar; the UI just shows
   // whether a field is env-locked (read-only + a note) or a saved override.
   const ADV_FIELDS = [
-    { key: 'maxIters', label: 'MAX ITERATIONS', hint: 'optional tool-turn ceiling for one run. 0 = unlimited (default).', min: 0, max: 200, step: 1 },
-    { key: 'maxConcurrentAgents', label: 'MAX CONCURRENT AGENTS', hint: 'optional simultaneous-agent ceiling. 0 = unlimited (default).', min: 0, max: 32, step: 1 },
-    { key: 'consentTimeoutMs', label: 'CONSENT TIMEOUT (MS)', hint: 'how long a permission prompt waits for your answer before auto-denying (so a run never hangs).', min: 5000, max: 600000, step: 1000 },
+    { key: 'maxIters', label: 'MAX ITERATIONS', hint: 'the most tool steps one run may take. 0 = no limit (default).', min: 0, max: 200, step: 1 },
+    { key: 'maxConcurrentAgents', label: 'MAX CONCURRENT AGENTS', hint: 'the most agents working at the same time. 0 = no limit (default).', min: 0, max: 32, step: 1 },
+    { key: 'consentTimeoutMs', label: 'CONSENT TIMEOUT (MS)', hint: 'how long an approval card waits for your answer before it says no for you (so a run never hangs).', min: 5000, max: 600000, step: 1000 },
     { key: 'cronTickMs', label: 'ROUTINE TICK (MS)', hint: 'how often the scheduler checks for due routines.', min: 5000, max: 600000, step: 1000 },
     { key: 'maxSubscriptionTokens', label: 'CLAUDE CODE TOKEN CEILING', hint: 'tokens one run may use on a Claude subscription sign-in (cache re-reads count 1/10). 0 = no ceiling. Applies from the next run.', min: 0, max: 100000000, step: 100000 },
     // issue #135: the ceiling on a model StarNet can't price (a custom provider's model) was env-only. Both token ceilings
@@ -7755,15 +7829,14 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div class="prov-list">' + providersHtml() + '</div>' +
       '<h4 class="ms-h">API KEYS</h4>' +
       '<div class="key-list">' + keysHtml() + '</div>' +
-      '<p class="set-about">Credentials are saved locally and used to authenticate with the selected service. Saved keys stay masked. Desktop storage uses the OS keychain when available.</p>' +
-      // org P05: model keys live here; a SERVICE key lives in CONNECT › ABILITIES › SAVED API CONNECTIONS — one door, the
-      // places.js api-connections target (live walk 10-14: the door used to open CATALOG, so no key reached the place the
-      // sentence named). Gmail and Notion are SIGN IN catalog connectors (sidecar/mcp/catalog.js authType 'oauth') that
-      // SAVED API CONNECTIONS cannot connect, so the line says they connect from CATALOG — the neighbouring tab of the
-      // window this key opens. The key sits OUTSIDE the .set-about prose: that paragraph's 0.55 reading-dim greyed it into a
-      // disabled-looking key.
-      '<p class="set-about">A key for any other service goes in CONNECT › ABILITIES › SAVED API CONNECTIONS; Gmail, Notion and other sign-in services connect from CATALOG beside it.</p>' +
-      '<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ SAVED API CONNECTIONS</button></div>' +
+      '<p class="set-about">Your keys stay on this computer, always masked; the desktop app keeps them in the system keychain when it can.</p>' +
+      // org P05: model keys live here; a SERVICE key lives in CONNECT › ABILITIES › CONNECTED › API KEYS — one door, the
+      // places.js api-connections target (live walk 10-14: the door used to open the catalog, so no key reached the place the
+      // sentence named). Gmail and Notion are SIGN IN catalog connectors (sidecar/mcp/catalog.js authType 'oauth') that an
+      // API key cannot connect, so the line says they connect from APPS — the neighbouring section of the window this key
+      // opens. The key sits OUTSIDE the .set-about prose: that paragraph's 0.55 reading-dim greyed it into a disabled-looking key.
+      '<p class="set-about">A key for any other service goes in CONNECT › ABILITIES › CONNECTED › API KEYS; Gmail, Notion and other sign-in services connect from APPS beside it.</p>' +
+      '<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ CONNECT › API KEYS</button></div>' +
       // STORE / MANAGED CREDITS — rendered ONLY when the sidecar reports a configured credits backend (/api/credits).
       // When credits aren't wired this stays an empty node (no dead card, no fake balance — the honesty law). wireCredits
       // fetches the real balance + history and the external purchase link; buying opens a browser tab, never an in-app form.
@@ -7936,11 +8009,14 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // sets what the loop tries NEXT if that model fails mid-run. Persisted server-side + applied live to every run
       // path (browser, cron, channels); env SKYNET_FALLBACK_MODELS is the default until you save one here.
       '<h4 class="ms-h">FALLBACK MODELS <span class="dim">— tried in order if your primary model fails</span></h4>' +
-      '<p class="set-about">Choose your primary model in COMMS. If it fails mid-run because of availability, authentication, billing, or rate limits, StarNet tries this list from top to bottom. Saved models use your OpenRouter connection, or your StarNet connection when StarNet is the primary provider. <b>An empty list disables fallback.</b> Model changes appear in COMMS and the logbook.</p>' +
+      // plain first (UX night 10-26): what it is for, then the one rule; which connection runs a fallback model stays said;
+      // the four real trigger classes stay named (errorClass: availability, authentication, billing, rate limits), and the word
+      // is FALLBACK, never "backup" (org P04: STATION BACKUP is a different thing)
+      '<p class="set-about">If your model fails mid-run because it is unavailable, its key or sign-in is refused, it is out of credit, or it hits rate limits, StarNet tries these models, top to bottom. You pick your main model in COMMS. <b>An empty list means no fallback.</b> Fallback models run on your OpenRouter key, or on StarNet credits when StarNet is your provider; COMMS and the logbook say when one takes over.</p>' +
       '<div class="mc-form" id="fbc-form">' +
         '<div id="fbc-list" class="mc-list-fb"><div class="dim">reading chain…</div></div>' +
         '<div class="set-row"><select id="fbc-add" class="fbc-sel"><option value="">＋ add a model from the catalog…</option></select></div>' +
-        '<div class="mc-hint">Order is the retry order — the loop walks it top-to-bottom. Up to <span id="fbc-max">8</span> models. Unknown ids are allowed (the catalog can be stale) but flagged.</div>' +
+        '<div class="mc-hint">Up to <span id="fbc-max">8</span> models. A model id the catalog does not know still saves, marked unknown.</div>' +
         '<div class="mc-acts">' +
           '<button class="bb sm" id="fbc-save">SAVE CHAIN</button>' +
           '<button class="bb xs" id="fbc-reset" title="clear the saved chain so it follows the environment default again" style="display:none">RESET TO DEFAULT</button>' +
@@ -7952,18 +8028,18 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // at "(station default)" a tier inherits the model dock's primary, so this is purely opt-in. Saved per-machine
       // (localStorage) and read live by the summon path (app.resolveTierModel) — no rerun/rebuild needed.
       '<h4 class="ms-h">New agent defaults <span class="dim">— model choice by class tier</span></h4>' +
-      '<p class="set-about">Choose the model used when recruiting each class tier. <b>Station default</b> follows your primary model in COMMS. Existing agents keep their model; you can change an individual agent in its dossier.</p>' +
+      '<p class="set-about">The model a NEW agent starts with, by its class tier. <b>(station default)</b> uses your main model from COMMS. Agents you already have keep theirs; change one in its dossier.</p>' +
       '<div class="mc-form" id="tm-form">' +
         '<div class="set-row"><label for="tm-reasoning">◆◆◆ DEEP</label><select id="tm-reasoning" class="fbc-sel" data-tier="reasoning"><option value="">(station default)</option></select></div>' +
         '<div class="set-row"><label for="tm-balanced">◆◆ BALANCED</label><select id="tm-balanced" class="fbc-sel" data-tier="balanced"><option value="">(station default)</option></select></div>' +
         '<div class="set-row"><label for="tm-fast">◆ FAST</label><select id="tm-fast" class="fbc-sel" data-tier="fast"><option value="">(station default)</option></select></div>' +
-        '<div class="mc-hint">A pin applies to the next agent you summon of that tier. Empty = follow the model dock. This never overrides a model you set on a specific agent.</div>' +
+        '<div class="mc-hint">A pick here never changes a model you set on one agent.</div>' +
       '</div>' +
       '<div id="tm-msg" class="msg"></div>' +
       // VOICE CHAT MODEL (Hermes parity auxiliary.voice_chat) — the model a SPOKEN reply runs on. Server-persisted
       // (/api/voice/chat-model) and read by the sidecar per voice turn; only that turn moves (sidecar/voice-chat-route.js).
       '<h4 class="ms-h">Voice chat model <span class="dim">— answers spoken replies</span></h4>' +
-      '<p class="set-about">With the speaker on, spoken replies and Telegram voice notes can use a faster model. Only that reply moves: typed messages and the agent’s saved model stay as they are. If the voice model can’t answer, the agent’s own model does.</p>' +
+      '<p class="set-about">A faster model just for spoken replies (with the speaker on, or to a Telegram voice note). Typed chat keeps the agent’s own model, and so does any spoken reply this model can’t give.</p>' +
       '<div class="mc-form" id="vcm-form">' +
         '<div class="set-row"><label for="vcm-model">MODEL</label><select id="vcm-model" class="fbc-sel"><option value="">(same as the agent)</option></select></div>' +
         '<div class="set-row"><label for="vcm-effort">REASONING</label><select id="vcm-effort" class="fbc-sel">' +
@@ -8105,7 +8181,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // ADVANCED — env-only runtime knobs, now editable + persisted server-side (P1-9). PRECEDENCE is spelled out
       // in the card: an explicit environment variable ALWAYS wins over a value saved here (a deploy stays in control).
       '<h4 class="ms-h">Runtime limits <span class="dim">— optional ceilings and timeouts</span></h4>' +
-      '<p class="set-about">StarNet does not limit agent concurrency or run iterations by default. Set a positive value only when you want a ceiling. Saved here on this machine and read by the sidecar at boot. <b>An environment variable always overrides a value saved here</b>. Blank a field to clear the override.</p>' +
+      '<p class="set-about">Optional. StarNet sets no limits by default: fill in a number only when you want one, and blank a field to remove it. Most take effect after a restart; each line says when it differs. <b>An environment variable always overrides a value saved here</b>.</p>' +
       '<div class="mc-form" id="adv-form"><div class="dim" id="adv-loading">reading runtime settings…</div></div>' +
       '<div id="adv-msg" class="msg"></div>' +
       // DATA / STATION BACKUP — export the whole station config to one JSON file, import it back, reset a section.
@@ -8139,8 +8215,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // fail-open pressure: per-tag swallowed-error counts since boot, from report.swallowed. Painted in wireDiagnostics().
       '<div id="diag-swallowed" class="dim" style="margin-top:6px;font-size:11px">swallowed errors: reading…</div>' +
       '<h4 class="ms-h">LIVE DOCTOR <span class="dim">— opt-in runtime proof</span></h4>' +
-      '<p class="set-about">Runs one tiny response through the selected model, a harmless sentinel through the effective execution profile, an initialize/list round-trip for each enabled MCP server, and safe authentication/status checks for messaging channels. It sends no channel messages and exports no secrets.</p>' +
-      '<label class="set-check"><input type="checkbox" id="diag-live-consent"> I understand this performs real network and execution probes and may spend one tiny model response.</label>' +
+      // plain first (UX night 10-26); every probe it runs is still named
+      '<p class="set-about">Checks, for real, that StarNet works: one tiny reply from your model, one harmless test command, a hello to each connected service, and a status check of each chat channel. It sends no chat messages and shares no secrets.</p>' +
+      '<label class="set-check"><input type="checkbox" id="diag-live-consent"> I understand this makes real requests and may spend one tiny model reply.</label>' +
       '<div class="set-save"><button class="bb sm" id="diag-live-run">RUN LIVE DOCTOR</button><button class="bb sm" id="diag-live-copy" hidden>⧉ COPY RECEIPT</button></div>' +
       '<div id="diag-live-msg" class="msg"></div>' +
       '<pre id="diag-live-out" class="diag-pre" tabindex="0" hidden style="white-space:pre-wrap;overflow:auto;max-height:40vh"></pre>' +
@@ -8275,7 +8352,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     let paintBackdropSwatches = () => {};
 
     const sections = [
-      { id: 'providers', label: 'AI & MODELS', glyph: '⌁', desc: 'Connect an AI service, manage its saved keys, and choose fallback models and agent defaults.', build: frag(secProviders + secModels) },
+      { id: 'providers', label: 'AI & MODELS', glyph: '⌁', desc: 'The AI your agents think with. Connect one below: StarNet credits, a subscription you have, an API key, or your own models. Everything under API KEYS is optional.', build: frag(secProviders + secModels) },
       // ONE WORD: AUTONOMY — the dial and what it did while you were away are one section (the old NIGHT SHIFT
       // section folded in; openTerm maps its id here so an old deep link still lands).
       { id: 'autonomy', label: 'AUTONOMY', glyph: '◈', desc: 'Choose when agents work on their own, where that work goes, and see what they did while you were away.', build: frag(secAutonomy + secAwayActivity) },
@@ -12087,6 +12164,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     get present() { return present; },
     get sel() { return sel; },
     skillsAgentId,   // ORG P21: the agent the ABILITIES skills lane shows — the BUILT-IN ABILITIES picker opens on the same one
+    agentPostureOf,  // a pure read (no state): the ONE ACCESS posture an agent's saved answer matches — TOOLS names it in those words
     get deskAgentId() { return deskAgentId; },
     get store() { return store; }
   };
@@ -12154,11 +12232,35 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     logbook:  { term: 'agents',     section: 'record', map: { runs: 'record', slag: 'record', insights: 'record' } },
     rewind:   { term: 'agents',     section: 'record', map: { restore: 'record' } }
   };
+  /* ONE FLAT LIST (UX night 10-26): CONNECT › ABILITIES lost its INSTALLED / DISCOVER / CREATE switch and four
+     sections became blocks of their neighbours. Their ids are named all over the app (places, error doors, the
+     dossier, SETTINGS), so each retired id still opens: on the section that absorbed it, scrolled to its block. */
+  const SECTION_ALIAS = {
+    connectors: { keys: ['mcp', '#ab-keys'], computer: ['toolsets', '#ab-computer'], agent: ['library', '#ab-agent-skills'], exchange: ['market', '#ab-exchange'] }
+  };
+  // a door to a merged block lands ON it: opens every fold on the way down, then scrolls (setTimeout, never rAF — a
+  // hidden or non-compositing tab never fires rAF). The window may still be swapping in, so it waits for the block;
+  // rows that load late above it (the services list) push it down, so it lands once more unless the Commander scrolled.
+  function revealInTerm(key, anchor) {
+    let tries = 0, landed = -1, pane = null;
+    const land = () => {
+      const w = open[key], el = w && w.querySelector(anchor);
+      if (!el) { if (++tries < 25) setTimeout(land, 60); return; }
+      for (let p = el.parentElement; p && p !== w; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+      pane = el.closest('.con-pane');
+      if (!pane) { try { el.scrollIntoView({ block: 'start' }); } catch (_) {} return; }
+      pane.scrollTop = Math.max(0, el.offsetTop - pane.offsetTop - 8); landed = pane.scrollTop;
+    };
+    setTimeout(land, 0);
+    setTimeout(() => { if (pane && pane.isConnected && pane.scrollTop === landed) land(); }, 700);
+  }
   function openTerm(key, section) {
     if (key === 'work') key = 'tasks'; // compatibility for old saved links; the station remains home
     const al = TERM_ALIAS[key];
     if (al) { section = (section && al.map[section]) || al.section; key = al.term; }
     const def = BUILDERS[key]; if (!def) return;
+    const sal = section && SECTION_ALIAS[key] && SECTION_ALIAS[key][section];
+    if (sal) { section = sal[0]; revealInTerm(key, sal[1]); }   // the scroll runs after this open/rerender below
     // the old NIGHT SHIFT settings section is part of AUTONOMY now (ONE WORD: AUTONOMY) — an old link still lands.
     if (key === 'settings' && section === 'nightshift') section = 'autonomy';
     // ONE PLAIN LIST (10-02): MODEL DEFAULTS lives on AI & MODELS, LIVE VOICE on LOOK & SOUND

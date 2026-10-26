@@ -50,10 +50,11 @@ A.ok(nav.indexOf('station.show') >= 0, 'navigation tells the agent to OPEN place
 const paths = [...new Set(full.match(/[A-Z][A-Z&\/ -]*[A-Z](?: › [A-Z][A-Z&\/ -]*[A-Z])+/g))];
 A.ok(paths.length >= 20, 'the manual names menu paths (' + paths.length + ')');
 // group/section labels that are real but are not themselves a place — each proven in its own source
+// (ABILITIES' INSTALLED group left with the ONE FLAT LIST, 2026-10-26: the manual names no group, only places)
 const LABELS = {
-  'INSTALLED': ['frontend/app/windows/connectors.js', "label: 'INSTALLED'"],
   'NEEDS YOU': ['frontend/app/stationui.js', '>NEEDS YOU <']
 };
+A.ok(!/\bINSTALLED ›|› INSTALLED\b|\bDISCOVER ›|› DISCOVER\b|CREATE \/ ADVANCED/.test(full), 'the manual names no retired ABILITIES group (INSTALLED, DISCOVER, CREATE / ADVANCED)');
 for (const [label, [file, needle]] of Object.entries(LABELS)) A.ok(read(file).indexOf(needle) >= 0, 'label ' + label + ' still exists in ' + file);
 const words = Places.PLACES.map(p => p.words);
 for (const p of paths) {

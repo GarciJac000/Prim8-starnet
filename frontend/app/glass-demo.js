@@ -121,7 +121,11 @@
     // its own overflow says they need (review 10-14: DONE sat 18px under the fold at 1366x768) — still capped by the band.
     const roster = w.classList.contains('gc-picker-win'), rosterBody = roster && w.querySelector('.term-body');
     const rosterNeed = rosterBody ? w.offsetHeight - rosterBody.clientHeight + rosterBody.scrollHeight : 0;
-    const preferred = catalog ? Math.max(available * .75, w.offsetHeight - catalog.offsetHeight + 260) : page ? available * .82 : work ? available * .8 : roster ? Math.max(available * .8, rosterNeed) : available * .56;
+    // The rail windows (CONNECT, SETTINGS, the dossiers, MY WORK, AUTOMATE …) are pages you read and pick from: at 56% a
+    // newcomer met a ~470px porthole onto thousands of px, and CONNECT showed its intro but not one service (UX night 10-25).
+    // NOTIFICATIONS stays a short sheet: it is a log you glance at.
+    const reading = w.classList.contains('console') && !w.classList.contains('notifs-win');
+    const preferred = catalog ? Math.max(available * .75, w.offsetHeight - catalog.offsetHeight + 260) : page ? available * .82 : work ? available * .8 : roster ? Math.max(available * .8, rosterNeed) : reading ? available * .8 : available * .56;
     const h = s.expanded ? available : Math.min(available, Math.max(220, s.height || preferred));
     w.style.animation = 'none'; w.style.transform = 'none';
     const geometry = {left:b.x+'px',top:(b.bottom-h)+'px',width:b.width+'px',height:h+'px',maxWidth:b.width+'px',maxHeight:available+'px'};

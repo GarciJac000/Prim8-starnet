@@ -30,8 +30,10 @@ A.ok(introMatch, 'the AGENT SKILLS intro helper is present');
 const weakSrc = (source.match(/  const weakWin = [^\n]*\n/) || [''])[0] + (source.match(/function shownInOpenWindow\(\) \{[\s\S]*?\n  \}/) || [''])[0];
 A.ok(/new WeakRef\(w\)/.test(weakSrc) && /function shownInOpenWindow/.test(weakSrc), 'the weak window tie helpers are present');
 vm.runInNewContext(weakSrc + '\n' + (introMatch ? introMatch[0] : '') + '\n' + laneSource + '\nresult = abilitySkillsLane({});', context);
-A.ok(/Reusable procedures <b>Agent<\/b> created or learned/.test(context.result.sections.find(s => s.id === 'agent') ? (() => { const el = { innerHTML: '' }; context.result.sections.find(s => s.id === 'agent').build(el); return el.innerHTML; })() : ''),
-  'AGENT SKILLS names the agent it shows');
+// ONE FLAT LIST (UX night 2026-10-26): AGENT SKILLS is the LEARNED SKILLS block of SKILLS, SKILL EXCHANGE the ADD FROM A
+// LINK block of SKILL MARKET — the same markup, merged into its neighbour, so build each section and read its HTML
+const built = id => { const s = context.result.sections.find(x => x.id === id); if (!s) return ''; const el = { innerHTML: '' }; s.build(el); return el.innerHTML; };
+A.ok(/Reusable procedures <b>Agent<\/b> created or learned/.test(built('library')), 'LEARNED SKILLS (in SKILLS) names the agent it shows');
 
 // org P21 fix (review): the dossier's SKILLS pick is ONE-SHOT. Run the shipped lane builder through a sequence of
 // opens: sent from NOVA's dossier → NOVA; a later open from anywhere else → the dossier's agent again; a rerender of
@@ -68,10 +70,18 @@ A.ok(/const agentName = \(\(present\.find\(x => x && x\.id === agentId\) \|\| \{
 A.ok(/const openOn = typeof H\.skillsAgentId === 'function' \? H\.skillsAgentId\(\)/.test(fs.readFileSync(path.join(__dirname, '../frontend/app/windows/connectors.js'), 'utf8')),
   'P21: BUILT-IN ABILITIES opens on the same agent as the skills lane');
 
-A.eq(context.result.sections.map(section => section.id), ['market', 'library', 'agent', 'exchange'],
-  'the live lane builds all four Skills sections without throwing');
-A.eq(context.result.sections.map(section => section.label), ['SKILL MARKET', 'SKILL LIBRARY', 'AGENT SKILLS', 'SKILL EXCHANGE'],
-  'the live lane exposes the four promised labels');
+A.eq(context.result.sections.map(section => section.id), ['market', 'library'],
+  'the live lane builds both Skills sections without throwing');
+A.eq(context.result.sections.map(section => section.label), ['SKILL MARKET', 'SKILLS'],
+  'the live lane exposes the two promised labels');
+{
+  const market = built('market'), library = built('library');
+  const at = (html, id) => html.indexOf('id="' + id + '"');
+  A.ok(at(market, 'skm-list') >= 0 && at(market, 'ab-exchange') > at(market, 'skm-list') && at(market, 'sk-exchange-preview') > at(market, 'ab-exchange') && /<span class="sec-l">ADD FROM A LINK<\/span>/.test(market),
+    'SKILL MARKET ends with its ADD FROM A LINK block, which carries the whole exchange (inspect + preview)');
+  A.ok(at(library, 'sk-agent-pick') >= 0 && at(library, 'sk-lib') > at(library, 'sk-agent-pick') && at(library, 'ab-agent-skills') > at(library, 'sk-lib') && at(library, 'sk-agent') > at(library, 'ab-agent-skills') && /<span class="sec-l">LEARNED SKILLS<\/span>/.test(library),
+    'SKILLS: its agent picker on top (it moves the whole section), the library, then the LEARNED SKILLS block');
+}
 A.ok(/function\s+scanFindingText\s*\(/.test(source), 'Skill Exchange scan findings renderer is defined');
 A.ok(/function\s+renderSkillExchangePreview\s*\(/.test(source), 'Skill Exchange preview renderer is defined');
 A.ok(/function\s+wireSkillExchange\s*\(/.test(source), 'Skill Exchange controls are wired');

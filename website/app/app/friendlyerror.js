@@ -951,7 +951,7 @@
         // only surface that clears the refusal. No retry chip rides with it: a retry hits the same refusal.
         return { label: '$ OPEN SPENDING LIMITS', run: () => openSettings('budget') };
       case 'skills':
-        return { label: '✦ OPEN SKILL LIBRARY', run: () => { try { if (typeof StationUI !== 'undefined' && StationUI.openTerm) StationUI.openTerm('skills'); } catch (_) {} } };   // 'skills' aliases into ABILITIES ▸ SKILL LIBRARY (NAV CONDENSE 2)
+        return { label: '✦ OPEN SKILLS', run: () => { try { if (typeof StationUI !== 'undefined' && StationUI.openTerm) StationUI.openTerm('skills'); } catch (_) {} } };   // 'skills' aliases into ABILITIES ▸ SKILLS (NAV CONDENSE 2)
       default:
         return null;
     }

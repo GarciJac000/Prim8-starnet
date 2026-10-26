@@ -155,7 +155,7 @@
     // rail with the loops lane — 'active' alone would collide. wire() runs after mountConsole has appended
     // every pane to `body`, so all the querySelector wiring below resolves exactly as it always did.
     const sections = [
-      { id: 'routines', label: 'ACTIVE ROUTINES', glyph: '◷', desc: 'Standing jobs that fire on a schedule — their next run, last result, and whether the scheduler is armed.', build: frag(secActive) },
+      { id: 'routines', label: 'ACTIVE ROUTINES', glyph: '◷', desc: 'Jobs that run on a schedule — when each runs next, how it last went, and whether scheduling is on.', build: frag(secActive) },
       { id: 'routines-create', label: 'CREATE ROUTINE', glyph: '✦', desc: 'Put your agent to work on a schedule — a morning brief, a nightly summary, a recurring check.', build: frag(secCreate) }
     ];
     function wire() {
@@ -404,16 +404,17 @@
         gateEl.innerHTML = degradedBlock + (j && j.halted
           ? '<div class="brief-block" style="border-left-color:var(--bad);margin-bottom:8px">' +
               '<div class="brief-k" style="color:var(--bad)">✕ SCHEDULING IS STOPPED (E-STOP)</div>' +
-              '<div class="brief-v">Your routines are saved but <b>will not fire</b> — an emergency stop is engaged and it survives a restart.' +
+              '<div class="brief-v">Your routines are saved but <b>will not run</b> — an emergency stop is on, and it stays on after a restart.' +
               '<div style="margin-top:8px"><button class="bb xs" id="rt-arm" data-arm="1">▶ TURN SCHEDULING ON</button></div>' +
             '</div></div>'
           : j && j.enabled
-          ? '<span style="color:var(--gold)">● scheduler armed</span> <span class="dim">— routines fire automatically.</span>' + tickHealthLine(j) + ' ' +
+          ? '<span style="color:var(--gold)">● scheduling is on</span> <span class="dim">— routines run on their own schedule.</span>' + tickHealthLine(j) + ' ' +
             '<button class="bb xs" id="rt-arm" data-arm="0">⏸ TURN SCHEDULING OFF</button>'
           : '<div class="brief-block" style="border-left-color:var(--bad);margin-bottom:8px">' +
               '<div class="brief-k" style="color:var(--bad)">○ SCHEDULING IS OFF</div>' +
-              '<div class="brief-v">Your routines are saved but <b>will not fire</b> — the scheduler is disarmed. ' +
-              'Turn scheduling on to arm the live timer now (no restart needed).' +
+              // plain words (UX night 10-25): this is the first thing a newcomer reads here, since scheduling starts off
+              '<div class="brief-v">Your routines are saved but <b>will not run</b> until scheduling is on. ' +
+              'Turning it on takes effect right away (no restart needed).' +
               '<div style="margin-top:8px"><button class="bb xs" id="rt-arm" data-arm="1">▶ TURN SCHEDULING ON</button></div>' +
             '</div></div>');
         const degradedBtn = gateEl.querySelector('#rt-degraded-clear');
@@ -432,7 +433,7 @@
           armBtn.disabled = true; armBtn.textContent = want ? '… turning on' : '… turning off';
           try {
             const r = await (await post('/api/cron/arm', { enabled: want })).json();
-            if (r && r.ok) { notify(want ? 'scheduling is on — routines will now fire' : 'scheduling is off', want ? 'good' : 'warn'); sfx('click'); }
+            if (r && r.ok) { notify(want ? 'scheduling is on — routines will run on schedule' : 'scheduling is off', want ? 'good' : 'warn'); sfx('click'); }
             else { notify((r && r.error) || 'could not change scheduling', 'warn'); sfx('bad'); }
           } catch (_) { notify('could not reach the sidecar', 'warn'); sfx('bad'); }
           refresh();   // re-render the badge from the authoritative GET /api/cron enabled
