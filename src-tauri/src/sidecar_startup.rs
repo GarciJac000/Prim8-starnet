@@ -1,9 +1,18 @@
 //! Keep ownership of every startup attempt, including timed-out children.
 use std::io;
-use std::process::{Child, Command};
+use std::process::{Child, ChildStderr, ChildStdout, Command};
 use std::sync::Mutex;
 
-pub(crate) fn spawn(command: &mut Command, slot: &Mutex<Option<Child>>) -> io::Result<u32> {
+/// A tracked child plus its piped output, taken before the child is stored so nothing else holding
+/// the slot can drop a pipe (a closed reader turns the sidecar's next log line into EPIPE).
+#[derive(Debug)]
+pub(crate) struct Spawned {
+    pub(crate) pid: u32,
+    pub(crate) stdout: Option<ChildStdout>,
+    pub(crate) stderr: Option<ChildStderr>,
+}
+
+pub(crate) fn spawn(command: &mut Command, slot: &Mutex<Option<Child>>) -> io::Result<Spawned> {
     let mut tracked = slot
         .lock()
         .map_err(|_| io::Error::other("sidecar lock poisoned"))?;
@@ -15,10 +24,14 @@ pub(crate) fn spawn(command: &mut Command, slot: &Mutex<Option<Child>>) -> io::R
             ));
         }
     }
-    let child = command.spawn()?;
-    let pid = child.id();
+    let mut child = command.spawn()?;
+    let spawned = Spawned {
+        pid: child.id(),
+        stdout: child.stdout.take(),
+        stderr: child.stderr.take(),
+    };
     *tracked = Some(child);
-    Ok(pid)
+    Ok(spawned)
 }
 
 /// Retain the reaped child so the guardian can count its failed attempt normally.
@@ -64,7 +77,7 @@ mod tests {
     #[test]
     fn timeout_reaps_before_retry_and_does_not_stop_a_replacement() {
         let slot = Mutex::new(None);
-        let first = spawn(&mut sleeping_child(), &slot).unwrap();
+        let first = spawn(&mut sleeping_child(), &slot).unwrap().pid;
         let duplicate = spawn(&mut sleeping_child(), &slot).unwrap_err();
         assert_eq!(duplicate.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(slot.lock().unwrap().as_ref().unwrap().id(), first);
@@ -77,7 +90,7 @@ mod tests {
             .try_wait()
             .unwrap()
             .is_some());
-        let second = spawn(&mut sleeping_child(), &slot).unwrap();
+        let second = spawn(&mut sleeping_child(), &slot).unwrap().pid;
         stop_timed_out(&slot, first).unwrap();
         let still_running = slot
             .lock()

@@ -3456,6 +3456,7 @@ name = "skynet-desktop"
 version = "0.14.0"
 dependencies = [
  "keyring",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
