@@ -3872,7 +3872,9 @@ body:not(.rows-inbox) #workstreams .ws-row.attn:not(.renaming):has(> .ws-agent-g
 @media (max-width: 860px) {
   #screen-game.active {
     grid-template-rows: 60px minmax(300px, 1fr) 200px minmax(44px, auto);
-    grid-template-columns: 168px 1fr;
+    /* visual px like every frame dimension (* --cz): a flat 168px shrank with TEXT SIZE (151px at 90) under the
+       counter-zoomed SESSIONS / PROJECTS + key strip, which needs 190 at every TEXT SIZE (Andrew 10-25: the + key sat on PROJECTS) */
+    grid-template-columns: calc(196px * var(--cz)) 1fr;
     grid-template-areas:
       "top top"
       "left center"
