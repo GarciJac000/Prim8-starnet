@@ -3279,9 +3279,11 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         : (j.granted && j.shiftsPaused) ? 'shifts paused — scheduling is OFF (AUTOMATE › SCHEDULES › TURN SCHEDULING ON)'
         : (j.granted && nextAt)
         ? (due <= 60000 ? 'next shift: due now' : 'next shift in ' + rel(due))
-        : (j.granted ? 'shift not scheduled yet' : 'shifts are off (grant above)');
+        : (j.granted ? 'shift not scheduled yet' : 'shifts are off — switch on the queue above');
+      // the station's cadence is minutes ('every 360m'); a whole number of hours reads as hours (UX night 10-25)
+      const every = String(j.shiftEvery || '').replace(/(\d+)m\b/, (m, n) => (+n >= 60 && +n % 60 === 0) ? (+n / 60) + 'h' : m);
       h += '<div class="ws-bl-foot">' +
-        '<span class="dim" style="font-size:11px;">' + esc(next) + (j.shiftEvery ? ' · repeats ' + esc(String(j.shiftEvery).replace(/^every /, 'every ')) : '') + '</span>' +
+        '<span class="dim" style="font-size:11px;">' + esc(next) + (every ? ' · repeats ' + esc(every) : '') + '</span>' +
         (j.granted && items.some(it => it.state === 'queued') ? '<button class="bb sm" id="ag-ws-now">⚒ build now</button>' : '') +
         '</div>';
       const ls = lastShiftLine(j.lastShift);
