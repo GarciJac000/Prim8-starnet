@@ -244,4 +244,38 @@ function floorSim() {
   A.eq(shed, 0, '...for good');
 }
 
+// ---- UI FIRST (2026-10-26 window-open lag): a window opening holds the floor's draws for a moment ----------------------
+{
+  // the hold lives in the RENDER PACING block: run it in a sandbox of its own (a fresh clock, no pacer state)
+  const ye = { now: 1000, timers: [], rafs: 0 };
+  const ys = { document: { hasFocus: () => true }, performance: { now: () => ye.now }, requestAnimationFrame: () => ++ye.rafs, cancelAnimationFrame: () => {},
+    setTimeout: (fn, ms) => { ye.timers.push(ms); return ye.timers.length; }, clearTimeout: () => {} };
+  vm.createContext(ys);
+  vm.runInContext('let frameCapMs = 0, lastDrawnAt = 0, running = true, raf = 0, camUserAt = 0; function frame() {}\n' + world.slice(from, to) +
+    '\nthis.y = { yieldToUi, yieldWait, scheduleFrame, max: YIELD_MAX_MS };', ys);
+  const Y = ys.y;
+  A.eq(Y.yieldWait(1000), 0, 'no hold asked: the floor draws on its normal pace');
+  Y.yieldToUi();
+  A.eq(Y.yieldWait(1000), Y.max, 'a window opening holds the floor for YIELD_MAX_MS');
+  A.ok(Y.max > 0 && Y.max <= 300, 'the hold is a moment (the rise of the sheet), never long enough to read as a frozen station');
+  A.eq(Y.yieldWait(1000, true), 0, 'a forced draw (a resize blanked the bitmap) still draws during a hold');
+  ye.now = 1100; Y.yieldToUi(5000);
+  A.eq(Y.yieldWait(1100), Y.max, 'a second window extends the hold from now, capped: no caller can freeze the floor');
+  ye.now = 1150; Y.yieldToUi(10);
+  A.eq(Y.yieldWait(1150), Y.max - 50, 'a shorter ask never cuts a running hold short');
+  A.eq(Y.yieldWait(1100 + Y.max), 0, 'the hold ends on time');
+  ye.now = 1150; ye.timers.length = 0; ye.rafs = 0;
+  Y.scheduleFrame(17);
+  A.ok(ye.timers.length === 1 && Math.abs(ye.timers[0] - (Y.max - 50)) < 1e-9 && ye.rafs === 0, 'scheduleFrame books one wake at the end of the hold, no vsync before it');
+  ye.now = 1100 + Y.max + 1; ye.timers.length = 0;
+  Y.scheduleFrame(17);
+  A.ok(ye.timers.length === 0 && ye.rafs === 1, 'after the hold the next vsync is booked as before');
+  const fAt = code.indexOf('function frame(now, force)'), fBody = code.slice(fAt, code.indexOf('lastDrawnAt = now; pacedDraws++;', fAt));
+  A.ok(/if \(yieldWait\(now, force\) > 0\) \{ scheduleFrame\(pace\); return; \}/.test(fBody), 'frame() draws nothing during a hold and hands the booking to scheduleFrame');
+  A.ok(/yieldToUi/.test(world.slice(world.lastIndexOf('setFrameCap,'))), 'World exports yieldToUi');
+  const ttAt = stationui.indexOf('  function toggleTerm(');
+  const tt = stationui.slice(ttAt, stationui.indexOf("    w.addEventListener('mousedown'", ttAt));
+  A.ok(/World\.yieldToUi\(\)/.test(tt), 'opening a window asks the floor to stand aside');
+}
+
 A.report('render pacing (#69)');

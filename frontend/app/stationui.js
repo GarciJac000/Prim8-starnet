@@ -1331,6 +1331,14 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     open[key] = w;
     placeTerm(w, key);   // land in a cascaded slot (or its remembered spot) — never dead-center pile-up
     mountFamilyTabs(w, key);   // ONE MENU: a window that belongs to MY WORK / AUTOMATE / CONNECT carries that menu's tabs
+    // SEAT BEFORE BUILD (10-26 window-open lag): the dock seats a sheet from its own MutationObserver, which runs after this
+    // function returns — after the builder filled the window and w.focus() had laid all of it out at the CSS default width,
+    // so the dock's width then laid it all out a second time. Seated now, while the window is still an empty frame, its
+    // first full layout is at the docked width. (The rAF fit after the first paint re-seats a sheet that sizes to its content.)
+    { const host = $('#terms'); if (host && typeof host._seatSheet === 'function') { try { host._seatSheet(w); } catch (_) {} } }
+    // UI FIRST (world.js): the floor stands aside while this window builds, lays out and rises, so its first paint is not
+    // queued behind a station draw (median click → window on screen 168 → 102 ms on a 26-agent station)
+    if (typeof World !== 'undefined' && typeof World.yieldToUi === 'function') { try { World.yieldToUi(); } catch (_) {} }
     w.addEventListener('mousedown', ev => {
       w.style.zIndex = U.zTop();
       // pull focus into the dialog on a background click so the window-level Esc/Tab handlers keep working —

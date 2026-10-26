@@ -5,7 +5,8 @@
 // Boots a SKYNET_DEV sidecar from --repo over a COPY of a station (save/roster/dossier only — same rule as
 // perf-station-cost.mjs), opens it in Chrome with the GPU, and for every window key: opens it through
 // StationUI.openTerm (the dock's own door), records ~1.2 s, closes it, records the close. Per open it reports:
-//   sync      ms spent inside openTerm itself (the click → first paint freeze)
+//   sync      ms spent inside openTerm itself
+//   paint     ms from the open call to the frame AFTER the one that shows the window (click → pixels on screen)
 //   loaf      total ms of long-animation-frames (≥50 ms) in the window, and the worst one
 //   gaps      rAF intervals > 34 ms (a dropped frame or more at 30-60 fps) and the worst gap
 //   top       the scripts LoAF blames (function @ file), summed across the window
@@ -13,7 +14,7 @@
 // --profile <key> also writes a CPU profile of that window's first open + close (scripts/perf/cpuprofile-top.mjs reads it).
 //
 // Usage: node scripts/perf-window-open.mjs [--repo dir] [--station dir] [--port 8972] [--cdp 9372]
-//        [--size 1920,1032] [--settle 15] [--rounds 2] [--keys a,b,c] [--cpu 1] [--headed] [--profile key] [--json out]
+//        [--hold-world ms (A/B: stop the world loop for ms around each open)] [--size 1920,1032] [--settle 15] [--rounds 2] [--keys a,b,c] [--cpu 1] [--headed] [--profile key] [--json out]
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdirSync, rmSync, cpSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
@@ -28,7 +29,7 @@ const { connectCDP, evalJS, sleep } = await import(pathToFileURL(join(here, 'scr
 const { waitUp, waitDevReady } = await import(pathToFileURL(join(here, 'scripts/lib/seed.mjs')).href);
 const port = arg('--port', '8972'), cdpPort = Number(arg('--cdp', '9372')), size = arg('--size', '1920,1032');
 const settle = Number(arg('--settle', '15')), rounds = Number(arg('--rounds', '2')), cpu = Number(arg('--cpu', '1'));
-const profileKey = arg('--profile', null), jsonOut = arg('--json', null);
+const profileKey = arg('--profile', null), jsonOut = arg('--json', null), hold = Number(arg('--hold-world', '0'));
 const KEYS = arg('--keys', 'agents,commander,tasks,deliverables,settings,notifs,manual,quests,updates,apps,automation,browser,connectors,messaging,workflows,trophies').split(',');
 const station = resolve(arg('--station', join(repo, 'dev/fixtures/seed-workspace')));
 const OUT = join(tmpdir(), 'starnet-perf-window');
@@ -82,10 +83,10 @@ try {
     const by = new Map();
     for (const e of h.loaf) for (const s of e.scripts) by.set(s.fn + ' @' + s.src, (by.get(s.fn + ' @' + s.src) || 0) + s.d);
     const top = [...by].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => Math.round(v) + 'ms ' + k);
-    const row = { key, phase: label, round, sync: sync == null ? null : Math.round(sync), loafMs: Math.round(loafMs), worstLoaf: Math.round(worst),
+    const row = { key, phase: label, round, sync: sync == null ? null : Math.round(sync), paint: h.paint == null ? null : Math.round(h.paint), loafMs: Math.round(loafMs), worstLoaf: Math.round(worst),
       gaps: h.gaps.length, worstGap: Math.round(h.gaps.reduce((a, g) => Math.max(a, g), 0)), top };
     results.push(row);
-    console.log(`${key.padEnd(13)} ${label.padEnd(5)} r${round}  sync ${String(row.sync ?? '-').padStart(5)}ms  loaf ${String(row.loafMs).padStart(5)}ms (worst ${String(row.worstLoaf).padStart(4)})  gaps>34 ${String(row.gaps).padStart(3)} (worst ${String(row.worstGap).padStart(4)}ms)  ${top.join(' | ')}`);
+    console.log(`${key.padEnd(13)} ${label.padEnd(5)} r${round}  sync ${String(row.sync ?? '-').padStart(5)}ms  paint ${String(row.paint ?? '-').padStart(5)}ms  loaf ${String(row.loafMs).padStart(5)}ms (worst ${String(row.worstLoaf).padStart(4)})  gaps>34 ${String(row.gaps).padStart(3)} (worst ${String(row.worstGap).padStart(4)}ms)  ${top.join(' | ')}`);
   };
   await closeAll(); await sleep(1000);
   for (let round = 1; round <= rounds; round++) {
@@ -93,9 +94,12 @@ try {
       const prof = profileKey === key && round === 1;
       if (prof) { await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 200 }); await cdp.send('Profiler.start'); }
       await arm();
-      const sync = await evalJS(cdp, `(() => { const t0 = performance.now(); try { StationUI.openTerm(${JSON.stringify(key)}); } catch (e) { return -1; } return performance.now() - t0; })()`);
+      const sync = await evalJS(cdp, `(() => { const t0 = performance.now(); window.__paintMs = null; ${hold ? 'try { World.stop(); setTimeout(() => World.start(), ' + hold + '); } catch (_) {}' : ''}
+        try { StationUI.openTerm(${JSON.stringify(key)}); } catch (e) { return -1; }
+        const t1 = performance.now(); requestAnimationFrame(() => requestAnimationFrame(() => { window.__paintMs = performance.now() - t0; })); return t1 - t0; })()`);
       await sleep(1200);
-      summarize('open', key, round, sync, await harvest());
+      const h = await harvest(); h.paint = await evalJS(cdp, 'window.__paintMs');
+      summarize('open', key, round, sync, h);
       await arm();
       await evalJS(cdp, `(() => { try { StationUI.closeTerm(${JSON.stringify(key)}); } catch (_) {} return 1; })()`);
       await sleep(900);
