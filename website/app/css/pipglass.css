@@ -2135,3 +2135,10 @@ body.glass-demo:not(.hud-mode) #screen-game #chat-panel #comms-presence.paused:n
 /* COMMS: the stamps and the delegated status lines sit a step under the speech */
 body.glass-demo:not(.hud-mode) #chat-panel :is(#chat-log, #gc-log) .cmsg:is(.agent, .user) .cmsg-ts { --sn-type-meta: 14px; --sn-type-compact: 14px; }
 body.glass-demo:not(.hud-mode) #chat-panel #chat-log > .dg-line .dg-li-st { font-size: 14px; }
+/* the CREW panel keeps its older SQUARE row (Andrew 10-26, from his screenshot of the earlier crew: "remove the mesh and give
+   it the glass vibe, except … the same shape as this one", then "square + glass flat"): 2px corners across the rail's
+   width (on the rail's one 10px gutter), the windows' glass as a flat block — no frame, no halo — under the lit type's soft bloom */
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row { border-radius: 2px; }
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-portrait { border-radius: 2px; }
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.selected:not(.asking),
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.asking { border-color: transparent; box-shadow: none; }
