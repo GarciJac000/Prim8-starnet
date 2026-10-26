@@ -5345,8 +5345,10 @@ fn main() {
         ])
         .setup(move |app| {
             // Started by `starnet` (bin/starnet.js) with the app closed: the window stays parked and this StarNet runs
-            // for that terminal session (terminal_session.rs, watch_terminal_sessions).
-            let terminal_pid = match terminal_session::parse(std::env::args()) {
+            // for that terminal session (terminal_session.rs, watch_terminal_sessions). A terminal that has already
+            // exited (the relaunch after an in-app update keeps the old arguments) makes this a person's launch.
+            let parsed_launch = terminal_session::parse(std::env::args());
+            let terminal_pid = match terminal_session::at_startup(parsed_launch, terminal_session::terminal_running) {
                 terminal_session::TerminalLaunch::Background { pid } => Some(pid),
                 terminal_session::TerminalLaunch::Person => None,
             };
@@ -5358,6 +5360,9 @@ fn main() {
             // into the bundled webview below, so the desktop UI never has to fetch the token over an open route.
             let api_token = uuid::Uuid::new_v4().to_string();
             let startup_log = startup_log_path(app.handle());
+            if let (terminal_session::TerminalLaunch::Background { pid }, None) = (parsed_launch, terminal_pid) {
+                log_startup(&startup_log, format!("startup: terminal pid={pid} has already exited (a relaunch after an update keeps the old arguments); opening as a person's launch"));
+            }
             let workspaces = workspace_path(app.handle());
             let lifecycle_preferences_path = lifecycle_preferences_path(app.handle());
             let lifecycle_preferences = load_lifecycle_preferences(&lifecycle_preferences_path);
