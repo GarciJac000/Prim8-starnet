@@ -1723,25 +1723,29 @@ body.glass-demo:not(.hud-mode) #screen-game .widget-rail { border-radius: 2px; }
    the open SESSIONS tab, the dock's open group, each NEEDS YOU kind's strip. The cells are two SCREEN pixels at every
    TEXT SIZE and display scale (the 10-01 shots were taken at 150%, three pixels a cell: "finer" is two), so the checker
    stays crisp and never beats against the zoom. The windows keep their own material (Andrew 10-18: "keep UI menus as is").
+   SCANLINES (Andrew 10-25, of six materials rendered on the curved dashboard — checker, scanlines, hatch, halftone, glass
+   light, soft mesh — "go with 2 (scanlines)"): the lit material is now the CRT raster, one lit screen line in three
+   (phosphor .30, gold .32: the checker's strengths), still matte and still the only thing that says lit. A line is one
+   SCREEN pixel at 1x and two device pixels on a 1.5x / 2x display (one there would vanish), at every TEXT SIZE.
    ============================================================ */
 body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) {
-  --mesh-cell: calc(2px * var(--sn-unzoom, 1));
-  --pg-dither: repeating-conic-gradient(rgba(var(--ph-rgb), .3) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
-  --pg-dither-gold: repeating-conic-gradient(rgba(var(--gold-rgb), .32) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
+  --scan-px: calc(1px * var(--sn-unzoom, 1));
+  --pg-dither: repeating-linear-gradient(180deg, rgba(var(--ph-rgb), .3) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
+  --pg-dither-gold: repeating-linear-gradient(180deg, rgba(var(--gold-rgb), .32) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
   --pg-glow: none;
   --pg-glow-soft: none;
 }
-@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --mesh-cell: calc(1.3333px * var(--sn-unzoom, 1)); } }
-@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --mesh-cell: calc(1px * var(--sn-unzoom, 1)); } }
-/* the head of the SESSIONS view is counter-zoomed (it keeps its size at every TEXT SIZE): its cells are plain pixels. The
-   mesh is re-declared there, since a custom property resolves its var() where it is declared (the rail's zoomed cell
+@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --scan-px: calc(1.3333px * var(--sn-unzoom, 1)); } }
+@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game :is(#left, #chat-panel, #topbar, #bottombar) { --scan-px: calc(1px * var(--sn-unzoom, 1)); } }
+/* the head of the SESSIONS view is counter-zoomed (it keeps its size at every TEXT SIZE): its lines are plain pixels. The
+   raster is re-declared there, since a custom property resolves its var() where it is declared (the rail's zoomed line
    would ride in) */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head {
-  --mesh-cell: 2px;
-  --pg-dither: repeating-conic-gradient(rgba(var(--ph-rgb), .3) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell);
+  --scan-px: 1px;
+  --pg-dither: repeating-linear-gradient(180deg, rgba(var(--ph-rgb), .3) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px)));
 }
-@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --mesh-cell: 1.3333px; } }
-@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --mesh-cell: 1px; } }
+@media (min-resolution: 1.5dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --scan-px: 1.3333px; } }
+@media (min-resolution: 2dppx) { body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { --scan-px: 1px; } }
 /* the selection (fill only, Andrew 10-18) is the mesh; a wait's selection keeps its gold */
 body.glass-demo:not(.hud-mode) #screen-game :is(#crew .crew-row, #left #workstreams .ws-row) { --pip-fill: var(--pg-dither), rgba(var(--ph-rgb), .06); }
 body.glass-demo:not(.hud-mode) #screen-game #left #workstreams .ws-row:not(.attn) { --pip-fill: var(--pg-dither), rgba(var(--ph-rgb), .05); }
@@ -1750,9 +1754,9 @@ body.glass-demo:not(.hud-mode) #screen-game :is(#crew .crew-row.asking, #left #w
 body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row.asking { background: var(--pg-dither-gold), rgba(var(--gold-rgb), .06); box-shadow: none; }
 /* the open tab */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab.on { background: var(--pg-dither), rgba(var(--ph-rgb), .08); }
-/* NEEDS YOU: each kind's strip is a mesh band in its colour */
+/* NEEDS YOU: each kind's strip is a raster band in its colour */
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-needs .ny-grp {
-  background: repeating-conic-gradient(rgba(var(--ny-k), .24) 0 25%, transparent 0 50%) 0 0 / var(--mesh-cell) var(--mesh-cell), rgba(var(--ny-k), .06);
+  background: repeating-linear-gradient(180deg, rgba(var(--ny-k), .24) 0 var(--scan-px), transparent var(--scan-px) calc(3 * var(--scan-px))), rgba(var(--ny-k), .06);
 }
 /* no halo anywhere on the dashboard: a lit or selected row, the dock's open group (its open-window underline stays), the
    first-run starter cards, the UPLINK lamp (a housed lamp, like the crew's) */
@@ -2036,3 +2040,75 @@ body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools > summar
 body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools:not([open]) { flex: 0 0 auto; gap: 0; }   /* closed, the hidden keys' box still took the flex gap */
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab { padding-top: 10px; padding-bottom: 10px; }
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab .con-rail-label { line-height: 24px; }
+
+/* ============================================================
+   THE CURVED DASHBOARD (Andrew 10-25: "bring back the more curved edges … we can still keep our style, just with the more
+   curved edges without the sharp pointiness … it looks really inconsistent with everything else. we dont want to restore it
+   we want to upgrade our current version"). The 10-17 Pip-Boy pass squared everything ON the panels to the 2px terminal box
+   while the panels' shells (10px) and every window (8px keys, 6-8px cards) stayed curved. One radius scale now runs the
+   dashboard so it reads as the same app as its windows; the Pip-Boy register (1px lines, matte fills, the mesh, tracked caps,
+   tint-only selection) is unchanged. Not touched on purpose: the speech rails (no bubbles in COMMS), the lamps and meters
+   (square pixel cells), the cam corners on the world view.
+     card 10 — crew cards, NEEDS YOU, COMMS cards, the composer, dock menus, toasts, the first-run hint
+     key   8 — every key, field and search box; tabs round only the corners that leave their rule
+     row   6 — session rows, step rows, portraits and icon wells
+     chip  4 — badges, chips, inline code
+   ============================================================ */
+body.glass-demo:not(.hud-mode) { --sn-r-card: 10px; --sn-r-key: 8px; --sn-r-row: 6px; --sn-r-chip: 4px; }
+
+/* -- the rail -- */
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #crew :is(.crew-portrait, .crew-dossier) { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #left > h3 .crew-hide,
+body.glass-demo:not(.hud-mode) #screen-game #left :is(#crew-search, #crew-search-close, #ws-search, .ws-agent-filter) { border-radius: var(--sn-r-key); }
+/* the tabs and + NEW stand on the strip's rule: only their top corners round */
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head :is(.ws-tab, #ws-new, #ws-addproject) { border-radius: var(--sn-r-key) var(--sn-r-key) 0 0; }
+body.glass-demo:not(.hud-mode) #screen-game #left :is(#workstreams, #projects) > .ws-row { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-meta { border-radius: var(--sn-r-chip); }
+body.glass-demo:not(.hud-mode) #left .ws-needs .ny-panel { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #left .ws-needs .ny-face { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #left .ws-needs :is(.ny-key, .ny-more) { border-radius: var(--sn-r-key); }
+
+/* -- the top bar and the dock -- */
+body.glass-demo:not(.hud-mode) #screen-game :is(#topbar, #bottombar) .widget-rail .wg-add { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game .widget-rail { border-radius: var(--sn-r-key); }
+/* the open group hangs from the dock's rule: only its bottom corners round */
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-group { border-radius: 0 0 var(--sn-r-key) var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-group > .bb-grp { border-radius: 0 0 var(--sn-r-key) var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu .bb { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu .bb-i { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar :is(.bb-menu .bb > .badge, .bb-grp-badge) { border-radius: var(--sn-r-chip); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .ctx-gauge { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #stage-wrap .cam-cine { border-radius: var(--sn-r-key); }
+
+/* -- COMMS chrome -- */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .comms-portrait { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#comms-browser, #gc-add-agents, #chat-send, #chat-stop, #chat-attach, #model-dock-toggle, .voice-toggle, #chat-mic, .cmsg-copy) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #chat-inputrow { border-radius: var(--sn-r-card); }
+/* -- COMMS cards and their keys -- */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .cmsg.tb-read,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.cmsg.turnin, .cmsg.nudge, .cmsg.consent, #chat-log > .dg-line, #gc-questions .gc-question, #gc-states .gc-state) { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #comms-presence:not(.resolved),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #comms-presence.paused:not(.resolved),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-states .gc-state:is(.hold, :not(.hold)) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .task-conversation :is(.tc-answer, .tc-sample, .tc-understanding),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.cmsg.turnin, .cmsg.nudge, .cmsg.consent, .dg-inspect) .consent-btn:not(.thumb),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #chat-log .dg-line .dg-key,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-states .gc-state :is(.gc-ok, .gc-copy),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-questions .gc-question .gc-q-choice,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.consent-btn, .dg-key, .deliverable-folder) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) > .cmsg.work-rate.rate-inline .consent-btn.thumb { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .md-code { border-radius: var(--sn-r-chip); }
+
+/* -- what floats over the dashboard -- */
+body.glass-demo:not(.hud-mode) #toast-stack .toast,
+body.glass-demo:not(.hud-mode) .nav-coach { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) .nav-coach-x,
+body.glass-demo:not(.hud-mode) .station-tip,
+body.glass-demo:not(.hud-mode) > .hint-bubble.dock-tip { border-radius: var(--sn-r-key); }
+/* the last two pointed ends: COMMS's heading rule and the dock's rule drop their end ticks, as the CREW head's did (10-23) —
+   each is now one plain line */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel > h3 { background: linear-gradient(var(--pg-line), var(--pg-line)) left 10px bottom 0 / calc(100% - 20px) 1px no-repeat; }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar > .bb-group:is([data-group="crew"], [data-group="system"]) { background: none; }
