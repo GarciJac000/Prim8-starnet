@@ -81,6 +81,14 @@
       agentId: str, runId: str, objective: str, deliverable: str, audience: str, success: str,
       assumptions: { type: 'array' }
     }),
+    /* ADDITIVE (2026-10-26, summon-lines fix for 0.14.1, orchestrator-approved): a delegated WORKER's tool step,
+       forwarded onto its LEAD's stream under its OWN name. Forwarding it as agent.tool_call/tool_result made every
+       lead-side sink (CLI tracker, /api/observe, Telegram/routine reply buffers, phone, ACP) take it for the lead's
+       own step. A sink that does not know this name ignores it; the page translates it back for the floor. */
+    'crew.tool_step': obj(['agentId', 'runId', 'parentRunId', 'callId', 'name', 'phase'], {
+      agentId: str, runId: str, parentRunId: str, callId: str, name: str, phase: { enum: ['call', 'result'] },
+      argsSummary: str, ok: bool, isError: bool, ms: num
+    }),
     'provider.fallback': obj(['agentId', 'runId', 'fromModel', 'toModel', 'reason'], {
       agentId: str, runId: str, fromModel: str, toModel: str, reason: str,
       fromProvider: str, toProvider: str, rotate: bool

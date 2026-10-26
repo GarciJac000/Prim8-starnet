@@ -1527,6 +1527,19 @@ const Harness = (() => {
           // authoritative boundary so returned/persisted/delivered text contains exactly the last assistant turn.
           // a delegated WORKER's tool steps ride this stream too (orchestration FORWARD) for the floor + CREW + DELEGATED
           // readers on U.bus above; they are not the lead's steps, so they never reset its answer or render as its rows.
+          /* a delegated WORKER's tool step arrives under its own name (crew.tool_step, see orchestration makeChildEmit): it is
+             never the lead's step, so it never touches this run's answer or rows. The page is the one place it turns back into
+             agent.tool_call / agent.tool_result — on U.bus only — for the floor tag, the CREW card and the DELEGATED row, which
+             key on the WORKER's agentId/runId. The run is recorded as delegated FIRST, so the room-gap quest guard sees it. */
+          case 'crew.tool_step': {
+            if (payload.runId) { delegatedRuns.add(String(payload.runId)); if (delegatedRuns.size > 400) delegatedRuns.delete(delegatedRuns.values().next().value); }
+            if (typeof U === 'undefined' || !U.bus) break;
+            const step = { agentId: payload.agentId, runId: payload.runId, callId: payload.callId };
+            if (payload.phase === 'call') { step.name = payload.name; if (payload.argsSummary != null) step.argsSummary = payload.argsSummary; }
+            else { step.ok = payload.ok !== false; step.isError = payload.isError === true; if (payload.ms != null) step.ms = payload.ms; }
+            try { U.bus.emit(payload.phase === 'call' ? 'agent.tool_call' : 'agent.tool_result', step); } catch (e) { console.warn('[harness] crew.tool_step', e); }
+            break;
+          }
           case 'agent.tool_call': if (runId && payload.runId && payload.runId !== runId) break; full = ''; onTerminalReset && onTerminalReset(); onToolCall && onToolCall(payload); break;
           case 'agent.tool_result': if (runId && payload.runId && payload.runId !== runId) break; onToolResult && onToolResult(payload); break;
           case 'deliverable': onDeliverable && onDeliverable(payload); break;

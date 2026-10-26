@@ -19,7 +19,9 @@ import { materializeSeedWorkspace, bootSeededSidecar, waitUp, waitDevReady } fro
 const PORT = process.env.SKYNET_SHOT_PORT || '9522';
 const CDP_PORT = Number(process.env.SKYNET_CDP_PORT || 9523);
 const URL = `http://127.0.0.1:${PORT}/`;
-const RECORD = process.argv.includes('--record');   // CDP screencast of the real page → OUT/run.mp4 (ffmpeg on PATH or SL_FFMPEG)
+const RECORD = process.argv.includes('--record');
+// --stop: press the real STOP key a few seconds after the workers start, then prove no summon link or tag is left behind
+const STOP = process.argv.includes('--stop');   // CDP screencast of the real page → OUT/run.mp4 (ffmpeg on PATH or SL_FFMPEG)
 const SCEN = (process.argv.find(a => a.startsWith('--scenario=')) || '--scenario=fanout').split('=')[1];
 const OUT = process.env.SKYNET_SHOT_OUT || join(process.cwd(), 'dev', '.shots-summon-live', SCEN);
 const LEAD_MODEL = process.env.SL_LEAD_MODEL || 'anthropic/claude-sonnet-4.6';
@@ -105,7 +107,7 @@ async function main() {
       App.setApproval('agent', 'full');
       // the bus log: every event the floor reacts to, so the report says what REALLY fired
       window.__sl = [];
-      for (const ev of ['agent.run.start', 'agent.tool_call', 'agent.tool_result', 'agent.run.end', 'cost.estimate', 'agent.cost'])
+      for (const ev of ['agent.run.start', 'agent.tool_call', 'agent.tool_result', 'agent.run.end', 'cost.estimate', 'agent.cost', 'crew.tool_step'])
         U.bus.on(ev, p => window.__sl.push([Date.now(), ev, p && p.agentId, p && (p.name || p.reason || p.usd || p.model || ''), p && p.argsSummary ? String(p.argsSummary).slice(0, 60) : '']));
       return out;
     })()`);
@@ -129,7 +131,7 @@ async function main() {
       });
       await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 });
     }
-    const t0 = Date.now(); let n = 0, sawWorker = false;
+    const t0 = Date.now(); let n = 0, sawWorker = false, stopAt = 0;
     while (Date.now() - t0 < 360000) {
       await sleep(2500);
       const st = await evalJS(cdp, `(() => { const L = window.__sl || []; return { starts: L.filter(e => e[1] === 'agent.run.start').map(e => e[2]), ends: L.filter(e => e[1] === 'agent.run.end').map(e => e[2]), tools: L.filter(e => e[1] === 'agent.tool_call').length }; })()`);
@@ -138,7 +140,17 @@ async function main() {
       const live = st.starts.length - st.ends.length;
       if (sawWorker && live > 0) { n++; console.log('shot', n, JSON.stringify(st)); console.log('  bodies', JSON.stringify(await evalJS(cdp, `World.bodies().map(b => [b.name, b.renderTile && b.renderTile.x, b.renderTile && b.renderTile.y, b.seated ? 'seated' : b.moving ? 'walking' : 'standing', b.working ? 'W' : ''])`))); await capture(cdp, OUT, 'live-' + String(n).padStart(2, '0')); }
       if (st.ends.includes('agent') && st.ends.length >= st.starts.length) break;
+      if (STOP && sawWorker && !stopAt && st.tools >= 3) {
+        stopAt = Date.now();
+        console.log('STOP pressed', JSON.stringify(await evalJS(cdp, `(() => { const b = document.getElementById('chat-stop'); const vis = !!(b && !b.hidden); if (vis) b.click(); return { clicked: vis, before: World._dbgActivity() }; })()`)));
+      }
+      if (STOP && stopAt) {
+        const act = await evalJS(cdp, 'World._dbgActivity()');
+        console.log('  after STOP +' + Math.round((Date.now() - stopAt) / 1000) + 's', JSON.stringify(act));
+        if (Date.now() - stopAt > 20000) break;
+      }
     }
+    console.log('activity at end', JSON.stringify(await evalJS(cdp, 'World._dbgActivity()')));
     if (RECORD) { await sleep(3000); await cdp.send('Page.stopScreencast'); }
     await capture(cdp, OUT, '9-end');
     if (RECORD && frames.length > 1) {
