@@ -276,6 +276,8 @@ body.glass-demo:not(.hud-mode) .term .kb-col {
   border: 1px solid rgba(var(--ph-rgb), .2); border-radius: 8px; box-shadow: inset 0 1px 0 var(--gd-light);
 }
 body.glass-demo:not(.hud-mode) .term .kb-col h4 { border-bottom-color: rgba(var(--ph-rgb), .16); }
+/* the lane is a boxed card here, but tasks.css laid it out borderless (a 2px inset): TO DO and its note sat on the border */
+body.glass-demo:not(.hud-mode) .tasks-win .kb-col { padding: 0 12px 12px; }
 body.glass-demo:not(.hud-mode) .term:not(.pw) .term-foot { display: none; }
 /* the window shell matches the panels' shape and phosphor title */
 body.glass-demo:not(.hud-mode) .term:not(.pw) { border-radius: 10px; }
@@ -1159,6 +1161,11 @@ body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { container: pip-tabs
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head :is(#ws-new, #ws-addproject)[hidden] { display: none !important; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { transition: none; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head #ws-addproject { font-size: 16px; }
+/* the + key over PROJECTS (Andrew 10-25 circled it): the tabs never shrank, so whenever their spacing outran the strip they
+   ran on under the key. Now a tab gives way (clipped at its own edge, never under the key), and leftrail.js marks the strip
+   .tabs-tight when its tabs don't fit at their spacing, which drops them to the narrowest rail's */
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: clip; }
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head.tabs-tight .ws-tab { padding: 0 5px 1px; letter-spacing: .2px; }
 
 /* ---- ONE RAIL GUTTER (Andrew 10-21: "my only complaint is that some of it is misaligned like this"). Every block in the
    CREW rail spans one column, its edges 10px in from the rail's at every TEXT SIZE: the crew cards, the SESSIONS / PROJECTS

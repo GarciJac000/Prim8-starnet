@@ -8599,7 +8599,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         if (reachWrap) reachWrap.querySelectorAll('[data-reach]').forEach(x => x.classList.toggle('sel', sync.loaded && x.dataset.reach === a.reach));
         if (paceWrap) paceWrap.querySelectorAll('[data-pace]').forEach(x => x.classList.toggle('sel', sync.loaded && Number(x.dataset.pace) === a.leashPerDay));
         for (const wrap of [initWrap, reachWrap, paceWrap]) if (wrap) wrap.querySelectorAll('button').forEach(x => { x.disabled = sync.pending; });
-        if (autoDesc) { autoDesc.setAttribute('role', 'status'); autoDesc.textContent = sync.pending ? 'Confirming autonomy settings…' : (sync.error ? sync.error + (sync.loaded ? ' Current setting: ' + AutonomyStore.describe() : ' Reopen this panel to retry.') : sync.loaded ? AutonomyStore.describe() : 'Autonomy settings have not been confirmed.'); }
+        if (autoDesc) { autoDesc.setAttribute('role', 'status'); autoDesc.textContent = sync.pending ? 'Confirming autonomy settings…' : (sync.error ? sync.error.replace(/([^.!?…])s*$/, '$1.') + (sync.loaded ? ' Current setting: ' + AutonomyStore.describe() : ' Reopen this panel to retry.') : sync.loaded ? AutonomyStore.describe() : 'Autonomy settings have not been confirmed.'); }
         try { paintEarned(a); } catch (_) {}   // GROWTH Tier 3: the EARNED badge on an earned rung
         try { syncPerm(); } catch (_) {}   // keep the permissions level highlight + blurb in step with the dial
       };
