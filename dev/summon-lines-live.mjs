@@ -10,6 +10,7 @@
  *   node dev/summon-lines-live.mjs     (ports: SKYNET_SHOT_PORT / SKYNET_CDP_PORT; SL_LEAD_MODEL / SL_WORKER_MODEL)
  */
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { launchChrome, connectCDP, evalJS, capture, sleep, collectDiagnostics } from '../scripts/lib/cdp.mjs';
@@ -18,6 +19,7 @@ import { materializeSeedWorkspace, bootSeededSidecar, waitUp, waitDevReady } fro
 const PORT = process.env.SKYNET_SHOT_PORT || '9522';
 const CDP_PORT = Number(process.env.SKYNET_CDP_PORT || 9523);
 const URL = `http://127.0.0.1:${PORT}/`;
+const RECORD = process.argv.includes('--record');   // CDP screencast of the real page → OUT/run.mp4 (ffmpeg on PATH or SL_FFMPEG)
 const SCEN = (process.argv.find(a => a.startsWith('--scenario=')) || '--scenario=fanout').split('=')[1];
 const OUT = process.env.SKYNET_SHOT_OUT || join(process.cwd(), 'dev', '.shots-summon-live', SCEN);
 const LEAD_MODEL = process.env.SL_LEAD_MODEL || 'anthropic/claude-sonnet-4.6';
@@ -113,6 +115,20 @@ async function main() {
 
     // one real COMMS message, through the real composer
     await evalJS(cdp, `(() => { const t = document.getElementById('chat-input'); t.value = ${JSON.stringify(ASK)}; t.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('chat-send').click(); return true; })()`);
+    // RECORD: the browser's own frames (Page.startScreencast) from the moment the message is sent, timed by the frame
+    // metadata so the video plays at real speed; encoded with ffmpeg's concat demuxer after the run.
+    const frames = [];
+    if (RECORD) {
+      mkdirSync(join(OUT, 'frames'), { recursive: true });
+      await cdp.send('Page.enable');
+      cdp.on('Page.screencastFrame', (p) => {
+        const file = join(OUT, 'frames', 'f' + String(frames.length).padStart(5, '0') + '.jpg');
+        writeFileSync(file, Buffer.from(p.data, 'base64'));
+        frames.push({ file, ts: p.metadata && p.metadata.timestamp });
+        cdp.send('Page.screencastFrameAck', { sessionId: p.sessionId }).catch(() => {});
+      });
+      await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 85, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 });
+    }
     const t0 = Date.now(); let n = 0, sawWorker = false;
     while (Date.now() - t0 < 360000) {
       await sleep(2500);
@@ -123,7 +139,21 @@ async function main() {
       if (sawWorker && live > 0) { n++; console.log('shot', n, JSON.stringify(st)); console.log('  bodies', JSON.stringify(await evalJS(cdp, `World.bodies().map(b => [b.name, b.renderTile && b.renderTile.x, b.renderTile && b.renderTile.y, b.seated ? 'seated' : b.moving ? 'walking' : 'standing', b.working ? 'W' : ''])`))); await capture(cdp, OUT, 'live-' + String(n).padStart(2, '0')); }
       if (st.ends.includes('agent') && st.ends.length >= st.starts.length) break;
     }
+    if (RECORD) { await sleep(3000); await cdp.send('Page.stopScreencast'); }
     await capture(cdp, OUT, '9-end');
+    if (RECORD && frames.length > 1) {
+      const lines = [];
+      for (let i = 0; i < frames.length; i++) {
+        const next = frames[i + 1];
+        const d = next && frames[i].ts && next.ts ? Math.max(0.01, Math.min(2, next.ts - frames[i].ts)) : 0.1;
+        lines.push("file '" + frames[i].file.replace(/\\/g, '/') + "'", 'duration ' + d.toFixed(3));
+      }
+      lines.push("file '" + frames[frames.length - 1].file.replace(/\\/g, '/') + "'");
+      const list = join(OUT, 'frames.txt'); writeFileSync(list, lines.join('\n') + '\n');
+      const ff = process.env.SL_FFMPEG || 'ffmpeg';
+      execFileSync(ff, ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-vf', 'fps=30,format=yuv420p', '-c:v', 'libx264', '-crf', '20', join(OUT, 'run.mp4')]);
+      console.log('video', join(OUT, 'run.mp4'), frames.length, 'frames');
+    }
     const log = await evalJS(cdp, `(window.__sl || []).map(e => [Math.round((e[0] - ${t0}) / 100) / 10].concat(e.slice(1)))`);
     writeFileSync(join(OUT, 'bus-log.json'), JSON.stringify(log, null, 1));
     console.log('events', log.length, 'tool calls', log.filter(e => e[1] === 'agent.tool_call').length);
