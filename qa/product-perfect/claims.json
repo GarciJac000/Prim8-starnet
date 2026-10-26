@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "ac13180c67a846883f7d5e94e53adc1aa428f20b",
+    "sourceCommit": "3e3755e61a124c2e317fc470356c58b70650f109",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -38,8 +38,8 @@
       },
       {
         "path": "RELEASE_NOTES.md",
-        "bytes": 6233,
-        "sha256": "e8cbe7e9a88cebfd6285c3c8c1f105b73ba2e50ade2187a88740e1a780a574f9"
+        "bytes": 6253,
+        "sha256": "0c1984753a79c1d6e7ff923337e5fa374a77322c614174cf014907f7158eaef5"
       },
       {
         "path": "TERMS.md",
@@ -548,8 +548,8 @@
       },
       {
         "path": "frontend/app/glass-demo.js",
-        "bytes": 14201,
-        "sha256": "53d9e53f58e0295acb543ba38dbd4b59be928a9de1625cf49d5e23df11df75ba"
+        "bytes": 14553,
+        "sha256": "15e39663590648e9a861af2a7329da3f52c7ec14c810899f2e8456a99a743d6a"
       },
       {
         "path": "frontend/app/glossary.js",
@@ -578,8 +578,8 @@
       },
       {
         "path": "frontend/app/harness.js",
-        "bytes": 144673,
-        "sha256": "783c151a193918cedf5f591db2b1767a6223df586a466cf7169a0f93c7e8b13b"
+        "bytes": 146032,
+        "sha256": "40427b5affd3e656b85dd2acdd0be0ff7e513a086f5542ecc42c6ec38ee05efd"
       },
       {
         "path": "frontend/app/hint.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 968177,
-        "sha256": "e47d73db8160fc0589b476e5bfb213bf1b924e32ce25dadb9255e62c7ba4228a"
+        "bytes": 968695,
+        "sha256": "d60b40c67f4dc78256944c1694c1a36aeccb231b012cd96822e5b26445d753e6"
       },
       {
         "path": "frontend/app/stepin.js",
@@ -1473,8 +1473,8 @@
       },
       {
         "path": "frontend/app/world.js",
-        "bytes": 951663,
-        "sha256": "91c86453c095fa01bd2adac10ae7af09f206a671891357ecf5f2369970c8cc77"
+        "bytes": 954789,
+        "sha256": "8277ecde129b0e094c97887803d39b3cd50db52c2d63477379d33a0d747bd283"
       },
       {
         "path": "frontend/app/worldlab.js",
