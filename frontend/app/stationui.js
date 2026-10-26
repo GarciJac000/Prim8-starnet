@@ -5568,8 +5568,11 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     const st = oauthAcctState(pid);
     if (st.pending || (!force && st.list !== undefined && Date.now() - st.at < 5000)) return;
     st.pending = true;
+    // repaint only on a REAL change (10-26 window-open lag): every reopen of SETTINGS past the 5s mark re-reads the three
+    // lists, and an unchanged answer rebuilt the whole window anyway — the one data repaint left on a second open
+    const was = st.list === undefined ? undefined : JSON.stringify(st.list);
     OAuthAccounts.for(pid).accounts().then(j => { st.list = j; }).catch(() => { st.list = null; })
-      .finally(() => { st.pending = false; st.at = Date.now(); scheduleSettingsRepaint(); });
+      .finally(() => { st.pending = false; st.at = Date.now(); if (JSON.stringify(st.list) !== was) scheduleSettingsRepaint(); });
   }
   if (typeof U !== 'undefined' && U.bus && U.bus.on) U.bus.on('provider.fallback', p => { if (p && p.toAccount) STACKABLE_OAUTH.forEach(pid => refreshOAuthAccounts(pid, true)); });
   function stackClock(ms) { try { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_) { return ''; } }
@@ -8326,7 +8329,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     (() => {
       const was = creditsProv.state + ':' + creditsProv.balanceUsd + ':' + creditsProv.tier;
       refreshCreditsProvider().then(() => {
-        if (was !== creditsProv.state + ':' + creditsProv.balanceUsd + ':' + creditsProv.tier) rerender('settings');
+        // through the coalescer (10-26): two builds in flight (the open + a status repaint) both saw the old balance and
+        // each rebuilt the whole window when the one shared answer landed — twice, 70 ms apart, at the reader's scroll 0
+        if (was !== creditsProv.state + ':' + creditsProv.balanceUsd + ':' + creditsProv.tier) scheduleSettingsRepaint();
       }).catch(() => {});
     })();
     wireCredits(host);
