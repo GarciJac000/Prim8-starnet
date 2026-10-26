@@ -1357,7 +1357,8 @@ const Chat = (() => {
     wireCrewCapture(); // P3.2: record each dispatched worker's forwarded run-end spend so a 👍 on a crew run splits XP honestly (registers once)
     wireCuriosity();   // Commander Dossier: one gentle "tell me about X" nudge after a clean run (registers once)
     wireConnectorRequired();   // beginner seam Lane 1: a run that hit an unwired connector earns the ⇄ CONNECT chip
-    wireBgExit();      // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
+    wireKeySaved();    // keys.save: a key pasted into chat now lives in KEYS — its bubble + saved history show the placeholder (registers once)
+    wireBgExit();     // E6: surface shell.bg.exit (a background dev-server/watcher ended) as a terse COMMS system line — was a zero-listener event (registers once)
     wireSkillAside();  // A2: after a background review distills a skill, ONE quiet "distilled this run…" aside (registers once)
     wireIdBar();       // COMMS agent selector: a change switches to (or mints) a workstream bound to that agent (registers once)
     load(opts.ws);
@@ -9080,6 +9081,97 @@ const Chat = (() => {
       CONNECTOR_NEEDED.set(p.runId, p);
       if (CONNECTOR_NEEDED.size > 40) CONNECTOR_NEEDED.delete(CONNECTOR_NEEDED.keys().next().value);
     });
+  }
+  /* A KEY PASTED INTO CHAT, SAVED (keys.save, 2026-10-25). The agent stored a key the Commander pasted here in KEYS. The
+     page holds the paste in two places the sidecar's redaction never reaches: the bubble on screen and this
+     workstream's history (the desk save, and what the next turn re-sends to the model). On keys.save's OK result (the
+     contract's own agent.tool_call + agent.tool_result, paired by callId — no new event) the sidecar swaps every saved
+     key for its placeholder (POST /api/servicekeys/scrub), and only a turn that came back changed is rewritten, so
+     nothing is claimed for a paste the sidecar did not find. */
+  const KEY_SAVE_CALLS = new Map();   // callId -> runId of an in-flight keys.save (bounded)
+  let keySavedWired = false;
+  function wireKeySaved() {
+    if (keySavedWired || typeof U === 'undefined' || !U.bus) return;
+    keySavedWired = true;
+    U.bus.on('agent.tool_call', p => {
+      if (!p || !p.callId || !p.runId || !/^keys[._]save$/.test(String(p.name || ''))) return;
+      KEY_SAVE_CALLS.set(p.callId, p.runId);
+      if (KEY_SAVE_CALLS.size > 40) KEY_SAVE_CALLS.delete(KEY_SAVE_CALLS.keys().next().value);
+    });
+    U.bus.on('agent.tool_result', p => {
+      const runId = p && p.callId ? KEY_SAVE_CALLS.get(p.callId) : null;
+      if (!runId) return;
+      KEY_SAVE_CALLS.delete(p.callId);
+      if (p.ok && !p.isError) scrubSavedKeys(runId).catch(() => {});
+    });
+  }
+  // returns how many of the Commander's turns now show the placeholder (the number aids testing)
+  async function scrubSavedKeys(runId) {
+    let ws = null;
+    if (typeof Workstreams !== 'undefined' && Workstreams.all) { try { ws = Workstreams.all().find(w => (w.runIds || []).indexOf(runId) >= 0) || null; } catch (_) {} }
+    ws = ws || activeWs;
+    const turns = ws && Array.isArray(ws.history) ? ws.history.filter(m => m && m.role === 'user' && typeof m.content === 'string' && m.content) : [];
+    if (!turns.length || typeof Harness === 'undefined' || !Harness.api) return 0;
+    const raw = turns.map(m => m.content);
+    const r = await Harness.api.post('/api/servicekeys/scrub', { texts: raw });
+    const out = r && r.ok && r.j && Array.isArray(r.j.texts) && r.j.texts.length === raw.length ? r.j.texts : null;
+    if (!out) return 0;
+    const keys = [];
+    out.forEach((t, i) => {
+      if (typeof t !== 'string' || t === raw[i]) return;
+      turns[i].content = t;
+      for (const k of swappedKeys(raw[i], t)) if (!keys.some(x => x.value === k.value)) keys.push(k);
+    });
+    if (!keys.length) return 0;
+    // the run's directive also rides RUN_META (the rate card's reference line) and may have titled the thread
+    for (const meta of RUN_META.values()) { if (meta && typeof meta.directive === 'string') meta.directive = nameKeys(meta.directive, keys); }
+    if (typeof ws.title === 'string') ws.title = nameKeys(ws.title, keys);
+    try { App.persist(); } catch (_) {}
+    if (log && isActiveWs(ws)) {
+      const walker = document.createTreeWalker(log, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.nodeType === 3) { const v = nameKeys(n.nodeValue, keys); if (v !== n.nodeValue) n.nodeValue = v; continue; }
+        for (const a of ['title', 'data-tip', 'aria-label']) {
+          const v = n.getAttribute(a);
+          if (v) { const s = nameKeys(v, keys); if (s !== v) n.setAttribute(a, s); }
+        }
+      }
+    }
+    return keys.length;
+  }
+  // The values the sidecar swapped, read back out of one (raw, scrubbed) pair: the scrubbed text is the raw text with
+  // each saved key replaced by its placeholder, so the raw text between the literal pieces IS the key. The page
+  // already held these values (the Commander typed them); nothing secret comes back from the sidecar. [] on any doubt.
+  function swappedKeys(raw, scrubbed) {
+    const re = /\[[A-Z][A-Z0-9_]* saved in KEYS\]/g;
+    const names = scrubbed.match(re) || [], parts = scrubbed.split(re), out = [];
+    let at = 0;
+    for (let i = 0; i < names.length; i++) {
+      const s = raw.indexOf(parts[i], at); if (s < 0) return [];
+      const start = s + parts[i].length;
+      const last = i === names.length - 1;
+      if (!last && !parts[i + 1]) return [];   // two placeholders side by side: no seam to cut at
+      const end = last && !parts[i + 1] ? raw.length : raw.indexOf(parts[i + 1], start);
+      if (end <= start) return [];
+      out.push({ value: raw.slice(start, end), placeholder: names[i] });
+      at = end;
+    }
+    return out;
+  }
+  // every whole saved key -> its placeholder; a key cut short by a clipped label ("4e7b2c9d1a0f…") too
+  function nameKeys(text, keys) {
+    let s = String(text == null ? '' : text);
+    for (const k of keys) {
+      if (k.value.length < 16) continue;
+      if (s.indexOf(k.value) >= 0) s = s.split(k.value).join(k.placeholder);
+      const head = k.value.slice(0, 12);
+      for (let at = s.indexOf(head); at >= 0; at = s.indexOf(head, at + 1)) {
+        let end = at + head.length;
+        while (end < s.length && k.value.charAt(end - at) === s.charAt(end)) end++;
+        if (s.charAt(end) === '…') { s = s.slice(0, at) + k.placeholder + s.slice(end); }
+      }
+    }
+    return s;
   }
   // returns true iff a chip was rendered (the bool aids testing)
   function offerConnectorDoor(runId, originWs) {

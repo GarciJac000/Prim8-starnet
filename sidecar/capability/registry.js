@@ -129,6 +129,11 @@
       // secret (names and env-var names only). NOT deferred: it is the cure for not knowing what exists, so it
       // cannot itself be a tool the agent must already suspect exists to find. (see tools/builtin/connectors.js)
       { capId: 'web', tool: 'connectors.list', scope: 'read', requiresConsent: false, network: false },
+      // A key the Commander pastes into chat becomes a KEYS entry, spent by name through web_request (2026-10-25). The
+      // value comes only from the Commander's own turns, never the call's args (tools/builtin/keys.js). Deferred and
+      // left out of the deferred index: the run ADVERTISES it only when the Commander's recent messages hold a
+      // key-shaped string, so every other run pays nothing for it.
+      { capId: 'web', tool: 'keys.save', scope: 'write', requiresConsent: false, network: false, deferred: true },
       // DEFERRED (`deferred: true`) — still GRANTED, just not advertised in every request. The browser family
       // alone is 29 tools / ~10.2KB of the 37.7KB of schemas re-sent on EVERY turn (measured at the wire), and
       // an agent needs about six of them to drive a page. A deferred tool stays fully dispatchable; the model

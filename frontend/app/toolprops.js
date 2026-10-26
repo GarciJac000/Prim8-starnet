@@ -33,6 +33,7 @@ const ToolProps = (() => {
     // grant as web_request, so it lights the same antenna: the agent is looking outward, at reach, even though
     // this particular read never leaves the machine.
     'connectors.list': 'dish',
+    'keys.save': 'dish',   // storing a pasted API key for web_request rides web_request's dish grant
     voice_generate: 'studio',   // the studio makes audio as well as images — same prop, same pulse
     recall_conversation: 'notebook',
     'widget.get': 'notebook',

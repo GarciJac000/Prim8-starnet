@@ -1116,7 +1116,10 @@
       // agents to ask the Commander for "access" nobody can grant (2026-09-28: OpenRouter was already connected;
       // the agent wanted the raw key to chase a transparent background image_generate could not make yet).
       if (r.reason === 'reserved') return name + ' is a model-provider key: StarNet never hands provider keys to tools and KEYS cannot store one, so do not ask the Commander for it. Use the built-in tools that already ride the station\'s connection instead: image_generate for images (transparent:true for a transparent background) and image_analyze to look at one.';
-      return 'no enabled service key provides ' + name + ' — add it in TOOLSETS & CONNECTORS → KEYS';
+      // A key pasted into chat is saved with keys.save (advertised only on a run whose Commander's messages hold one),
+      // so the fix names that route too — "add it in KEYS" alone sent agents asking for "a new key" (2026-10-25).
+      return 'no enabled service key provides ' + name + ' — if the Commander pasted the key into this chat, save it with keys.save first; '
+        + 'otherwise ask them to paste it here, or add it in TOOLSETS & CONNECTORS → KEYS';
     }
 
     function resolveSecretRefs(value, surface, used) {
@@ -1140,7 +1143,7 @@
         'Call a third-party REST API (Printify, Etsy, Stripe, any service with an HTTP API) and return the response. ' +
         'To authenticate, reference a stored key by its environment-variable NAME inside a header value using ${NAME} — ' +
         'e.g. headers {"Authorization": "Bearer ${PRINTIFY_API_KEY}"}. The host substitutes the real value at send time; ' +
-        'you never see it and must never ask the user for it. Placeholders work in headers only, never in the url.',
+        'you never see it; save a key pasted in chat with keys.save. Placeholders work in headers only, never in the url.',
       schema: {
         type: 'object', required: ['url'],
         properties: {
