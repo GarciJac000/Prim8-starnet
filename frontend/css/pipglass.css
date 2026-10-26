@@ -1159,6 +1159,11 @@ body.glass-demo:not(.hud-mode) #screen-game #left .ws-head { container: pip-tabs
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head :is(#ws-new, #ws-addproject)[hidden] { display: none !important; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { transition: none; }
 body.glass-demo:not(.hud-mode) #screen-game #left .ws-head #ws-addproject { font-size: 16px; }
+/* the + key over PROJECTS (Andrew 10-25 circled it): the tabs never shrank, so whenever their spacing outran the strip they
+   ran on under the key. Now a tab gives way (clipped at its own edge, never under the key), and leftrail.js marks the strip
+   .tabs-tight when its tabs don't fit at their spacing, which drops them to the narrowest rail's */
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head .ws-tab { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: clip; }
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head.tabs-tight .ws-tab { padding: 0 5px 1px; letter-spacing: .2px; }
 
 /* ---- ONE RAIL GUTTER (Andrew 10-21: "my only complaint is that some of it is misaligned like this"). Every block in the
    CREW rail spans one column, its edges 10px in from the rail's at every TEXT SIZE: the crew cards, the SESSIONS / PROJECTS
