@@ -8530,6 +8530,10 @@ const World = (() => {
   function drawActivityPlates(now) {
     if (!plateByAgent.size) return;
     const placed = [];
+    // a crowded floor (4+ live plates) keeps every plate to one task line, so the cards stay beside their desks
+    let liveN = 0;
+    for (const [aid] of plateByAgent) { const b = bodyForAgent(aid); if (b && runStartByAgent.has(aid) && (b === agent ? agent.working : (b.working || (b.workUntil && now < b.workUntil)))) liveN++; }
+    const crowded = liveN > 3;
     for (const [aid, k] of plateByAgent) {
       const t0 = runStartByAgent.get(aid);
       const b = bodyForAgent(aid);
@@ -8543,11 +8547,11 @@ const World = (() => {
       const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
       const right = clock + (usd ? ' · ' + usd : '');
       const nm = String(b.name || aid).toUpperCase();
-      const task = String(k.task || '').replace(/\s+/g, ' ').trim();
+      const task = String(k.task || '').replace(/\s+/g, ' ').trim().replace(/\s*(\u2026|\.\.\.)$/, '');
       const caret = k.live && Math.floor(now / 420) % 2 ? '_' : '';
       const what = k.name ? (k.live ? '> ' : '. ') + tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : '. thinking';
       // the task gets up to TWO lines — "a small description of what it's doing", not one clipped line
-      const taskLines = task ? wrapChars(task, ACT_PLATE_W, 2) : [];
+      const taskLines = task ? wrapChars(task, ACT_PLATE_W, crowded ? 1 : 2) : [];
       const rows = 1 + taskLines.length + 1;
       ctx.save();
       ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
@@ -8555,7 +8559,7 @@ const World = (() => {
       const top = (b.visTopPy != null ? b.visTopPy : bodyPosY(b) - 18) - 3;
       const H = LH * rows + 2, hx = bodyPosX(b);
       // stay on screen and on the station: the visible world span is (−pan .. canvas − pan) / scale
-      const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2;   // inside the view AND the station hull
+      const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2, vy1 = (cv.height - panY) / scale - H - 2;   // inside the view AND the station hull
       const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
       const hits = (x, y) => placed.some(p => x < p.x + p.w + 2 && p.x < x + w + 2 && y < p.y + p.h && p.y < y + H);
       // AT A DESK: the plate hangs BESIDE the desk, level with the seat — never over the screen or the seated body
@@ -8574,7 +8578,8 @@ const World = (() => {
       }
       const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H], [-w / 2 - 3, -H], [w / 2 + 3, -H]];
       if (!found) for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - LH * rows + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
-      for (let step = 2; !found && step < 8; step++) { const cy = top - LH * rows - H * step; if (!hits(x, cy)) { y = cy; found = true; } }   // crowded floor: climb straight up, the stem keeps the owner
+      for (let step = 2; !found && step < 3; step++) { const cy = top - LH * rows - H * step; if (!hits(x, cy)) { y = cy; found = true; } }   // one more row up at most: a plate never strays far from its owner
+      y = Math.round(Math.max(vy0, Math.min(vy1, y)));   // and never off the top or bottom of the view
       placed.push({ x, y, w, h: H });
       if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
       const a0 = ctx.globalAlpha;
