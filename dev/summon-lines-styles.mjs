@@ -12,6 +12,9 @@ import { materializeSeedWorkspace, bootSeededSidecar, waitUp, waitDevReady } fro
 
 const PORT = '9552', CDP_PORT = 9553, URL = `http://127.0.0.1:${PORT}/`;
 const OUT = join(process.cwd(), 'dev', '.shots-summon-styles');
+// --look=custom:216 (Andrew) | amber | custom:<hue> — the plate must ink itself in whatever theme the user runs
+const LOOK = (process.argv.find(a => a.startsWith('--look=')) || '--look=custom:216').split('=')[1];
+const LOOKP = LOOK.startsWith('custom:') ? { theme: 'custom', themeHue: +LOOK.split(':')[1], themeSat: 100 } : { theme: LOOK };
 const CREW = [
   { name: 'Researcher', agentName: 'VEGA', skin: 'astronaut', task: 'Search the web for the current monthly price of Linear Standard and Notion Plus', tool: ['web_fetch', '{"url":"https://linear.app/pricing"}'] },
   { name: 'Writer', agentName: 'QUILL', skin: 'secretagent', task: 'Write a 3-line tagline for a SaaS pricing page and save it', tool: ['fs_write', '{"path":"notes/tagline.md"}'] },
@@ -35,7 +38,7 @@ try {
   await evalJS(cdp, `(() => { localStorage.setItem('starnet.crewrail.w', '400'); localStorage.setItem('starnet.crewrail.rows', '2'); localStorage.setItem('starnet.chatw', '767'); location.reload(); return 1; })()`);
   await sleep(1500);
   if (!(await waitDevReady(cdp, evalJS, { url: URL }))) throw new Error('no game screen after reload');
-  await evalJS(cdp, `StationUI.setLook({ theme: 'custom', themeHue: 216, themeSat: 100, themeGlow: 20, panelBright: -100, flicker: false, textScale: 90 })`);
+  await evalJS(cdp, `StationUI.setLook(Object.assign({ themeGlow: 20, panelBright: -100, flicker: false, textScale: 90 }, ${JSON.stringify(LOOKP)}))`);
   await sleep(1500);
   const ids = await evalJS(cdp, `(() => {
     const st = Build.__test__.station();
@@ -65,7 +68,7 @@ try {
     await evalJS(cdp, `window.__plateStyle = ${st}`);
     await sleep(700);
     const r = await cdp.send('Page.captureScreenshot', { format: 'png', clip: { x: 478, y: 300, width: 604, height: 420, scale: 2 } });
-    writeFileSync(join(OUT, 'style-' + st + '.png'), Buffer.from(r.data, 'base64'));
+    writeFileSync(join(OUT, 'look-' + LOOK.replace(':', '') + '.png'), Buffer.from(r.data, 'base64'));
     const full = await cdp.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(OUT, 'style-' + st + '-full.png'), Buffer.from(full.data, 'base64'));
     console.log('shot style', st);
