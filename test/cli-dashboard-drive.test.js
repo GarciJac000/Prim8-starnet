@@ -136,7 +136,8 @@ async function boot(opts) {
   const out = new PassThrough(); out.isTTY = true; out.columns = 400; out.rows = 60;
   let raw = ''; out.on('data', d => { raw += d; });
   const inp = new PassThrough(); inp.isTTY = true;
-  const exited = runDashboard({ mode: 'attached', workspace: '', child: null, client: clientFor(st.port) }, { stdout: out, stdin: inp, env: { STARNET_LOGO: 'plain', NO_COLOR: '1', STARNET_STILL: '1', STARNET_MOUSE: '0' } });
+  const exited = runDashboard({ mode: 'attached', workspace: '', child: null, client: clientFor(st.port) }, { stdout: out, stdin: inp, themeFile: (opts && opts.themeFile) || '',
+    env: Object.assign({ STARNET_LOGO: 'plain', NO_COLOR: '1', STARNET_STILL: '1', STARNET_MOUSE: '0' }, opts && opts.env) });
   await sleep(1200);
   const keys = async (s, gap) => { for (const ch of s) { inp.write(ch); await sleep(12); } await sleep(gap == null ? 200 : gap); };
   const key = async (seq, gap) => { inp.write(seq); await sleep(gap == null ? 150 : gap); };
@@ -147,7 +148,7 @@ async function boot(opts) {
   const mark = () => raw.length;
   const since = at => raw.slice(at).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '\n');
   const done = async () => { process.emit('SIGTERM', 'SIGTERM'); await Promise.race([exited, sleep(2000)]); for (const r of st.live.values()) { try { r.res.end(); } catch (_) {} } if (st.srv.closeAllConnections) st.srv.closeAllConnections(); st.srv.close(); };
-  return { st, keys, key, userRuns, judges, screen, mark, since, done };
+  return { st, keys, key, userRuns, judges, screen, mark, since, done, raw: () => raw };
 }
 const UP = '\x1b[A', DOWN = '\x1b[B', ESC = '\x1b';
 
@@ -437,6 +438,43 @@ const UP = '\x1b[A', DOWN = '\x1b[B', ESC = '\x1b';
     const said2 = d.since(at2).replace(/\s+/g, ' ');
     A.ok(/the app's save did not take it \(the station save is damaged\), so the app may give ULTRON its own saved setting back when it opens/.test(said2), 'yolo off: a save that did not take it is said, never "it stays when the app opens": ' + (said2.match(/Approval mode.{0,300}/) || [''])[0]);
     await d.done();
+  }
+
+  /* 14. /theme: lists the themes, recolors the whole screen at once, keeps the pick (cli.json, its other keys kept), and
+     the next starnet starts in it; an unknown name changes nothing */
+  {
+    const tui = require('../bin/lib/tui.js');
+    const dir = require('fs').mkdtempSync(require('path').join(os.tmpdir(), 'starnet-theme-drive-'));
+    const themeFile = require('path').join(dir, 'cli.json');
+    require('fs').writeFileSync(themeFile, JSON.stringify({ keep: 'me' }));
+    const color = { NO_COLOR: '', COLORTERM: 'truecolor' };
+    const amberSgr = '38;2;255;170;51', redSgr = '38;2;255;46;62';
+    const d = await boot({ env: color, themeFile });
+    A.ok(d.raw().includes(redSgr) && !d.raw().includes(amberSgr), 'theme: starts in the neon red');
+    let at = d.mark();
+    await d.keys('/theme\r', 400);
+    let said = d.since(at).replace(/\s+/g, ' ');
+    A.ok(/Theme: red/.test(said) && /▸ red/.test(said) && ['amber', 'green', 'blue', 'purple', 'white'].every(n => said.includes(n)), 'theme: /theme lists every theme, the current one marked: ' + said.slice(-300));
+    at = d.mark();
+    await d.keys('/theme amber\r', 600);
+    said = d.since(at).replace(/\s+/g, ' ');
+    A.ok(/Theme: amber, classic amber — kept for the next starnet/.test(said), 'theme: /theme amber says it took and is kept');
+    A.ok(d.raw().slice(at).includes('\x1b[2J'), 'theme: the whole screen is redrawn');
+    const typed = d.mark();   // (the paints while "/theme amber" was being typed were still red)
+    await d.keys('x\x7f', 300);
+    const repaint = d.raw().slice(typed);
+    A.ok(repaint.includes(amberSgr) && !repaint.includes(redSgr), 'theme: what it paints next is amber, no red left');
+    A.eq(JSON.parse(require('fs').readFileSync(themeFile, 'utf8')), { keep: 'me', theme: 'amber' }, 'theme: the pick is kept, cli.json\'s other keys too');
+    at = d.mark();
+    await d.keys('/theme neon\r', 400);
+    A.ok(/No theme named neon/.test(d.since(at).replace(/\s+/g, ' ')) && JSON.parse(require('fs').readFileSync(themeFile, 'utf8')).theme === 'amber', 'theme: an unknown name changes nothing');
+    await d.done();
+    const d2 = await boot({ env: color, themeFile });
+    A.ok(d2.raw().includes(amberSgr), 'theme: the next starnet starts in amber');
+    await d2.keys('/theme red\r', 600);
+    A.eq(tui.PALETTE.ph[0], '#ff3b4e', 'theme: /theme red puts the neon red back');
+    await d2.done();
+    require('fs').rmSync(dir, { recursive: true, force: true });
   }
 
   global.setTimeout = realSetTimeout; global.setInterval = realSetInterval;
