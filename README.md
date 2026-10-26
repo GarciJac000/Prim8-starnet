@@ -149,7 +149,7 @@ each), `starnet flow` (workflows) and `starnet -p "<task>"` (one run, answer on 
 
 StarNet can import an existing agent: point it at your on-disk OpenClaw or Hermes home and it
 mints a StarNet agent from the persona, instructions, memory, and model it finds. API keys
-never transfer — you re-enter those in the KEYS tab.
+never transfer — you re-enter those in CONNECT › ABILITIES › CONNECTED › API KEYS.
 
 ## Architecture
 
