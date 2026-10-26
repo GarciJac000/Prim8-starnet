@@ -11,8 +11,9 @@
 //! adopted it, ppid 1). A bundled-node process whose parent is alive belongs to someone and is never touched, and
 //! neither is a terminal session this StarNet runs for. Children of an orphan go with it.
 
-/// One process running the bundled node, as the reap sees it.
+/// One process running the bundled node, as the reap sees it. (Other unix has no reaper wired: unused there.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub struct NodeProc {
     pub pid: u32,
     pub parent: u32,
@@ -21,6 +22,7 @@ pub struct NodeProc {
 
 /// The pids to terminate: orphans (no live parent) and, transitively, bundled-node processes whose parent is one of
 /// them. `keep` (the terminal sessions this StarNet runs for) and `own_pid` are never in it.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub fn orphans_to_reap(procs: &[NodeProc], keep: &[u32], own_pid: u32) -> Vec<u32> {
     let spared = |pid: u32| pid == own_pid || keep.contains(&pid);
     let mut reap: Vec<u32> = procs
