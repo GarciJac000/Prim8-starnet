@@ -15,6 +15,12 @@ The stability update. It fixes the bugs you reported most since 0.14.0, starting
 - **A key you paste into chat is saved to KEYS.** The agent stores it and refers to it by name, and COMMS shows a placeholder instead of the key. Only a key in the message you just sent is saved, so another agent in a group chat or an imported recipe can never add or change your keys.
 - **Scheduled routines keep their notepad** in ASK mode. A routine could lose routine.notepad and still report success.
 
+## See your crew work
+
+- **Every working agent shows what it's doing.** A small tag right above each agent reads its name and the task it was given. The agent you're talking to, or the one under your pointer, gets the full card: the task, the tool it's using right now, how long it has been running and what it has cost. Tags take your theme's colour and zoom with the station.
+- **Hand-offs are visible.** When an agent splits work across its crew, a line runs across the floor from the lead to each worker for as long as that worker runs, and the result rides back when it finishes.
+- **Workers' steps reach the station.** A worker's own tool steps now show on its CREW card instead of it reading "thinking" for the whole job.
+
 ## Local models (Ollama)
 
 - **Small models stop timing out on long tasks.** Once a big request locked the memory window at 64k, it never came back down, so on a smaller GPU the model spilled onto the CPU and gave up after 5 minutes. A task now steps the window back down when the model is spilling. Set `SKYNET_OLLAMA_CONNECT_TIMEOUT_MS` if your machine needs longer than the 5-minute connect wait.

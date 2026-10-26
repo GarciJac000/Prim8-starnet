@@ -89,6 +89,10 @@ const Harness = (() => {
   // side prompts on the SAME agentId — their prompt_tokens must never overwrite the agent's real
   // context occupancy (they made the gauge snap back to ~1% right after every real turn).
   const internalRuns = new Set();   // runIds whose cost events are gauge-invisible
+  // runIds of delegated WORKER runs seen on a lead's stream (orchestration FORWARD). Their tool steps reach U.bus for
+  // the floor, but a worker's kit is the sidecar's autonomous office — not its room — so room-gap readers (the
+  // station-quest generator) must not read a worker's web/files call as a missing prop. Bounded: oldest drop first.
+  const delegatedRuns = new Set();
 
   // Composite map keys join on U+0000, built with String.fromCharCode so no raw NUL byte ever lands in
   // this source file (a literal one makes the whole file invisible to grep). No id can contain it.
@@ -1515,13 +1519,16 @@ const Harness = (() => {
             // bus fold below always finds the registration.
             if (payload.runId && !internal) registerRun(payload.runId, agentId || 'agent', streamId, messages);
             if (!runId) { runId = payload.runId; onRunId && onRunId(runId); }
+            else if (payload.runId && payload.runId !== runId) { delegatedRuns.add(payload.runId); if (delegatedRuns.size > 400) delegatedRuns.delete(delegatedRuns.values().next().value); }
             break;
           case 'agent.token': full += payload.delta; onToken && onToken(payload.delta); break;
           // Any prose before a tool call was an in-progress narration segment, not the terminal answer. Keep it
           // visible in the chronological live transcript, but reset every final-output accumulator at this
           // authoritative boundary so returned/persisted/delivered text contains exactly the last assistant turn.
-          case 'agent.tool_call': full = ''; onTerminalReset && onTerminalReset(); onToolCall && onToolCall(payload); break;
-          case 'agent.tool_result': onToolResult && onToolResult(payload); break;
+          // a delegated WORKER's tool steps ride this stream too (orchestration FORWARD) for the floor + CREW + DELEGATED
+          // readers on U.bus above; they are not the lead's steps, so they never reset its answer or render as its rows.
+          case 'agent.tool_call': if (runId && payload.runId && payload.runId !== runId) break; full = ''; onTerminalReset && onTerminalReset(); onToolCall && onToolCall(payload); break;
+          case 'agent.tool_result': if (runId && payload.runId && payload.runId !== runId) break; onToolResult && onToolResult(payload); break;
           case 'deliverable': onDeliverable && onDeliverable(payload); break;
           // the run is PAUSED on the sidecar awaiting this; the UI shows approve/always/full/deny and answers
           // via Harness.consent(). No more events arrive on this stream until the answer is POSTed.
@@ -2072,6 +2079,7 @@ const Harness = (() => {
   }
 
   return {
+    isDelegatedRun: (id) => delegatedRuns.has(String(id || '')),
     pingEngine, engineState, restartEngine,
     canRestartEngine: () => !!tauriCoreNow(),
     isDesktop: () => DESKTOP,   // lets the UI tell a desktop keychain-store failure (token saved locally) from a browser no-op

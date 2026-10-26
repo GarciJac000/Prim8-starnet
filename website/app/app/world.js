@@ -156,6 +156,16 @@ const World = (() => {
   // body when the lead delegates. delegateLead/delegateCall track the open team.dispatch window (tool_call→result)
   // so a worker run that starts inside it animates; both are driven purely by existing agent.* bus events.
   const handoffBoxes = [];
+  // SUMMON LINES: a delegation stays visible for as long as the worker's run lives — a floor link from the lead
+  // body to the worker body (who started whom), a pulse down it on start, the result riding it home on end.
+  // Driven only by the same handoff() calls (team.dispatch window + agent.run.start/end), so it can't outlive a run.
+  const summonLinks = [];
+  // ACTIVITY TAGS: what each live run is doing, read off the bus — its task in words (the lead's settled Task Brief /
+  // a worker's dispatch thread), the tool in flight and its target (agent.tool_call argsSummary), and the cost the
+  // sidecar REPORTED (cost.estimate / agent.cost; nothing shown until one arrives — an unreported cost is unknown,
+  // never $0). One per run, right above the body; it carries the run clock, so the RUN / ▸ TOOL tags stand down for it.
+  const PLATES_ON = true;
+  const plateByAgent = new Map();
   let delegateLead = null, delegateCall = null;
   // G4 feature 1 — APPROVAL WALK-AND-WAIT. When a HERO run blocks on a permission.prompt the body stops
   // working, stands, and walks to a wait anchor (airlock → mission board → own desk, resolved honestly from
@@ -7359,6 +7369,7 @@ const World = (() => {
       ghost.draw(ctx, now, T, capPx, plates.length ? (bx, paint) => { if (onPlate(bx)) return false; paint(); return true; } : null, (bx, n) => captionInStation(bx, n, plates));
     }
     if (liveWork) {
+    drawSummonLinks(now);    // SUMMON LINES: lead→worker floor links for as long as each delegated run lives
     drawHandoffBoxes(now);   // Stage 2: lead→worker delegation boxes fly over the entities
     drawSendCrates();        // SEND TO: a line's product crate flies from its OUTBOX to the next line's INBOX
     drawQueueJam(now);   // the live backlog as a physical jam of waiting crates at the INTAKE (world-space, under the lightmap)
@@ -7408,6 +7419,7 @@ const World = (() => {
     if (overlaysOn) {
     drawRunClocks(now);   // G0.2: the honest elapsed-time tag at every desk with a live run (world-space, over the lightmap)
     drawWorkGlyphs(now);  // stage-ticker STRETCH: the "▸ TOOL" tag at a desk with a real tool in flight (one line below the run clock)
+    if (PLATES_ON) drawActivityPlates(now);   // ACTIVITY TAGS: a one-line tag over every working agent (name + its task); the full card for the agent in COMMS / under the pointer
     drawAwaitTag(now);    // the existing lead wait anchor
     for (const b of crew) if (crewIsAwaiting(b)) drawAwaitTag(now, b);
     drawRoutingNags(now); // BELT LEGIBILITY: the compiled plan's errors as in-world callouts on the broken piece
@@ -8413,6 +8425,7 @@ const World = (() => {
     for (const [aid, t0] of runStartByAgent) {
       const b = bodyForAgent(aid);
       if (!b || b.unplaced || crewIsAwaiting(b)) continue;
+      if (typeof PLATES_ON !== 'undefined' && PLATES_ON && plateByAgent.has(aid)) continue;   // its ACTIVITY PLATE carries this clock
       // only at a desk that is honestly in the working pose — a talk-only run never grows a clock
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
@@ -8445,6 +8458,162 @@ const World = (() => {
     ctx.restore();   // E1: close the link-stale dim wrapper
   }
 
+  /* ---------- ACTIVITY TAGS (Andrew 10-26, "fantastic, perfect"): right above each working agent, in WORLD px so they
+     zoom with the station and never grow when the camera pulls back; inked in the user's own theme phosphor with each
+     agent's suit colour as its name and edge. Plain VT323 glyphs only (▸ and "…" are fallback faces / a flat bar: a
+     long line FADES instead). The clock is the RUN clock's own (CrewClock first), so the two can never disagree. */
+  const ACT_PLATE_FONT = "5px 'VT323','Courier New',monospace";   // WORLD px: it zooms with the station, never grows on zoom-out
+  const ACT_TAG_W = 22;     // characters in a one-line tag (name + the task, faded at the edge)
+  const ACT_PLATE_W = 30;   // characters per line (the task line needs the room)
+  function plateTarget(raw) {
+    const s = String(raw || '');
+    const m = /"(?:url|path|file_path|filePath|file|query|q|command|cmd|pattern|title|name|to|id)"\s*:\s*"([^"]{1,200})/.exec(s);
+    let v = m ? m[1] : '';
+    v = v.replace(/^https?:\/\/(www\.)?/, '').replace(/\\\\/g, '/');
+    if (/[\/]/.test(v) && !/\s/.test(v) && !/^[a-z0-9-]+\.[a-z]{2,}/i.test(v)) v = v.split('/').filter(Boolean).pop() || v;   // a file path → its basename
+    return v.replace(/\s+/g, ' ').trim();
+  }
+  function plateClock(aid, t0, now) {
+    const wallNow = (typeof CrewClock !== 'undefined' && CrewClock && typeof CrewClock.frameNow === 'function') ? CrewClock.frameNow(now) : Date.now();
+    const crewMs = (typeof CrewClock !== 'undefined' && CrewClock && typeof CrewClock.elapsedOf === 'function') ? CrewClock.elapsedOf(aid, wallNow) : null;
+    const sec = Math.max(0, Math.floor((typeof crewMs === 'number' && isFinite(crewMs) ? crewMs : (now - t0)) / 1000));
+    const mm = Math.floor(sec / 60), ss = String(sec % 60).padStart(2, '0');
+    return mm >= 60 ? Math.floor(mm / 60) + ':' + String(mm % 60).padStart(2, '0') + ':' + ss : mm + ':' + ss;
+  }
+  // a delegated worker's task in words: the title of the thread its lead filed it under (the DELEGATED row's own line),
+  // only a thread filed for THIS run (made no earlier than a minute before it started). Looked up at most once a second.
+  function workerTaskFor(aid, wallStart) {
+    if (typeof Workstreams === 'undefined' || !Workstreams.list) return '';
+    let best = null;
+    for (const w of Workstreams.list({ includeArchived: true, includeWorkers: true })) {
+      if (!w || w.worker !== true || w.agentId !== aid || !w.title) continue;
+      if ((+w.createdAt || 0) < wallStart - 60000) continue;
+      if (!best || (+w.createdAt || 0) > (+best.createdAt || 0)) best = w;
+    }
+    return best ? String(best.title) : '';
+  }
+  // the plate speaks in the STATION's phosphor (Andrew's hue 216 = the same blue as every desk screen), not a fixed
+  // green/amber that belongs to no theme. Read off <body> (stationui writes --ph-rgb / --ph-bright-rgb there).
+  let plateInk = null, plateInkAt = -1e9;
+  function plateTheme(now) {
+    if (plateInk && now - plateInkAt < 1000) return plateInk;
+    plateInkAt = now;
+    let ph = [154, 220, 176], br = [214, 245, 226];
+    try {
+      const cs = getComputedStyle(document.body);
+      const p = String(cs.getPropertyValue('--ph-rgb') || '').split(',').map(Number), q = String(cs.getPropertyValue('--ph-bright-rgb') || '').split(',').map(Number);
+      if (p.length >= 3 && p.every(isFinite)) ph = p.slice(0, 3);
+      if (q.length >= 3 && q.every(isFinite)) br = q.slice(0, 3);
+    } catch (e) { plateInk = plateInk || null; }
+    const rgba = (c, a) => 'rgba(' + c.join(',') + ',' + a + ')';
+    plateInk = { ph: rgba(ph, 1), dim: rgba(ph, 0.62), faint: rgba(ph, 0.35), bright: rgba(br, 0.95), glow: rgba(ph, 0.9) };
+    return plateInk;
+  }
+  // word-wrap to at most n lines of w monospace chars; the last line keeps the overflow (fadeText fades it)
+  function wrapChars(t, w, n) {
+    const out = []; let line = '';
+    for (const word of String(t).split(' ')) {
+      if (out.length === n - 1) { line = line ? line + ' ' + word : word; continue; }
+      if ((line ? line.length + 1 : 0) + word.length > w && line) { out.push(line); line = word; } else line = line ? line + ' ' + word : word;
+    }
+    if (line) out.push(line);
+    return out.slice(0, n);
+  }
+  // VT323's "…" is a flat bar: a line that runs out of room FADES its last glyphs instead (one VT323 advance each)
+  function fadeText(t, x, y, maxW, cw) {
+    const n = Math.floor(maxW / cw);
+    if (t.length <= n) { ctx.fillText(t, x, y); return; }
+    const keep = t.slice(0, Math.max(0, n - 3)), a0 = ctx.globalAlpha;
+    ctx.fillText(keep, x, y);
+    for (let i = 0; i < 3; i++) { ctx.globalAlpha = a0 * (0.62 - i * 0.22); ctx.fillText(t.charAt(keep.length + i), x + (keep.length + i) * cw, y); }
+    ctx.globalAlpha = a0;
+  }
+  function drawActivityPlates(now) {
+    if (!plateByAgent.size) return;
+    // TWO SIZES (Andrew 10-26, "it all clusters together"): every working agent wears a ONE-LINE tag — its name and, in
+    // words, what it was asked to do — and ONE agent at a time gets the full card (task on two lines, the live tool, the
+    // clock and the reported cost): the agent you are talking to in COMMS, or the one under your pointer. The full card
+    // is placed first so it gets the best spot, and drawn last so it sits on top.
+    const live = [];
+    for (const [aid, k] of plateByAgent) {
+      const t0 = runStartByAgent.get(aid);
+      const b = bodyForAgent(aid);
+      if (t0 == null || !b || b.unplaced || crewIsAwaiting(b)) continue;
+      const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
+      if (!working) continue;
+      if (!k.task && aid !== 'agent' && now - (k.taskTry || 0) > 1000) { k.taskTry = now; k.task = workerTaskFor(aid, k.wallStart || 0); }
+      live.push({ aid, k, b, t0, full: b === hoverAgent || (chatFocusId != null && aid === chatFocusId) });
+    }
+    if (!live.length) return;
+    live.sort((p, q) => Number(q.full) - Number(p.full));
+    const placed = [], drawn = [];
+    ctx.save();
+    ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    const cw = ctx.measureText('M').width, PAD = 1.5, LH = 5, ink = plateTheme(now);
+    for (const p of live) {
+      const { aid, k, b, t0, full } = p;
+      const nm = String(b.name || aid).toUpperCase();
+      const task = String(k.task || '').replace(/\s+/g, ' ').trim().replace(/\s*(…|\.\.\.)$/, '');
+      const what = k.name ? tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : 'thinking';
+      // the full card: NAME · clock · cost / the task (two lines) / the live tool. The tag: NAME + the task (or, before
+      // a task is known, what it is doing), one line, sized to its words.
+      const taskLines = full ? (task ? wrapChars(task, ACT_PLATE_W, 2) : []) : [];
+      const rows = full ? 1 + taskLines.length + 1 : 1;
+      const tagText = task || what;
+      const chars = full ? ACT_PLATE_W : Math.min(ACT_TAG_W, nm.length + 2 + tagText.length + 1);
+      const w = cw * chars + PAD * 2 + (full ? 0 : 4), H = LH * rows + 2, hx = bodyPosX(b);
+      const top = (b.visTopPy != null ? b.visTopPy : bodyPosY(b) - 18) - 3;
+      const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2, vy1 = (cv.height - panY) / scale - H - 2;   // inside the view AND the station hull
+      const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
+      const hits = (x, y) => placed.some(q => x < q.x + q.w + 2 && q.x < x + w + 2 && y < q.y + q.h + 1 && q.y < y + H + 1);
+      // RIGHT ABOVE THE HEAD (Andrew 10-26): centred over the agent; when a neighbour's tag is already there it steps up
+      // one row (twice at most), never sideways — so every tag stays over its own agent.
+      let x = clampX(hx - w / 2), y = Math.max(vy0, top - H);
+      for (let step = 0; step < 3 && hits(x, y); step++) y -= H + 1;
+      y = Math.round(Math.max(vy0, Math.min(vy1, y)));   // never off the top or bottom of the view
+      placed.push({ x, y, w, h: H });
+      drawn.push({ p, nm, task, taskLines, what, w, H, x, y, hx, top });
+    }
+    if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
+    const a0 = ctx.globalAlpha;
+    // tags first, the full card last (on top)
+    for (const d of drawn.slice().reverse()) {
+      const { p, nm, task, taskLines, what, w, H, x, y, hx, top } = d;
+      const { aid, k, b, t0, full } = p;
+      const suit = b.color || ink.ph;
+      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = ink.ph;
+      const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
+      ctx.fillRect(sx, y + H - 1, 0.6, Math.max(0, top + 2 - (y + H - 1)));   // a stem down to its own head
+      // IDENTITY: a dark, slightly see-through plate (the deck shows through), the suit colour as its edge and its name
+      ctx.globalAlpha = a0 * (full ? 0.78 : 0.66); ctx.fillStyle = '#04070b'; ctx.fillRect(x - 1, y - 1, w + 2, H);
+      ctx.globalAlpha = a0 * 0.9; ctx.fillStyle = suit; ctx.fillRect(x - 1, y - 1, 0.75, H);
+      ctx.globalAlpha = a0;
+      const base = y + LH - 1, tx = x + PAD + 4;
+      ctx.fillStyle = k.live ? ink.bright : suit; ctx.fillRect(x + PAD, base - 3.5, 2, 2);   // the run lamp: lit on a live tool
+      ctx.shadowBlur = 2;
+      if (!full) {
+        ctx.shadowColor = suit; ctx.fillStyle = suit; ctx.fillText(nm, tx, base);
+        const nx = tx + ctx.measureText(nm).width + cw;
+        ctx.shadowColor = ink.glow; ctx.fillStyle = task ? ink.bright : (k.live ? ink.ph : ink.faint);
+        fadeText(task || what, nx, base, x + w - PAD - nx, cw);
+        continue;
+      }
+      const clock = plateClock(aid, t0, now);
+      const usd = k.usd == null ? '' : (k.est ? '~$' : '$') + (k.usd < 0.01 ? k.usd.toFixed(3) : k.usd.toFixed(2));
+      const right = clock + (usd ? ' · ' + usd : '');
+      ctx.globalAlpha = a0 * 0.3; ctx.fillStyle = ink.ph; ctx.fillRect(x + PAD, y + LH + 0.25, w - PAD * 2, 0.4); ctx.globalAlpha = a0;
+      ctx.shadowColor = ink.glow; ctx.fillStyle = ink.dim; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
+      ctx.textAlign = 'left'; ctx.shadowColor = suit; ctx.fillStyle = suit;
+      fadeText(nm, tx, base, w - PAD * 2 - 4 - ctx.measureText(right).width - cw, cw);
+      let ly = base + LH;
+      ctx.shadowColor = ink.glow;
+      for (const tl of taskLines) { ctx.fillStyle = ink.bright; fadeText(tl, x + PAD, ly, w - PAD * 2, cw); ly += LH; }
+      const caret = k.live && Math.floor(now / 420) % 2 ? '_' : '';
+      ctx.fillStyle = k.live ? ink.ph : ink.faint; fadeText((k.live ? '> ' : '. ') + what + caret, x + PAD, ly, w - PAD * 2, cw);
+    }
+    ctx.restore();
+  }
+
   /* ---------- the DESK WORK-GLYPH (stage ticker STRETCH): a tiny "▸ TOOL" tag at a desk while that agent has
      a tool in flight (agent.tool_call → its tool_result, tracked in glyphByAgent). Complements the RUN clock
      (which sits at the crown, y+3) by sitting one line BELOW it (y+13) so the two never collide. World-space,
@@ -8457,6 +8626,7 @@ const World = (() => {
       if (!b || b.unplaced || crewIsAwaiting(b)) continue;
       const working = (b === agent) ? !!agent.working : !!(b.working || (b.workUntil && now < b.workUntil));
       if (!working) continue;
+      if (typeof PLATES_ON !== 'undefined' && PLATES_ON && plateByAgent.has(aid)) continue;   // its ACTIVITY PLATE names the tool
       const label = '▸ ' + tickerTool(g && g.name);
       // anchor beside the same desk the run clock uses, but one line lower (RUN clock is at dp.y*T+3).
       let ax, ay;
@@ -10979,14 +11149,76 @@ const World = (() => {
     const to = bodyForAgent(toId);
     if (!to || to === agent) return;
     const now = (typeof performance !== 'undefined') ? performance.now() : fnow;
-    if (phase === 'done') { to.working = false; to.workUntil = 0; to.dir = 'south'; return; }
+    if (phase === 'done') {
+      to.working = false; to.workUntil = 0; to.dir = 'south';
+      const L = summonLinks.find(k => k.toId === toId && !k.tEnd);
+      if (L) L.tEnd = now;
+      return;
+    }
     to.working = true; to.sitting = false; to.dir = 'north'; to.target = null; to.pathPts = null; seizeFromIdle(to);   // re-path straight to its desk if it has one (stepCrew), else stand; drop any leisure latch (J4)
     to.workUntil = now + 3600000; if (!to.wakeAt || now - to.wakeAt > 1500) to.wakeAt = now;
-    sayAt(to, 'on it…');
+    if (!PLATES_ON) sayAt(to, 'on it…');
     gripeNoCompute(to);   // G0.7: a delegated worker in a computeless room complains once too
     const from = bodyForAgent(fromId) || agent;
-    if (from && from !== to) handoffBoxes.push({ fromX: from.px, fromY: from.py - 6, toX: to.px, toY: to.py - 6, t0: now, color: to.color || '#5ad0ff' });
+    if (from && from !== to) {
+      handoffBoxes.push({ fromX: from.px, fromY: from.py - 6, toX: to.px, toY: to.py - 6, t0: now, color: to.color || '#5ad0ff' });
+      for (let i = summonLinks.length - 1; i >= 0; i--) if (summonLinks[i].toId === toId) summonLinks.splice(i, 1);
+      summonLinks.push({ fromId: fromId, toId, t0: now, tEnd: 0 });
+    }
     summonGlance(to, now);   // C-Beat1: a delegated worker just started — OTHER idle in-sight bodies 50% glance at it (AFTER its seize, K3)
+  }
+  // SUMMON LINES — the floor link lead→worker (an elbow: down from the lead's feet, across to the worker's).
+  // It grows in (GROW), carries a summon pulse while the worker is on its way, idles as a slow dashed flow while
+  // the run lives, then on run end carries the result HOME and fades (BACK + FADE). Bodies are re-read every
+  // frame, so the link follows a walking worker to its desk.
+  function summonLinkPts(a, b) {
+    const ax = bodyPosX(a), ay = bodyPosY(a), bx = bodyPosX(b), by = bodyPosY(b);
+    return [{ x: ax, y: ay }, { x: ax, y: by }, { x: bx, y: by }];
+  }
+  function polyAt(pts, f) {
+    let L = 0; for (let i = 1; i < pts.length; i++) L += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    let d = L * Math.max(0, Math.min(1, f));
+    for (let i = 1; i < pts.length; i++) {
+      const s = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      if (d <= s || i === pts.length - 1) { const k = s ? Math.min(1, d / s) : 1; return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * k, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * k }; }
+      d -= s;
+    }
+    return pts[pts.length - 1];
+  }
+  function strokePartial(pts, f) {
+    let L = 0; for (let i = 1; i < pts.length; i++) L += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    let left = L * f; ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length && left > 0; i++) {
+      const s = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      const k = s ? Math.min(1, left / s) : 1;
+      ctx.lineTo(pts[i - 1].x + (pts[i].x - pts[i - 1].x) * k, pts[i - 1].y + (pts[i].y - pts[i - 1].y) * k);
+      left -= s;
+    }
+    ctx.stroke();
+  }
+  function drawSummonLinks(now) {
+    if (!summonLinks.length) return;
+    const GROW = 450, PULSE = 900, BACK = 900, FADE = 700;
+    for (let i = summonLinks.length - 1; i >= 0; i--) {
+      const k = summonLinks[i];
+      const from = k.fromId ? (bodyForAgent(k.fromId) || agent) : agent, to = bodyForAgent(k.toId);
+      const age = now - k.t0, endAge = k.tEnd ? now - k.tEnd : 0;
+      if (!from || !to || (k.tEnd && endAge > BACK + FADE)) { summonLinks.splice(i, 1); continue; }
+      const pts = summonLinkPts(from, to);
+      const col = to.color || '#5ad0ff';
+      const alpha = k.tEnd && endAge > BACK ? 1 - (endAge - BACK) / FADE : 1;
+      ctx.save();
+      ctx.lineCap = 'square'; ctx.lineJoin = 'miter';
+      ctx.globalAlpha = 0.5 * alpha; ctx.strokeStyle = '#000'; ctx.lineWidth = 2.2; strokePartial(pts, Math.min(1, age / GROW));   // the floor channel
+      ctx.globalAlpha = 0.85 * alpha; ctx.strokeStyle = k.tEnd ? (k.endCol || '#7fd6a4') : col; ctx.lineWidth = 0.8;
+      ctx.setLineDash([2, 2]); ctx.lineDashOffset = -now / 160; strokePartial(pts, Math.min(1, age / GROW)); ctx.setLineDash([]);
+      // the summon pulse: lead → worker, right after the link lands
+      const pt = (age - GROW * 0.5) / PULSE;
+      if (pt > 0 && pt < 1) { const p = polyAt(pts, pt); ctx.globalAlpha = alpha; ctx.fillStyle = '#e8f2ff'; ctx.fillRect(Math.round(p.x) - 1.5, Math.round(p.y) - 1.5, 3, 3); ctx.strokeStyle = col; ctx.lineWidth = 0.6; ctx.strokeRect(Math.round(p.x) - 2.5, Math.round(p.y) - 2.5, 5, 5); }
+      // the result riding home: worker → lead
+      if (k.tEnd && endAge < BACK) { const p = polyAt(pts, 1 - endAge / BACK), rc = k.endCol || '#7fd6a4'; ctx.globalAlpha = 1; ctx.fillStyle = rc; ctx.fillRect(Math.round(p.x) - 2, Math.round(p.y) - 2, 4, 4); ctx.fillStyle = U.shade(rc, 0.45); ctx.fillRect(Math.round(p.x) - 2, Math.round(p.y) - 2, 4, 1); }
+      ctx.restore();
+    }
   }
   // draw the in-flight handoff boxes (world space, over the entities). A small arced lerp that self-expires.
   function drawHandoffBoxes(now) {
@@ -11230,6 +11462,21 @@ const World = (() => {
     // ── STRETCH: desk work-glyph state — a tool in flight (tool_call → its tool_result) marks the agent;
     //    the render pass (drawWorkGlyphs) draws a tiny tag at that desk. run.end clears any stale mark. ──
     U.bus.on('agent.tool_call', p => { if (p && p.agentId && p.name) glyphByAgent.set(p.agentId, { name: p.name, callId: p.callId || null }); });
+    U.bus.on('agent.run.start', p => { if (p && p.agentId) plateByAgent.set(p.agentId, { runId: String(p.runId || ''), wallStart: Date.now(), task: '', taskTry: 0, model: String(p.model || ''), name: '', target: '', live: false, callId: null, usd: null, est: null }); });
+    // the lead's task in words = its settled Task Brief objective (the COMMS "MY READ" line) — never a guess
+    U.bus.on('taskbrief.settled', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.runId || !k.runId || p.runId === k.runId) && p.objective) k.task = String(p.objective); });
+    U.bus.on('agent.tool_call', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && p.name) Object.assign(k, { name: p.name, target: plateTarget(p.argsSummary), live: true, callId: p.callId || null }); });
+    U.bus.on('agent.tool_result', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && (!p.callId || !k.callId || k.callId === p.callId)) k.live = false; });
+    U.bus.on('cost.estimate', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd) && k.est !== false) { k.usd = +p.usd; k.est = true; } });
+    // agent.cost arrives once per model call: the plate shows the run's running SUM (an estimate stands until the first one)
+    U.bus.on('agent.cost', p => { const k = p && p.agentId && plateByAgent.get(p.agentId); if (k && isFinite(+p.usd)) { k.usd = (k.est === false ? k.usd : 0) + (+p.usd); k.est = false; } });
+    U.bus.on('agent.run.end', p => { if (p && p.agentId) plateByAgent.delete(p.agentId); });
+    // the summon link's result packet says how the worker's run REALLY ended: delivered (green), failed (red), stopped short (amber)
+    U.bus.on('agent.run.end', p => {
+      if (!p || !p.agentId) return;
+      const L = summonLinks.filter(k => k.toId === p.agentId && !k.endCol).pop();
+      if (L) L.endCol = p.reason === 'done' ? '#7fd6a4' : (/^(error|refusal|empty)$/.test(String(p.reason || '')) ? '#e06a5f' : '#d9a95b');
+    });
     U.bus.on('agent.tool_result', p => {
       if (!p || !p.agentId) return;
       const g = glyphByAgent.get(p.agentId);

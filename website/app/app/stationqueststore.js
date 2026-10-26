@@ -97,6 +97,8 @@ const StationQuestStore = (() => {
   // have their own floor story (toolprops returns null / the cap is the freebie), so they never mint here.
   function onToolCall(p) {
     if (!ready() || !p || !p.name) return;
+    // a delegated worker runs on the sidecar's autonomous office kit, not its room: its tool use is never a room gap
+    if (typeof Harness !== 'undefined' && typeof Harness.isDelegatedRun === 'function' && Harness.isDelegatedRun(p.runId)) return;
     const cap = capForTool(p.name);
     if (!cap) return;
     if (grantedCaps(p.agentId).has(cap)) return;   // the room already grants it — no gap, no quest
