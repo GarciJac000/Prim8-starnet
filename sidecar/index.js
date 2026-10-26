@@ -22516,6 +22516,9 @@ async function runOnceCore(o) {
     // A name no registered tool answers to: the registry's "unknown tool" reply names the closest tools THIS run can
     // call (advertised + deferred wire names), never an ungranted one (loop-breaker.js counts these as strikes).
     if (!liveTool) dctx = Object.assign({}, dctx, { toolNames: Array.from(fromWire.keys()) });
+    // FILES BEFORE THE SHELL (2026-10-25): a shell.exec path refusal names fs_read / fs_list / fs_search as the way in only
+    // when THIS run carries them — an agent without an INTEL CAB is never sent to a tool it does not have
+    if (c.name === 'shell.exec' && fromWire.has('fs_read')) dctx = Object.assign({}, dctx, { fileToolsOnWire: true });
     // CREW SEATED MID-TASK START FROM THE ANSWERS (review 10-14): station.control hands group.add what the Commander already
     // answered in this run's Task Brief (host-composed, their own words), so the kickoff in the group never re-asks it
     if (/^station[._]control$/.test(String(c.name || '')) && taskBriefState && taskBriefState.brief) {
@@ -22781,9 +22784,18 @@ async function runOnceCore(o) {
     + 'After any action that changes the world, VERIFY it took effect with a read-back tool (e.g. now-playing after play, a listing after a write, a probe after a start) before reporting done. '
     + 'A tool error is information: read it and change strategy — never repeat the identical failing call. Escalate automatically through safe authorized routes, and disclose a more visible or consequential route when its own consent boundary requires it. '
     + 'Blocked sites, dead links and throttled engines are ordinary web weather: route around them, and mention an obstacle in your reply only if it changed the outcome — never narrate routine obstacles as failures, and never apologize for them. ';
+  /* FILES BEFORE THE SHELL (2026-10-25, a v0.14.0 report on gpt-5.6-luna): this block used to OPEN with "when the Commander
+     names a local project folder, first anchor shell_exec.cwd", and the file tools came up only as "inspect before editing" —
+     so with an INTEL CAB and a WORKBENCH both on the wire a Codex-trained model listed and read files with dir / Select-String /
+     type: an approval card per read, and a C:\ path refused AFTER its card read as "the files are inaccessible". Reading is
+     the file tools' job (they take a full path); the shell runs things. Paid for in place (payload.budget had ~20 chars of
+     headroom): the shell-listing diagnostic is gone from both lines, and the "no Bash-style /c paths" sentence that sat
+     further down rides the cwd rule it was about. */
   const workDisciplineNote = ''
-    + (hasShellExec ? 'When the Commander names a local project folder, first anchor shell_exec.cwd to that exact folder, then keep later shell paths relative to it. After a path or cwd failure, run one small working-directory diagnostic plus a listing, and change strategy instead of retrying the same bad path. ' : '')
-    + (hasReadTools ? 'Inspect before editing with fs_search/fs_list/fs_read, or one small shell diagnostic when the file tools cannot see the project; do not guess file contents or shotgun failed paths. ' : '')
+    + (hasReadTools ? 'Read, list and search files with fs_read / fs_list / fs_search, full paths the Commander names included'
+      + (hasShellExec ? ', not shell_exec (dir, type, cat, Get-Content, Select-String): the shell is for running tests, builds, git and scripts' : '') + '. ' : '')
+    + (hasShellExec ? 'To run commands in a folder the Commander names, anchor shell_exec.cwd to that exact folder as given (never a guessed Bash-style /c path) and use relative paths; after a path or cwd failure, change strategy instead of retrying the same bad path. ' : '')
+    + (hasReadTools ? 'Inspect before editing with fs_search/fs_list/fs_read; do not guess file contents or shotgun failed paths. ' : '')
     + (hasWriteTools ? (hasPatchTool
       ? 'For source changes, prefer fs_patch for multi-line edits and fs_edit only for small exact replacements. Avoid temporary patch scripts, giant quoted shell rewrites, or minified/quoting-mangled edits unless the normal file tools cannot do the job; leave code readable. '
       : 'For source changes, prefer fs_edit/fs_write over giant quoted shell rewrites, and leave code readable. ') : '')
@@ -22831,7 +22843,6 @@ async function runOnceCore(o) {
       + (hasWriteTools ? 'Save substantive deliverables (reports, code, notes) to your workspace with fs_write / fs_append. ' : '')
       + (hasNotebookWrite ? 'Save explicit preferences, corrections, and approved reusable design requirements with notebook_write before claiming they are remembered. Read an existing memory before correcting it; use replaceId and previousBody to update it rather than appending an opposite fact. Pin approved requirements within their intended scope, retain artifact/reference paths, and re-read approved artifacts before making variants. Current user instructions override recalled context. ' : '')
       + workDisciplineNote
-      + (hasShellExec ? 'Do not guess Bash-style /c paths for Windows when the Commander gave you a real Windows path. ' : '')
       + (hasWriteTools ? 'Saving a file shows the Commander a quick one-click approval prompt — so just CALL the write tool when you are ready; do not ask permission in chat or claim you cannot save. If they decline, carry on without it. ' : '')
       + 'Keep working across as many tool calls as the task needs; when it is fully done, give the Commander a clear '
       + 'final report of what you found/did' + (hasWriteTools ? ' and which files you saved.' : '.')

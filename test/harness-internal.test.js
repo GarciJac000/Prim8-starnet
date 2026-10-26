@@ -76,6 +76,13 @@ A.ok(/const\s+workDisciplineNote\s*=/.test(sidecar), 'sidecar builds a dedicated
 A.ok(/anchor shell_exec\.cwd to that exact folder/.test(sidecar), 'work discipline anchors shell cwd before project commands');
 A.ok(/change strategy instead of retrying the same bad path/.test(sidecar), 'work discipline discourages repeated bad path attempts');
 A.ok(/Inspect before editing with fs_search\/fs_list\/fs_read/.test(sidecar), 'work discipline requires inspection before editing');
+// FILES BEFORE THE SHELL (2026-10-25, gpt-5.6-luna on v0.14.0 read a named project with dir / Select-String / type): reading
+// is routed to the file tools, and that rule comes BEFORE the shell cwd rule (it used to open the block)
+A.ok(/Read, list and search files with fs_read \/ fs_list \/ fs_search, full paths the Commander names included/.test(sidecar), 'work discipline routes file reads to the file tools, full paths included');
+A.ok(/not shell_exec \(dir, type, cat, Get-Content, Select-String\): the shell is for running tests, builds, git and scripts/.test(sidecar), 'work discipline keeps the shell for running things');
+A.ok(sidecar.indexOf('Read, list and search files with fs_read') >= 0 && sidecar.indexOf('Read, list and search files with fs_read') < sidecar.indexOf('anchor shell_exec.cwd to that exact folder'), 'the file-tools rule comes before the shell cwd rule');
+A.ok(/anchor shell_exec\.cwd to that exact folder as given \(never a guessed Bash-style \/c path\)/.test(sidecar), 'the cwd rule still forbids guessed Bash-style /c paths');
+A.ok(/c\.name === 'shell\.exec' && fromWire\.has\('fs_read'\)\) dctx = Object\.assign\(\{\}, dctx, \{ fileToolsOnWire: true \}\)/.test(sidecar), 'the host tells shell.exec when this run carries the file tools');
 A.ok(/prefer fs_patch for multi-line edits/.test(sidecar), 'work discipline prefers structured patch edits for source changes');
 A.ok(/Avoid temporary patch scripts/.test(sidecar), 'work discipline steers away from throwaway patch scripts');
 A.ok(/run the narrowest real verification/.test(sidecar), 'work discipline requires targeted verification');

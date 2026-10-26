@@ -670,7 +670,7 @@ const { note: failNote } = require('../../failopen');
 
     const readTool = {
       name: 'fs.read', capability: 'cabinet', scope: 'read', requiresConsent: false, timeoutMs: 10000,
-      description: 'Read a file from the current project folder when this session is project-scoped, otherwise from your private workspace. Text files come back as text; for large text use offset and limit to page character ranges without rerunning the command that produced the file. For source code pass { "numbered": true }: every line is prefixed "<line number><TAB>" (cat -n style) so you can cite exact lines, and offset/limit then mean the 1-based START LINE and the NUMBER OF LINES (e.g. offset:120, limit:40). Without "numbered" (or with "raw": true) the text is returned exactly as stored. Word (.docx), Excel (.xlsx) and Jupyter (.ipynb) files are extracted to readable text automatically; PNG/JPEG/GIF/WEBP images are shown to you as actual pixels so you can look at them directly.',
+      description: 'Read a file by its full path, or by a path relative to the project folder (in a project session) or else your private workspace. Text files come back as text; for large text use offset and limit to page character ranges without rerunning the command that produced the file. For source code pass { "numbered": true }: every line is prefixed "<line number><TAB>" (cat -n style) so you can cite exact lines, and offset/limit then mean the 1-based START LINE and the NUMBER OF LINES (e.g. offset:120, limit:40). Without "numbered" (or with "raw": true) the text is returned exactly as stored. Word (.docx), Excel (.xlsx) and Jupyter (.ipynb) files are extracted to readable text automatically; PNG/JPEG/GIF/WEBP images are shown to you as actual pixels so you can look at them directly.',
       schema: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' }, numbered: { type: 'boolean' }, raw: { type: 'boolean' } } },
       run: async (args, ctx) => {
         const aid = (ctx && ctx.agentId) || 'agent';
@@ -797,7 +797,7 @@ const { note: failNote } = require('../../failopen');
 
     const listTool = {
       name: 'fs.list', capability: 'cabinet', scope: 'read', requiresConsent: false, timeoutMs: 8000,
-      description: 'List files in your workspace. Pass { "recursive": true } to see the whole tree (directories end with "/"); optional "path" lists one subdirectory.',
+      description: 'List files in your workspace. Pass { "recursive": true } to see the whole tree (directories end with "/"); a "path" lists one folder, full paths too.',
       schema: { type: 'object', properties: { path: { type: 'string' }, recursive: { type: 'boolean' } } },
       run: async (args, ctx) => {
         const { abs } = await resolveInside((ctx && ctx.agentId) || 'agent', (args && args.path) || '.', { scope: 'read', ctx });
