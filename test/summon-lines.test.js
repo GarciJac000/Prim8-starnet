@@ -5,8 +5,9 @@
        lead's own (a worker's tool_call used to be able to wipe the lead's answer);
      · a worker's tool use is never a ROOM gap: its kit is the sidecar's autonomous office, so the station-quest
        generator skips runs the harness saw arrive as delegated workers;
-     · the plate tells the truth: cost only once the sidecar reports one (per-call agent.cost SUMMED), and it hangs
-       beside a seated worker's desk instead of over its screen. */
+     · the plate tells the truth: cost only once the sidecar reports one (per-call agent.cost SUMMED); every working
+       agent wears a small one-line tag right above its head (WORLD px, so it zooms with the room and never grows when the
+       camera pulls back), and only the agent in COMMS or under the pointer gets the full card. */
 'use strict';
 const fs = require('fs'), path = require('path'), A = require('./_assert');
 const rd = p => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
@@ -53,7 +54,9 @@ A.ok(onTool.indexOf('isDelegatedRun(p.runId)) return') >= 0 && onTool.indexOf('i
 A.ok(/U\.bus\.on\('agent\.cost', p => \{[^\n]*k\.usd = \(k\.est === false \? k\.usd : 0\) \+ \(\+p\.usd\)/.test(world), 'plate cost sums the per-call agent.cost reports');
 A.ok(/usd: null, est: null/.test(world), 'a plate starts with NO cost (unknown, never $0)');
 const plates = A.fnBody(world, 'function drawActivityPlates(');
-A.ok(plates.indexOf('deskPropFor(aid)') >= 0 && /atDesk/.test(plates), 'a seated worker\'s plate anchors to its desk');
+A.ok(/let x = clampX\(hx - w \/ 2\), y = Math\.max\(vy0, top - H\)/.test(plates) && !/atDesk/.test(plates), 'every tag sits right above its own agent (centred over the head), never off to a desk side');
+A.ok(/ACT_PLATE_FONT = "5px /.test(world), 'tags are WORLD px: they scale with the station and never grow when the camera zooms out');
+A.ok(/b === hoverAgent \|\| \(chatFocusId != null && aid === chatFocusId\)/.test(plates), 'only the agent in COMMS or under the pointer gets the full card');
 A.ok(plates.indexOf('crewIsAwaiting(b)') >= 0, 'a plate stands down while its agent waits on the Commander');
 A.ok(/PLATES_ON && plateByAgent\.has\(aid\)\) continue;   \/\/ its ACTIVITY PLATE carries this clock/.test(world), 'one clock per run: the RUN tag stands down for a plated agent');
 

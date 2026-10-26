@@ -8461,8 +8461,8 @@ const World = (() => {
   /* ---------- ACTIVITY PLATES — an ASCII readout over each working body. Plain VT323 glyphs only (. - | ' > _ are all
      in the font; box-drawing and ▸ are fallback faces and would break the monospace frame). Every line is padded to
      one width so the frame closes. The clock is the RUN clock's own (CrewClock first), so the two can never disagree. */
-  const ACT_PLATE_FONT = "6px 'VT323','Courier New',monospace";
-  const ACT_TAG_W = 24;     // characters in a one-line tag (name + the task, faded at the edge)
+  const ACT_PLATE_FONT = "5px 'VT323','Courier New',monospace";   // WORLD px: it zooms with the station, never grows on zoom-out
+  const ACT_TAG_W = 22;     // characters in a one-line tag (name + the task, faded at the edge)
   const ACT_PLATE_W = 30;   // characters per line (the task line needs the room)
   function plateTarget(raw) {
     const s = String(raw || '');
@@ -8549,7 +8549,7 @@ const World = (() => {
     const placed = [], drawn = [];
     ctx.save();
     ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    const cw = ctx.measureText('M').width, PAD = 2, LH = 6, ink = plateTheme(now);
+    const cw = ctx.measureText('M').width, PAD = 1.5, LH = 5, ink = plateTheme(now);
     for (const p of live) {
       const { aid, k, b, t0, full } = p;
       const nm = String(b.name || aid).toUpperCase();
@@ -8566,21 +8566,10 @@ const World = (() => {
       const sw = cache ? cache.W : Infinity, vx0 = Math.max(-panX / scale + 2, T * 2), vx1 = Math.min((cv.width - panX) / scale - w - 2, sw - T * 2 - w), vy0 = -panY / scale + 2, vy1 = (cv.height - panY) / scale - H - 2;   // inside the view AND the station hull
       const clampX = v => Math.round(Math.max(vx0, Math.min(vx1, v)));
       const hits = (x, y) => placed.some(q => x < q.x + q.w + 2 && q.x < x + w + 2 && y < q.y + q.h + 1 && q.y < y + H + 1);
-      // AT A DESK it hangs beside the desk, top-aligned with the monitor (the desk's own readout) — never over the screen
-      // or the seated body; right side first, then left. Off-desk (walking, deskless) it rides above the head.
-      const dp = deskPropFor(aid);
-      const atDesk = !!(dp && Math.abs(hx - (dp.x + (dp.w || 1) / 2) * T) < T * 2.5 && Math.abs(bodyPosY(b) - (dp.y + (dp.h || 1)) * T) < T * 2.5);
-      let x = clampX(hx - w / 2), y = Math.max(vy0, top - H), side = 0, found = false;
-      if (atDesk) {
-        const ty0 = Math.round(dp.y * T - 4);
-        for (const [sd, sx0] of [[1, (dp.x + (dp.w || 1)) * T + 3], [-1, dp.x * T - w - 3]]) {
-          if (sx0 < vx0 - 0.5 || sx0 > vx1 + 0.5) continue;
-          for (const dy of [0, H + 1, -H - 1, 2 * (H + 1)]) if (!hits(sx0, ty0 + dy)) { x = Math.round(sx0); y = ty0 + dy; side = sd; found = true; break; }
-          if (found) break;
-        }
-      }
-      const tries = [[0, 0], [-w / 2 - 3, 0], [w / 2 + 3, 0], [0, -H - 1], [-w / 2 - 3, -H - 1], [w / 2 + 3, -H - 1]];
-      if (!found) for (const [dx, dy] of tries) { const cx = clampX(hx - w / 2 + dx), cy = Math.max(vy0, top - H + dy); if (!hits(cx, cy)) { x = cx; y = cy; found = true; break; } }
+      // RIGHT ABOVE THE HEAD (Andrew 10-26): centred over the agent; when a neighbour's tag is already there it steps up
+      // one row (twice at most), never sideways — so every tag stays over its own agent.
+      let x = clampX(hx - w / 2), y = Math.max(vy0, top - H), side = 0;
+      for (let step = 0; step < 3 && hits(x, y); step++) y -= H + 1;
       y = Math.round(Math.max(vy0, Math.min(vy1, y)));   // never off the top or bottom of the view
       placed.push({ x, y, w, h: H });
       drawn.push({ p, nm, task, taskLines, what, rows, w, H, x, y, side, hx, top });
