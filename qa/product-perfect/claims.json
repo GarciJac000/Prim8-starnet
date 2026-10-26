@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "16219852a4fd260783088f7559082b88407a53b8",
+    "sourceCommit": "5f0967fae7003b866e0f6216efeae923f3cc2e42",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -643,8 +643,8 @@
       },
       {
         "path": "frontend/app/leftrail.js",
-        "bytes": 22559,
-        "sha256": "0b8f52e2b7606b83452062f91243787d74e7ab6550504f554c9a8344c5a84cd6"
+        "bytes": 23478,
+        "sha256": "4be95e952dd4af6c75f85d60eadb501ba1aad6c689dcb4919fb014ec564e1386"
       },
       {
         "path": "frontend/app/legacymigrate.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 956313,
-        "sha256": "5dcbdc97e54f58c7b40a50f4a7f710263c4999c3408e52959643ba583dfa7837"
+        "bytes": 956346,
+        "sha256": "a6c87e0a399e1b6cf091ba75d8ce80baa213e7d1c11b9731a38f953acc2031a8"
       },
       {
         "path": "frontend/app/stepin.js",
@@ -1548,8 +1548,8 @@
       },
       {
         "path": "frontend/css/app.css",
-        "bytes": 431434,
-        "sha256": "e41c8a40a560e6f3ee4aac2a5a768311f291c4281b9ef82c74f2372b8996ac3c"
+        "bytes": 431998,
+        "sha256": "a68b321dc74940c29a25988a67c1f2b76f9138e457fa879797cd10cb47dcd3e9"
       },
       {
         "path": "frontend/css/asciifx.css",
@@ -1668,8 +1668,8 @@
       },
       {
         "path": "frontend/css/pipglass.css",
-        "bytes": 185273,
-        "sha256": "46a835ecd5e309be19f22bdac866a6060271b631a3d40ea63a750341641f36ff"
+        "bytes": 186090,
+        "sha256": "c9b11a97a9a852a855d3994dbaff43f4b6dd01b24ca15bff4fa3d55c6e6b7373"
       },
       {
         "path": "frontend/css/plugins.css",
