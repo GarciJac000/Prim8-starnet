@@ -1712,9 +1712,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
 
     // ---- search: filter rows across every section, dim empty sections, group matches ----
     if (searchInput) {
+      let lastQuery = '';
       const doFilter = () => {
         const q = (searchInput.value || '').trim().toLowerCase();
         body.classList.toggle('con-searching', !!q);
+        // new results start at the top: the pane kept the scroll of whatever was read before, so the first hit sat
+        // cut off above the fold ("gmail" in CONNECT, UX night 10-25)
+        if (q !== lastQuery) { lastQuery = q; if (q) host.scrollTop = 0; }
         if (!q) {
           if (searchEmpty) searchEmpty.hidden = true;
           // restore: show the active section only, clear all row dimming + section flags

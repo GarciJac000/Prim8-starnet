@@ -168,25 +168,21 @@
       '<div id="mc-msg" class="msg" role="status" aria-live="polite"></div>';
     // ---- CATALOG pane markup: one-click, vetted MCP servers and platform APIs. Cards render async from
     //      both catalog endpoints and route through the existing connector/key setup flows. ----
-    // The pane copy is JUST the setup-type legend now — the "browse vetted MCP servers and add them" sentence lived
-    // here AND verbatim in the section desc below (mountConsole), so it read twice. CRT glyphs, not emoji.
-    // The legend doubles as the FILTER: it already taught the three setup tiers, so making those same
-    // words the control costs no new vocabulary. "What can I add without any setup right now?" is the
-    // first question a newcomer has and 39 cards in one scroll could not answer it; "which of these am
-    // I already on?" was equally unanswerable without reading every card.
+    // The setup tiers are the FILTER: "What can I add without any setup right now?" is the first question a newcomer
+    // has, and "which of these am I already on?" was unanswerable without reading every card. CRT glyphs, not emoji.
+    // LEAD WITH THE SERVICES (UX night 10-25): a second intro paragraph and a legend line restated the section desc
+    // and the chips' own words, and in the docked window they pushed the first service below the fold. What each
+    // tier means now rides its chip as the hover tip, so the pane opens on the catalog itself.
     const secCatalog =
-      '<p class="set-about"><b>Connect an app you already use.</b> Choose a platform below. SIGN IN opens your browser; API key setup walks you through adding a key from your account.</p>' +
       (typeof Tutorial !== 'undefined' && Tutorial.platformGuideHTML ? Tutorial.platformGuideHTML('apps') : '') +
       '<div class="cc-filters" id="cc-filters" role="group" aria-label="Filter connectors by setup type">' +
-        '<button type="button" class="cc-filter active" data-cc-filter="all" aria-pressed="true">ALL</button>' +
-        '<button type="button" class="cc-filter cc-lg-none" data-cc-filter="none" aria-pressed="false">▸ no setup</button>' +
-        '<button type="button" class="cc-filter cc-lg-key" data-cc-filter="apikey" aria-pressed="false">API key</button>' +
-        '<button type="button" class="cc-filter cc-lg-oauth" data-cc-filter="oauth" aria-pressed="false">SIGN IN</button>' +
-        '<button type="button" class="cc-filter" data-cc-filter="manual" aria-pressed="false">MANUAL SETUP</button>' +
-        '<button type="button" class="cc-filter cc-f-on" data-cc-filter="installed" aria-pressed="false">YOUR SERVICES</button>' +
+        '<button type="button" class="cc-filter active" data-cc-filter="all" aria-pressed="true" data-tip="Every service in the catalog">ALL</button>' +
+        '<button type="button" class="cc-filter cc-lg-none" data-cc-filter="none" aria-pressed="false" data-tip="No credentials needed: add it and it works">▸ no setup</button>' +
+        '<button type="button" class="cc-filter cc-lg-key" data-cc-filter="apikey" aria-pressed="false" data-tip="You paste a key from your account; the setup walks you through it">API key</button>' +
+        '<button type="button" class="cc-filter cc-lg-oauth" data-cc-filter="oauth" aria-pressed="false" data-tip="Connect through your browser">SIGN IN</button>' +
+        '<button type="button" class="cc-filter" data-cc-filter="manual" aria-pressed="false" data-tip="Needs a one-time app setup on the service first">MANUAL SETUP</button>' +
+        '<button type="button" class="cc-filter cc-f-on" data-cc-filter="installed" aria-pressed="false" data-tip="Services you have set up (a saved setup, not a live connection check)">YOUR SERVICES</button>' +
       '</div>' +
-      '<p class="set-about"><span class="cc-legend"><b class="cc-lg-none">▸ no setup</b> no credentials needed · ' +
-        '<b class="cc-lg-key">API key</b> you paste a key · <b class="cc-lg-oauth">SIGN IN</b> connect through your browser. Some services require one-time app setup first.</span></p>' +
       '<div id="cc-list" class="cc-list"><span class="loading pulse">loading catalog…</span></div>' +
       '<div id="cc-msg" class="msg" role="status" aria-live="polite"></div>' +
       '<p class="set-about dim">Need something not listed? Add any remote MCP server by URL in <b>CONNECTED SERVICES</b>, or paste a custom platform key in <b>SAVED API CONNECTIONS</b>.</p>';
@@ -1256,6 +1252,11 @@
     const ccMsgEl = body.querySelector('#cc-msg');
     let ccCache = [];   // flat catalog entries, so a click reads the authoritative id/url/name (never re-typed)
     let ccAlternatives = new Map();
+    // CATEGORY FOLDS (UX night 10-25): eighteen categories as one ~23,000px wall was the catalog a newcomer met. Popular
+    // stays open; every other category is a one-line fold with its count, so the whole catalog reads as an index.
+    // A fold the Commander opens or closes stays that way while the window lives (refreshes re-render every card).
+    const ccFoldOpen = new Map();
+    const ccDefaultOpen = cat => ccFoldOpen.has(cat) ? ccFoldOpen.get(cat) : cat === 'Popular';
     const ccEntry = id => ccCache.find(x => (x.catalogId || x.id) === id);
     const ccPending = new Set();   // connector ids with an in-flight OAuth sign-in (guards duplicate popups/pollers)
     const ccTimers = new Map();    // id -> live poll interval, so a CANCEL / panel-close can clear it (EL-11 #13)
@@ -1358,13 +1359,14 @@
     }
     function ccGroupHTML(g) {
       if (!g.connectors || !g.connectors.length) return '';
-      return '<div class="cc-group"><div class="sec"><span class="sec-l">' + esc(g.category) + '</span>' +
-          '<span class="sec-tag">' + g.connectors.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+      return '<details class="cc-group" data-cat="' + esc(g.category) + '"' + (ccDefaultOpen(g.category) ? ' open' : '') + '>' +
+          '<summary class="sec"><span class="sec-l">' + esc(g.category) + '</span>' +
+          '<span class="sec-tag">' + g.connectors.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></summary>' +
         (g.category === 'Popular' ? '<p class="mc-hint">A curated starting point for everyday work.</p>' : '') +
         '<div class="cc-grid">' + g.connectors.map((e, i) => {
           const alternate = ccAlternatives.get(e.catalogId || e.id);
           return alternate ? '<div class="cc-service">' + ccCard(e, i) + '<details class="cc-alternatives"><summary>Advanced: ' + esc(e.name) + ' API connection</summary>' + ccCard(alternate, i) + '</details></div>' : ccCard(e, i);
-        }).join('') + '</div></div>';
+        }).join('') + '</div></details>';
     }
     // Editorial picks, not a claim about measured customer usage. Move rather than duplicate
     // cards so sign-in progress, search results and saved-service counts have one owner.
@@ -1451,6 +1453,9 @@
         const tag = g.querySelector('.sec-tag');
         if (tag) tag.textContent = String(vis);
         shown += vis;
+        // a picked tier is already the short list, so every category it leaves shows its cards; ALL is the index again.
+        // While searching, the console search owns the folds (it opens the ones holding a hit and closes them after).
+        if (!body.classList.contains('con-searching')) g.open = ccFilter !== 'all' || ccDefaultOpen(g.dataset.cat);
       });
       // An empty result is a real answer and must say which filter produced it — never a blank pane.
       let none = ccListEl.querySelector('.cc-nores');
@@ -1478,6 +1483,12 @@
     if (ccFiltersEl) ccFiltersEl.addEventListener('click', ev => {
       const b = ev.target.closest('button[data-cc-filter]'); if (!b) return;
       ccSetFilter(b.dataset.ccFilter); sfx('tick');
+    });
+    // remember the Commander's own fold choice (a click on the category line; Enter/Space on it clicks too). The click
+    // lands before the fold toggles, so the choice is the opposite of its state now.
+    if (ccListEl) ccListEl.addEventListener('click', ev => {
+      const head = ev.target.closest('summary'); const g = head && head.parentElement;
+      if (g && g.matches('details.cc-group')) ccFoldOpen.set(g.dataset.cat, !g.open);
     });
     // SEARCH BEATS THE TIER FILTER. The console search (stationui doFilter) marks a matching card
     // `.con-hit`, but a card this filter set `hidden` stays display:none — so searching "stripe" with
@@ -1722,6 +1733,7 @@
         ccMsgEl.classList.remove('ok');
         if (!target || !v) { ccMsgEl.textContent = '✕ the "' + viaId + '" connector is not in the catalog'; sfx('bad'); return; }
         ccMsgEl.textContent = ((e && e.name) || id) + ' connects through ' + v.name + ' — add ' + v.name + ' with one API key.';
+        for (let p = target.parentElement; p; p = p.parentElement) { if (p.tagName === 'DETAILS') p.open = true; }   // its category may be folded
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
         target.classList.remove('cc-jump'); void target.offsetWidth;   // restart the flash on a re-click
         target.classList.add('cc-jump');

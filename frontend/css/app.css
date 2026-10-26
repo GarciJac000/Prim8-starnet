@@ -4917,9 +4917,6 @@ select.fbc-sel:focus { border-color: var(--ph); box-shadow: inset 0 2px 5px rgba
 .cc-filter.cc-f-on { color: var(--ok); border-color: var(--ok); }
 .cc-filter.cc-f-on.active { color: var(--ink); background: var(--ok); border-color: var(--ok); }
 
-.cc-legend .cc-lg-none { color: var(--ok); font-weight: normal; }
-.cc-legend .cc-lg-key { color: var(--gold); font-weight: normal; }
-.cc-legend .cc-lg-oauth { color: var(--ph-dim); font-weight: normal; letter-spacing: .5px; }
 .cc-list { display: flex; flex-direction: column; gap: 14px; margin: 4px 0 10px; }
 .cc-group { display: flex; flex-direction: column; gap: 8px; }
 /* ⛔ A CLASS THAT SETS `display` DEFEATS THE `hidden` ATTRIBUTE. The UA sheet's `[hidden]{display:none}`
@@ -4927,6 +4924,16 @@ select.fbc-sel:focus { border-color: var(--ph); box-shadow: inset 0 2px 5px rgba
    set `.hidden = true` on 28 of 37 cards and every one of them stayed painted. It read as working only
    because the first category happens to be entirely one tier. Restate the rule at class specificity. */
 .cc-group[hidden], .cc-card[hidden] { display: none; }
+/* CATEGORY FOLDS (UX night 10-25): every category line is its own fold — Popular open, the rest one line each with its
+   count, so the catalog reads as an index instead of a wall. The ＋ / − mark is the ADD AN ABILITY router's and the
+   dossier config groups'; the whole line is the target. */
+details.cc-group > summary { list-style: none; cursor: pointer; }
+details.cc-group > summary::-webkit-details-marker { display: none; }
+details.cc-group > summary .sec-nd { display: none; }
+details.cc-group > summary::after { content: '＋'; flex: 0 0 auto; color: var(--ph-dim); }
+details.cc-group[open] > summary::after { content: '−'; }
+details.cc-group > summary:hover .sec-l, details.cc-group > summary:hover::after { color: var(--ph-bright); }
+details.cc-group > summary:focus-visible { outline: 1px solid var(--ph-bright); outline-offset: 3px; }
 .cc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(224px, 1fr)); gap: 8px; }
 .cc-card { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--ph-dim); border-radius: var(--r-sm);
   padding: 9px 11px; box-shadow: var(--raise);
