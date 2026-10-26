@@ -127,6 +127,52 @@ A.eq(TF.pass(root, view), 0, 'a second pass over the same text marks nothing new
   A.ok(marked(shrinks), 'that read lifts what the new size shrank');
 }
 
+/* ---- 4b. only text on screen is read (10-26 window-open lag: ABILITIES' unopened panes cost 1.9 s a pass) ---- */
+{
+  let cb = null;
+  view.MutationObserver = function (fn) { cb = fn; this.observe = () => {}; };
+  // checkVisibility answers from a flag the test flips, the way a display:none ancestor would
+  const shown = new Set();
+  const vis = n => { n.checkVisibility = () => shown.has(n); return n; };
+  const card = el('DIV', { cls: 'sk-card', style: { size: 16 } }, []);
+  const body = vis(el('P', { cls: 'sk-attr', style: { size: 12 } }, ['Shared with: this station']));
+  card.childNodes.push(body); body.parent = card; Object.defineProperty(body, 'parentElement', { get: () => card });
+  const onScreen = vis(el('SPAN', { cls: 'cc-badge', style: { size: 12 } }, ['official'])); shown.add(onScreen);
+  const host = el('DIV', { style: { size: 16 } }, [card, onScreen]);
+  Object.defineProperty(card, 'parentElement', { get: () => host });
+  reads = 0;
+  TF.watch(host, view);
+  A.ok(marked(onScreen) && !marked(body), 'a text on screen is lifted at mount; a text inside a closed card is set aside, not read');
+  A.eq(reads, 1, 'the set-aside text costs no style read (a display:none element has no cached style: ~1 ms each)');
+  shown.add(body);
+  cb([{ type: 'attributes', attributeName: 'class', target: card }]);
+  A.ok(marked(body), 'opening the card (a class change on an ancestor) reads and lifts the revealed text before that frame paints');
+  const late = vis(el('SPAN', { style: { size: 12 } }, ['3 tools']));
+  host.childNodes.push(late); late.parent = host; Object.defineProperty(late, 'parentElement', { get: () => host });
+  cb([{ type: 'childList', addedNodes: [late], removedNodes: [], target: host }]);
+  A.ok(!marked(late), 'hidden content added later is set aside too');
+  shown.add(late);
+  cb([{ type: 'attributes', attributeName: 'hidden', target: late }]);
+  A.ok(marked(late), 'an element that un-hides itself (hidden / inline style) is read when it shows');
+}
+/* ---- 4c. a window is re-read only when its WIDTH changes — not on its opening size report, not on a height change ---- */
+{
+  let roCb = null; const timers = [];
+  const v4 = Object.assign({}, view, {
+    MutationObserver: function () { this.observe = () => {}; },
+    ResizeObserver: function (fn) { roCb = fn; this.observe = () => {}; this.unobserve = () => {}; },
+    setTimeout: (fn, ms) => { timers.push([fn, ms]); return timers.length; }, clearTimeout: () => {}
+  });
+  const term = el('DIV', { cls: 'term', style: { size: 16 } }, [el('SPAN', { style: { size: 13 } }, ['x'])]);
+  TF.watch(el('DIV', { style: { size: 16 } }, [term]), v4);
+  roCb([{ target: term, contentRect: { width: 900, height: 54 } }]);
+  A.eq(timers.length, 0, 'the opening size report reads nothing: the mount pass already read the window at that width');
+  roCb([{ target: term, contentRect: { width: 900, height: 640 } }]);
+  A.eq(timers.length, 0, 'a height change (the rise from the dock, a card opening) reads nothing: the windows\' rules answer to width');
+  roCb([{ target: term, contentRect: { width: 620, height: 640 } }]);
+  A.eq(timers.length, 1, 'a width change schedules one read');
+}
+
 /* ---- 5. beyond the windows: the first-run screens and the coach from the start, BUILD MODE when it mounts ---- */
 {
   A.ok(['#terms', '#screen-splash', '#screen-connect', '#nav-coach'].every(h => TF.HOSTS.includes(h)), 'the floor holds in the windows, the first-run screens and the dock coach');

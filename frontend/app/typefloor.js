@@ -22,6 +22,15 @@
    text cut by an ellipsis or a line clamp is marked `data-sn-cut` ("line", or "clamp" with its line count in --sn-clamp)
    and pipglass.css trades the ellipsis for a fade — shown only while the text actually overflows its box.
 
+   ONLY TEXT ON SCREEN IS READ (10-26, Andrew: "laggy … especially when opening windows"): a console window builds every
+   section up front, and ABILITIES held 8,802 elements, 79% of them in panes and cards nobody had opened. Chrome keeps no
+   style for a display:none element, so every read of one is a fresh calculation (~1 ms each): one pass over ABILITIES
+   took 1.9 s, and it ran again on every repaint and once more after the window opened — 3.8 s of frozen station per
+   open. A text that is not rendered is now set aside (checkVisibility) and read the moment it is revealed: the class or
+   hidden/open change that reveals it is a mutation of an ancestor, and the observer reads it before that frame paints.
+   A window's first size report is its opening size, which the mount pass already read — only a later WIDTH change (the
+   windows' container rules are inline-size) reads it again.
+
    UMD: a `TypeFloor` global in the browser; module.exports under node so the rule is testable. */
 'use strict';
 (function (root, factory) {
@@ -47,6 +56,8 @@
     return false;
   }
   const hidden = el => !!(el.closest && el.closest('[aria-hidden="true"]'));
+  // is it rendered at all? (display:none on it or an ancestor = no box, and no cached style to read)
+  const rendered = el => typeof el.checkVisibility !== 'function' || el.checkVisibility();
 
   /* every candidate in a subtree: the elements that paint words of their own and have not been read yet */
   function collect(root, into) {
@@ -59,9 +70,11 @@
   }
   /* read every candidate's size, THEN mark the ones under the floor (all reads before any write, so a batch costs one
      style recalculation however many elements it holds) */
-  function measure(els, w) {
+  function measure(els, w, later) {
     const lift = [], caps = [], cut = [];
     for (const el of els) {
+      // not rendered: set aside, read when revealed (see the header) — a hidden text has nothing on screen to lift
+      if (!rendered(el)) { if (later) later.add(el); continue; }
       const lifted = el.hasAttribute(ATTR);
       const cs = w.getComputedStyle(el);
       const size = parseFloat(cs.fontSize), floor = parseFloat(cs.getPropertyValue('--sn-type-meta'));
@@ -86,19 +99,19 @@
   }
   const viewOf = v => v || (typeof window !== 'undefined' ? window : null);
   // one pass over a subtree
-  function pass(root, view) {
+  function pass(root, view, later) {
     const w = viewOf(view);
     if (!root || !w || typeof w.getComputedStyle !== 'function' || typeof root.querySelectorAll !== 'function') return 0;
-    return measure(collect(root, new Set()), w);
+    return measure(collect(root, new Set()), w, later);
   }
   /* read a subtree again from scratch: its floor and caps marks off, one read, the marks back where they belong — all in
      one task, so nothing paints small in between. For a window that changed size: its own narrow rules (container
      queries) can shrink a text the first pass found at the floor, or grow one it lifted. */
-  function refloor(root, view) {
+  function refloor(root, view, later) {
     const w = viewOf(view);
     if (!root || !w || typeof root.querySelectorAll !== 'function') return 0;
     for (const el of Array.from(root.querySelectorAll('[' + ATTR + '],[' + CAPS + ']'))) { el.removeAttribute(ATTR); el.removeAttribute(CAPS); }
-    return pass(root, w);
+    return pass(root, w, later);
   }
 
   /* keep a host's content on the floor: a pass now, then one batch per burst of changes — whatever was added (a section
@@ -109,36 +122,56 @@
   function watch(host, view) {
     const w = viewOf(view);
     if (!host || !w || typeof w.MutationObserver !== 'function') return null;
-    pass(host, w);
-    // a window that settles at a new size (dragged narrower, or a TEXT SIZE change re-fits it) is read again once,
+    const later = new Set();   // texts set aside while not rendered, read when revealed
+    pass(host, w, later);
+    // a window that settles at a new width (dragged narrower, or a TEXT SIZE change re-fits it) is read again once,
     // 150ms after its last resize
-    const sized = typeof w.ResizeObserver === 'function' ? watchSizes(w) : null;
+    const sized = typeof w.ResizeObserver === 'function' ? watchSizes(w, later) : null;
     if (sized) sized.add(host);
     const mo = new w.MutationObserver(records => {
-      const els = new Set(), again = [];
+      const els = new Set(), again = [], moved = new Set();
+      let gone = false;
       for (const r of records) {
+        // anything that can reveal a set-aside text: a class, hidden, open or inline style change — except a window frame's
+        // own style (its drag, resize and rise from the dock write it every frame and reveal nothing inside)
+        if (r.type === 'attributes' && r.target.nodeType === 1 && !(r.attributeName === 'style' && r.target.classList && r.target.classList.contains('term'))) {
+          moved.add(r.target); if (r.target.parentElement) moved.add(r.target.parentElement);
+        }
         if (r.type === 'childList') {
           for (const n of r.addedNodes) {
             if (n.nodeType === 1) { if (n.isConnected !== false) { collect(n, els); if (sized) sized.add(n); } }
             else if (n.nodeType === 3 && r.target.nodeType === 1 && ownsWords(r.target) && !hidden(r.target)) els.add(r.target);
           }
+          if (r.removedNodes && r.removedNodes.length) gone = true;
           if (sized) for (const n of r.removedNodes) if (n.nodeType === 1) sized.drop(n);
-        } else if (r.type === 'attributes' && r.target.nodeType === 1 && (r.target.hasAttribute(ATTR) || r.target.hasAttribute(CAPS) || r.target.hasAttribute(CUT))) again.push(r.target);
+        } else if (r.type === 'attributes' && r.target.nodeType === 1 && (!r.attributeName || r.attributeName === 'class') && (r.target.hasAttribute(ATTR) || r.target.hasAttribute(CAPS) || r.target.hasAttribute(CUT))) again.push(r.target);
       }
       for (const t of again) { t.removeAttribute(ATTR); t.removeAttribute(CAPS); t.removeAttribute(CUT); els.add(t); }
-      if (els.size) measure(els, w);
+      // a set-aside text that is (or sits under, or beside) an element whose class / hidden / open / style changed may
+      // just have been revealed: offer it again (measure sets it aside once more if it is still not rendered). A text
+      // removed from the page (a repaint, a closed window) is let go.
+      if (later.size && (moved.size || gone)) for (const el of later) {
+        if (el.isConnected === false) { later.delete(el); continue; }
+        if (moved.size) for (let a = el; a; a = a.parentElement || a.parent) if (moved.has(a)) { later.delete(el); els.add(el); break; }
+      }
+      if (els.size) measure(els, w, later);
     });
-    mo.observe(host, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    mo.observe(host, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'open', 'style'] });
     return mo;
   }
   // the windows (.term) under a subtree, each re-read once its size settles
-  function watchSizes(w) {
-    const timers = new Map();
+  function watchSizes(w, later) {
+    const timers = new Map(), widths = new WeakMap();
     const ro = new w.ResizeObserver(entries => {
       for (const e of entries) {
         const t = e.target;
+        // the windows' own rules answer to their WIDTH (inline-size containers): a height change (a card opening, the
+        // rise from the dock) reads nothing, and the first report — the opening width, already read at mount — neither
+        const width = e.contentRect ? Math.round(e.contentRect.width) : null;
+        const was = widths.get(t);
+        if (width != null) { widths.set(t, width); if (was === undefined || was === width) continue; }
         w.clearTimeout(timers.get(t));
-        timers.set(t, w.setTimeout(() => { timers.delete(t); if (t.isConnected) refloor(t, w); }, 150));
+        timers.set(t, w.setTimeout(() => { timers.delete(t); if (t.isConnected) refloor(t, w, later); }, 150));
       }
     });
     const terms = n => (n.classList && n.classList.contains('term') ? [n] : []).concat(typeof n.querySelectorAll === 'function' ? Array.from(n.querySelectorAll('.term')) : []);
