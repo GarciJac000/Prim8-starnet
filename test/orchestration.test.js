@@ -165,7 +165,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
       ['Check starnessos.com and read its docs.', true, 'a pure one-host docs read'],
       ["Read example.com's pricing page and write a short summary of the plans.", true, 'a summary is the answer, not an artifact'],
       ['check if example.com is up and running', true, '"up and running" is not a run step'],
-      ['check the latest build on ci.example.com', true, '"the latest build" is not a build step']
+      ['check the latest build on ci.example.com', true, '"the latest build" is not a build step'],
+      ['Read the API docs at docs.example.com and write a short summary into C:\\Users\\me\\My Project\\notes.md', false, 'F10: a summary into a Windows path with a space']
     ];
     for (const [prompt, capped, why] of briefs) {
       slices.length = 0;

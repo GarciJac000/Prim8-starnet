@@ -122,7 +122,18 @@
     + '|\\b(?:unit|integration|regression|e2e|end-to-end|smoke)\\s+tests?\\b|\\btest\\s+(?:suites?|cases?|files?|scripts?|harness(?:es)?)\\b', 'im');
   const HOW_TO_RE = /\b(?:how|where|when|what|whether)\s+to\s+[a-z]+/gi;
   const REPORT_WRITE_RE = /\b(?:write|draft)\s+(?:up\s+)?(?:(?:me|us)\s+)?(?:(?:a|an|the|your)\s+)?(?:(?:short|brief|quick|concise|one-line|two-line|one-paragraph|[a-z]+-sentence)\s+)?(?:summary|summaries|recap|overview|tl;?dr|description|reply|answer)\b/gi;
-  const FILE_DEST_RE = /\b(?:in|into|to)\s+(?:(?:a|an|the|my|our|new)\s+)*files?\b|\b(?:in|into|to)\s+[`'"(]?[\w.\/\\-]*\w\.(?:md|txt|json|csv|tsv|html?|ya?ml|log|xml|docx?|rtf)\b/i;
+  /* "into <a file>" in any form a Commander or a lead writes it (review of 0.14.1, F10): a drive-letter, UNC, home,
+     dot-relative or absolute path (with spaces, without an extension), a quoted path, a relative path with a separator,
+     a file name, or "the notes folder". Only the summary-stripping step reads it, so a path start is evidence enough. */
+  const PATH_EXT = '\\.(?:md|markdown|txt|text|json|csv|tsv|html?|ya?ml|log|xml|docx?|rtf|pdf|rst|adoc|org|ini|toml)\\b';
+  const FILE_DEST_RE = new RegExp(
+    '\\b(?:in|into|to|inside)\\s+(?:(?:a|an|the|my|our|your|new|this|that)\\s+)*(?:[\\w-]+\\s+){0,2}?(?:files?|folders?|director(?:y|ies))\\b'
+    + '|\\b(?:in|into|to|inside|as)\\s+(?:'
+    + '[`\'"][^`\'"\\n]*(?:[\\\\/]|' + PATH_EXT + ')[^`\'"\\n]*[`\'"]'                               // "C:\My Project\notes.md"
+    + '|\\(?(?:[a-z]:[\\\\/]|\\\\\\\\|~[\\\\/]|\\.{1,2}[\\\\/]|\\/[\\w.-])'                                 // C:\ \\server ~/ ./ /home
+    + '|\\(?[\\w.-]+[\\\\/](?:[\\w. -]+[\\\\/])*(?:[\\w. -]*\\w' + PATH_EXT + '|(?=[\\s`\'")]|$))'        // docs/notes.md, notes/
+    + '|\\(?[\\w.-]*\\w' + PATH_EXT                                                                       // notes.md
+    + ')', 'i');
   function asksForWork(src) {
     let s = src.replace(HOW_TO_RE, ' ');
     if (!FILE_DEST_RE.test(s)) s = s.replace(REPORT_WRITE_RE, ' ');
