@@ -341,6 +341,35 @@ module.exports = (async () => {
     A.eq('think' in seen.pop(), false, 'a model that cannot think is never sent the field');
   }
 
+  // Reasoning OFF reaches a thinking model as think:false on Commander turns and tasks too (#116): 'none' put nothing on
+  // the wire, so qwen3 thought on every turn behind an OFF switch. (Ollama's registry default IS off; the host resolves
+  // it to 'none' before the provider is built — a provider built with no effort at all keeps the model default above.)
+  {
+    const seen = [];
+    const mkFetch = (caps) => async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(40960, caps);
+      if (url.endsWith('/api/chat')) { seen.push(JSON.parse(init.body)); return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop' }]); }
+      return new Response('{"models":[]}', { status: 200 });
+    };
+    const msg = [{ role: 'user', content: 'hi' }];
+    const ollama = (effort, caps) => factory.selectProvider(Object.assign({ provider: 'ollama', fetch: mkFetch(caps || ['completion', 'tools', 'thinking']) }, effort == null ? {} : { reasoningEffort: effort }));
+    A.eq(factory.defaultReasoningEffortForProvider('ollama'), 'none', 'fixture: Ollama\'s default effort is OFF');
+    await collect(ollama('none'),{ model: 'q', messages: msg, isTask: false });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a Commander greeting is sent think:false');
+    await collect(ollama('none'), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a task is sent think:false');
+    await collect(ollama('none'), { model: 'q', messages: msg });
+    A.eq(seen.pop().think, false, 'Reasoning OFF: a background call stays think:false');
+    await collect(ollama('high'), { model: 'q', messages: msg, tools: TOOLS, isTask: true, reasoningEffort: 'none' });
+    A.eq(seen.pop().think, false, 'a per-request OFF beats the provider effort');
+    await collect(ollama('high'), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq(seen.pop().think, true, 'a real effort still turns thinking on');
+    await collect(ollama('none'), { model: 'q', messages: msg, tools: TOOLS, isTask: true, reasoningEffort: 'high' });
+    A.eq(seen.pop().think, true, 'a per-request effort beats a provider OFF');
+    await collect(ollama('none', ['completion', 'tools']), { model: 'q', messages: msg, tools: TOOLS, isTask: true });
+    A.eq('think' in seen.pop(), false, 'Reasoning OFF never sends the field to a model that cannot think');
+  }
+
   // A silent local model reports placement evidence without inventing its loading or prompt-reading stage.
   {
     const ps = (vram) => ({ models: [{ name: 'qwen3:8b', size: 10e9, size_vram: vram, context_length: 32768 }] });
