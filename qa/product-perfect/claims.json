@@ -18,7 +18,7 @@
   "expectedClaimCount": 37,
   "releaseSurface": {
     "algorithm": "sha256",
-    "sourceCommit": "80cce3c09e6111eff12839aa5b2f091510adb499",
+    "sourceCommit": "ac13180c67a846883f7d5e94e53adc1aa428f20b",
     "pathSetSha256": "93a6809cb616abda08e0ace8ac71308a79d2a668935dd6695ca7e0ddac84df17",
     "files": [
       {
@@ -29,12 +29,12 @@
       {
         "path": "PRIVACY.md",
         "bytes": 16400,
-        "sha256": "30cdc60b74a44fb6c50823911623bd33cb10d06f7d6e4e02c5c3af43132a3e69"
+        "sha256": "2c1ab56b6dd3c656079fd776f1d9caa983516c6a3eab9bd906c33b23ad055bf2"
       },
       {
         "path": "README.md",
-        "bytes": 10938,
-        "sha256": "f0825ecc9cff1c1171a1823bf9076b2779bac64cddec22f77766eaa4b612595c"
+        "bytes": 10974,
+        "sha256": "3dfe665ce920052a6375fafade135c22dec1f770e84146ac85b8e59f791a9b2a"
       },
       {
         "path": "RELEASE_NOTES.md",
@@ -338,8 +338,8 @@
       },
       {
         "path": "frontend/app/build.js",
-        "bytes": 755247,
-        "sha256": "f53132f125a6da0a3c05b97df8af433157350eeb024c5fc4ad8924b5141bb52a"
+        "bytes": 755249,
+        "sha256": "4f8d3bdaeac4cb7ac221992d37ab5bd52dccc4cc41b4b0c21d05bf8ed8bc6986"
       },
       {
         "path": "frontend/app/buildshare.js",
@@ -1203,8 +1203,8 @@
       },
       {
         "path": "frontend/app/stationui.js",
-        "bytes": 967671,
-        "sha256": "59d1af9af076623ae00f028961cb8d0e21061c1871b85f9b016d982ff2d3c359"
+        "bytes": 968177,
+        "sha256": "e47d73db8160fc0589b476e5bfb213bf1b924e32ce25dadb9255e62c7ba4228a"
       },
       {
         "path": "frontend/app/stepin.js",
