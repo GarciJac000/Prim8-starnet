@@ -2036,3 +2036,75 @@ body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools > summar
 body.glass-demo:not(.hud-mode) #terms .term.dlv-win .cfg.dlv .dlv-tools:not([open]) { flex: 0 0 auto; gap: 0; }   /* closed, the hidden keys' box still took the flex gap */
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab { padding-top: 10px; padding-bottom: 10px; }
 body.glass-demo:not(.hud-mode) #terms .term.dossier .con-toptab .con-rail-label { line-height: 24px; }
+
+/* ============================================================
+   THE CURVED DASHBOARD (Andrew 10-25: "bring back the more curved edges … we can still keep our style, just with the more
+   curved edges without the sharp pointiness … it looks really inconsistent with everything else. we dont want to restore it
+   we want to upgrade our current version"). The 10-17 Pip-Boy pass squared everything ON the panels to the 2px terminal box
+   while the panels' shells (10px) and every window (8px keys, 6-8px cards) stayed curved. One radius scale now runs the
+   dashboard so it reads as the same app as its windows; the Pip-Boy register (1px lines, matte fills, the mesh, tracked caps,
+   tint-only selection) is unchanged. Not touched on purpose: the speech rails (no bubbles in COMMS), the lamps and meters
+   (square pixel cells), the cam corners on the world view.
+     card 10 — crew cards, NEEDS YOU, COMMS cards, the composer, dock menus, toasts, the first-run hint
+     key   8 — every key, field and search box; tabs round only the corners that leave their rule
+     row   6 — session rows, step rows, portraits and icon wells
+     chip  4 — badges, chips, inline code
+   ============================================================ */
+body.glass-demo:not(.hud-mode) { --sn-r-card: 10px; --sn-r-key: 8px; --sn-r-row: 6px; --sn-r-chip: 4px; }
+
+/* -- the rail -- */
+body.glass-demo:not(.hud-mode) #screen-game #crew .crew-row { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #crew :is(.crew-portrait, .crew-dossier) { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #left > h3 .crew-hide,
+body.glass-demo:not(.hud-mode) #screen-game #left :is(#crew-search, #crew-search-close, #ws-search, .ws-agent-filter) { border-radius: var(--sn-r-key); }
+/* the tabs and + NEW stand on the strip's rule: only their top corners round */
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-head :is(.ws-tab, #ws-new, #ws-addproject) { border-radius: var(--sn-r-key) var(--sn-r-key) 0 0; }
+body.glass-demo:not(.hud-mode) #screen-game #left :is(#workstreams, #projects) > .ws-row { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #left .ws-meta { border-radius: var(--sn-r-chip); }
+body.glass-demo:not(.hud-mode) #left .ws-needs .ny-panel { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #left .ws-needs .ny-face { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #left .ws-needs :is(.ny-key, .ny-more) { border-radius: var(--sn-r-key); }
+
+/* -- the top bar and the dock -- */
+body.glass-demo:not(.hud-mode) #screen-game :is(#topbar, #bottombar) .widget-rail .wg-add { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game .widget-rail { border-radius: var(--sn-r-key); }
+/* the open group hangs from the dock's rule: only its bottom corners round */
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-group { border-radius: 0 0 var(--sn-r-key) var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-group > .bb-grp { border-radius: 0 0 var(--sn-r-key) var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu .bb { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .bb-menu .bb-i { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar :is(.bb-menu .bb > .badge, .bb-grp-badge) { border-radius: var(--sn-r-chip); }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar .ctx-gauge { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #stage-wrap .cam-cine { border-radius: var(--sn-r-key); }
+
+/* -- COMMS chrome -- */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .comms-portrait { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#comms-browser, #gc-add-agents, #chat-send, #chat-stop, #chat-attach, #model-dock-toggle, .voice-toggle, #chat-mic, .cmsg-copy) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #chat-inputrow { border-radius: var(--sn-r-card); }
+/* -- COMMS cards and their keys -- */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .cmsg.tb-read,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.cmsg.turnin, .cmsg.nudge, .cmsg.consent, #chat-log > .dg-line, #gc-questions .gc-question, #gc-states .gc-state) { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #comms-presence:not(.resolved),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #comms-presence.paused:not(.resolved),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-states .gc-state:is(.hold, :not(.hold)) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .task-conversation :is(.tc-answer, .tc-sample, .tc-understanding),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.cmsg.turnin, .cmsg.nudge, .cmsg.consent, .dg-inspect) .consent-btn:not(.thumb),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #chat-log .dg-line .dg-key,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-states .gc-state :is(.gc-ok, .gc-copy),
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel #gc-questions .gc-question .gc-q-choice,
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(.consent-btn, .dg-key, .deliverable-folder) { border-radius: var(--sn-r-key); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) > .cmsg.work-rate.rate-inline .consent-btn.thumb { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel .tool-chip { border-radius: var(--sn-r-row); }
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel :is(#chat-log, #gc-log) .md-code { border-radius: var(--sn-r-chip); }
+
+/* -- what floats over the dashboard -- */
+body.glass-demo:not(.hud-mode) #toast-stack .toast,
+body.glass-demo:not(.hud-mode) .nav-coach { border-radius: var(--sn-r-card); }
+body.glass-demo:not(.hud-mode) .nav-coach-x,
+body.glass-demo:not(.hud-mode) .station-tip,
+body.glass-demo:not(.hud-mode) > .hint-bubble.dock-tip { border-radius: var(--sn-r-key); }
+/* the last two pointed ends: COMMS's heading rule and the dock's rule drop their end ticks, as the CREW head's did (10-23) —
+   each is now one plain line */
+body.glass-demo:not(.hud-mode) #screen-game #chat-panel > h3 { background: linear-gradient(var(--pg-line), var(--pg-line)) left 10px bottom 0 / calc(100% - 20px) 1px no-repeat; }
+body.glass-demo:not(.hud-mode) #screen-game #bottombar > .bb-group:is([data-group="crew"], [data-group="system"]) { background: none; }
