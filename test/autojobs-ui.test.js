@@ -49,6 +49,32 @@ A.ok(/maxPendingDeliveries = (j && Number(j.maxPendingDeliveries)) || 0;/.test(s
 A.ok(/data-edit-prompt rows="5" maxlength="' \+ EDIT_PROMPT_MAX \+ '"/.test(src) && /EDIT_BODY_MAX = 1 << 16/.test(src), 'EDIT TASK is capped under the 64 KB update body');
 const idx = fs.readFileSync(path.join(__dirname, '../sidecar/index.js'), 'utf8');
 A.ok(/maxPendingDeliveries: cronStore.MAX_PENDING_DELIVERIES/.test(idx), 'GET /api/cron exposes the backlog ceiling');
+/* The REAL deliveryLine, sliced and run (review 2026-10-23): the backlog collapse leaves ONE receipt that stands for
+   many (`superseded`), and the driver defers on that undelivered total — so the row must say so; a routine the
+   Commander paused holds its results until resumed, so it never promises a retry. */
+{
+  const vm = require('vm');
+  const m = src.match(/\n {4}function deliveryLine\(j\) \{[\s\S]*?\n {4}\}\n/);
+  A.ok(!!m, 'fixture: deliveryLine is sliceable from routines.js');
+  const ctx = { esc: s => String(s), wallClock: () => '09:00', fmtRel: () => '1m ago', maxPendingDeliveries: 100 };
+  vm.createContext(ctx);
+  vm.runInContext(m[0] + '\nthis.deliveryLine = deliveryLine;', ctx);
+  const past = new Date(Date.now() - 3600000).toISOString();
+  const collapsed = ctx.deliveryLine({ enabled: true, state: 'scheduled',
+    finalization: { runId: 'r100', state: 'pending', superseded: 99, nextAttemptAt: past } });
+  A.ok(/1 result awaiting delivery/.test(collapsed), 'one collapsed receipt reads as one result awaiting delivery');
+  A.ok(/new runs deferred until the destination recovers/.test(collapsed), 'a receipt standing for 100 undelivered results says new runs are deferred (the driver defers on undeliveredCount)');
+  const few = ctx.deliveryLine({ enabled: true, state: 'scheduled',
+    finalization: { runId: 'r3', state: 'pending', superseded: 2, nextAttemptAt: past } });
+  A.ok(!/deferred/.test(few) && /next retry 09:00/.test(few), 'below the ceiling: a retry time, no deferral claim');
+  const held = ctx.deliveryLine({ enabled: false, state: 'paused',
+    finalization: { runId: 'p1', state: 'pending', superseded: 120, nextAttemptAt: past } });
+  A.ok(/held until the routine is resumed/.test(held), 'a paused routine says its result is held until it is resumed');
+  A.ok(!/next retry/.test(held) && !/deferred/.test(held), 'a paused routine promises no retry and no deferred runs');
+  const autoPaused = ctx.deliveryLine({ enabled: false, state: 'error', disabledReason: 'consecutive-failures',
+    finalization: { runId: 'e1', state: 'pending', nextAttemptAt: past } });
+  A.ok(/next retry 09:00/.test(autoPaused) && !/held/.test(autoPaused), 'an auto-paused routine still delivers its notice (not held): its retry is shown');
+}
 
 /* ---------- org P16 (2026-10-14): one arm rule, a true status line, one switch name, RUN BY ---------- */
 {

@@ -116,8 +116,10 @@ async function fireBeat(B, headers) {
   return ((stream.find(e => e.name === 'nightshift.beat.result') || {}).payload || {});
 }
 
-// a THIN dossier: goals only (undated → fresh). Alone this is tier 'warm' at best (needs 4 usable dims for hot) —
-// so if the beat reaches a HOT build, the ACTIVITY path is what carried it.
+// a THIN dossier: goals only (undated → fresh). Since bug 41b2d015 (the act floor is one aim or one run, not 4 areas /
+// 4 runs) this alone is hot; with the seeded runs beside it readiness names ACTIVITY as the grounding (a tie goes to
+// activity), and the chosen job below cites a recent-RUN line the grounding veto must accept — activity is still
+// what this beat's grounding rests on.
 function thinBeliefs() {
   return { known: ['goals'], beliefs: { goals: [{ text: 'ship something good' }] } };
 }

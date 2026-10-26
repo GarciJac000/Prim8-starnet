@@ -525,7 +525,12 @@ const IndustrialTextures = (() => {
     }
     g.putImageData(patch,0,0); screen.frames.set(phase,cv); return cv;
   }
+  /* STILL READOUT (world.js STILL VERDICT, 2026-10-21): when the last workstation drawn next changes on the clock, read by
+     PropSprites (workstationNext): the occupied screen's sweep steps every 175 ms, so its next phase edge is due; a vacant,
+     north-facing or frozen (still) one is its static plate (Infinity). Allocation-free. */
+  let wsChangeAt = Infinity;
   function workstation(ctx, x, y, w, h, facing = 's', state) {
+    wsChangeAt = Infinity;
     if (!enabled()) return false;
     const fit = workstationFit(x, y, w, h, facing);
     ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
@@ -534,6 +539,7 @@ const IndustrialTextures = (() => {
     ctx.drawImage(!occupied && screen ? screen.off : fit.im, fit.x, fit.y, fit.w, fit.h);
     if (state && occupied && screen && screen.w > 0 && screen.h > 0 && !(state && state.still)) {
       const phase = Math.floor((Math.max(0, Number(state && state.now) || 0) % 2800) / 175);
+      const t = Math.max(0, Number(state && state.now) || 0); wsChangeAt = t > 0 ? (Math.floor(t / 175) + 1) * 175 : Infinity;
       const patch = workstationSweep(screen, fit, phase);
       ctx.globalCompositeOperation = 'source-atop';
       ctx.globalAlpha *= state && state.work ? .8 + .2*Math.min(1, Math.max(0, state.heat || 0)) : .65;
@@ -596,7 +602,7 @@ const IndustrialTextures = (() => {
     ctx.restore(); return true;
   }
   return Object.freeze({ ready, enabled, isRemaster, lighting, detailContext, cropBase, stitchBase, baseLayers, discardBaseLayer, restoreMaterials, _dbgLoseMaterials, drawBase, floor, wall, wallStrip, wallPatch, crown, doorReturn, viewportFrame, shell, shellPlate, propPanel, workstation, workstationEmitter, chair, crate,
-    furniture, supportsWall: id => enabled() && (wallIds.includes(id)||wallMaterials.includes(id)),
+    furniture, workstationNext: () => wsChangeAt, supportsWall: id => enabled() && (wallIds.includes(id)||wallMaterials.includes(id)),
     status: () => ({ requested, loaded, failed: failed.slice(), assets: Object.keys(images) }) });
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = IndustrialTextures;

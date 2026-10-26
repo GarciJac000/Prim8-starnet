@@ -316,6 +316,6 @@
     return row ? (Math.floor(Number(row.context_length)) || 0) : 0;
   }
 
-  return { CTX_LADDER, DEFAULT_MAX_CTX, placementNote, placementFacts, spillsToCpu, loadedWindow, nativeRoot, leadingSystemMessages, toNativeMessages, toNativeRequest, estimateTokens, pickNumCtx,
+  return { CTX_LADDER, DEFAULT_MAX_CTX, placementNote, placementFacts, spillsToCpu, loadedWindow, psRow, nativeRoot, leadingSystemMessages, toNativeMessages, toNativeRequest, estimateTokens, pickNumCtx,
     exceedFrom, makeChunkTranslator, showFacts };
 });

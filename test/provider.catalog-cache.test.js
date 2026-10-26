@@ -350,7 +350,8 @@ const hi = model => ({ model, messages: [{ role: 'user', content: 'hi' }] });
     const src = fs.readFileSync(path.join(__dirname, '..', 'sidecar', 'index.js'), 'utf8');
     A.ok(/attachCatalogCache\(makeCatalogCache\(\{ clock: \{ now: \(\) => Date\.now\(\) \} \}\)\)/.test(src), 'index.js attaches ONE cache with the real clock at boot');
     const waitAt = src.indexOf('const knownRunWindow = CONTEXT_LIMIT_OVERRIDE ? 0 : await catalogRunWindow(provider, model);');
-    const ctxAt = src.indexOf('const ctxMgr = makeContext(Object.assign({ contextLimit: CONTEXT_LIMIT_OVERRIDE || knownRunWindow || COLD_CATALOG_CONTEXT_TOKENS }, RUN_CONTEXT_DEFAULTS));');
+    // windowCeiling: the model's long-context price-tier boundary (context-cost-1023; test/context.price-tier-window.test.js)
+    const ctxAt = src.indexOf('const ctxMgr = makeContext(Object.assign({ contextLimit: CONTEXT_LIMIT_OVERRIDE || knownRunWindow || COLD_CATALOG_CONTEXT_TOKENS, windowCeiling: runWindowCeiling }, RUN_CONTEXT_DEFAULTS));');
     A.ok(waitAt > 0 && ctxAt > waitAt, 'the run awaits its window, then builds its context from it');
     A.ok(src.lastIndexOf('provider = selectProvider(', ctxAt) < waitAt, 'every provider swap (key rotation) happens before the window is read');
     A.ok(src.indexOf('contextLimit: CONTEXT_LIMIT_OVERRIDE || provider.contextLimit(model) || COLD_CATALOG_CONTEXT_TOKENS') < 0, 'the cold synchronous read is gone');

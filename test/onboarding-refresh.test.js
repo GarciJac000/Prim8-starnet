@@ -47,7 +47,12 @@ async function quickRun(answers, stopAt, wake = false, mind = null, receipts = [
   assert.equal(result.prompts.length, 3, 'one pace choice followed by exactly two setup questions');
   assert.equal(result.writes[0].purpose, 'Help me prepare weekly client updates.');
   assert.deepEqual(result.postures, ['wait']);
-  assert.deepEqual(result.beliefs, [], 'quick setup must not invent a personal profile');
+  // quick setup never invents a profile: the ONE belief it writes is the mission they typed, in their words, as a stated
+  // goal (41b2d015 review — a typed mission that only reached purpose.md stayed a seed and never grounded their posture)
+  assert.deepEqual(JSON.parse(JSON.stringify(result.beliefs)), [['goals', { text: 'Help me prepare weekly client updates.', source: 'onboarding', weight: 'stated' }]], 'quick setup must not invent a personal profile; it files only the typed mission, as stated');
+  const chip = await quickRun([{value:'quick'}, {value:'Help me write, debug, and ship software.', label:'Code & build'}, {value:'wait'}]);
+  assert.equal(chip.writes[0].purpose, 'Help me write, debug, and ship software.');
+  assert.deepEqual(chip.beliefs, [], 'a tapped purpose chip files nothing: its canned line is the station’s wording (purpose.md alone, a seed)');
   assert.equal(result.done, 1); assert.equal(result.taught, 1);
   assert(result.stages.some(([,detail]) => detail.startsWith('1 of 2')));
   assert(result.stages.some(([,detail]) => detail.startsWith('2 of 2')));

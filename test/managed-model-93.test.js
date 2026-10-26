@@ -192,7 +192,7 @@ module.exports = (async () => {
       const fetched = [];
       const ctx = {
         DESKTOP: true, DEVMODE: false, Object, Array, Number, String, Promise, JSON,
-        ensureApiToken: async () => 't', syncEngineKeysOnBoot() {}, noteTokenWithheld() {}, bootNotices() {}, getProv: () => 'starnet', getBaseUrl: () => '', getKey: () => '',
+        ensureApiToken: async () => 't', syncEngineKeysOnBoot() {}, pushDesktopEndpoints() {}, noteTokenWithheld() {}, bootNotices() {}, getProv: () => 'starnet', getBaseUrl: () => '', getKey: () => '',
         providerNeedsKey: () => true,
         invoke: async cmd => {
           if (cmd === 'harness_provider_key_status') { if (!keychain) throw new Error('old build'); return [{ provider: 'openrouter', configured: false }, { provider: 'anthropic', configured: true }]; }

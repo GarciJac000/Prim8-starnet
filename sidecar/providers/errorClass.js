@@ -5,11 +5,11 @@
    nothing useful. This pure classifier maps any provider error to a reason + the action it implies.
 
    classifyApiError(err, { provider, model, approxTokens, liveApproxTokens, contextLimit, numMessages })
-     -> { reason, retryable, shouldRotateCredential, shouldFallback, shouldCompress, statusCode, message }
+     -> { reason, retryable, shouldRotateCredential, shouldFallback, shouldCompress, statusCode, unsupportedPart, message }
 
    Reasons: auth · billing · rate_limit · quota_exhausted · overloaded · server_error · timeout ·
             context_overflow · output_cap · model_not_found · content_policy_blocked · format_error ·
-            tls_certificate · local_memory · local_error · endpoint_mismatch · unknown.
+            tls_certificate · local_memory · local_timeout · local_error · endpoint_mismatch · unknown.
 
    Priority pipeline: content/policy -> HTTP status (code+message consulted inside the ambiguous 400 branch)
    -> structured error-code (for errors with no HTTP status) -> message patterns -> transport -> a
@@ -64,6 +64,11 @@
     /* An adapter-proven local allocation failure (Ollama out of memory). Resending repeats the allocation, so no
        retry; a configured fallback OFF that local runtime may take over (the loop skips same-runtime entries). */
     local_memory:           { retryable: false, shouldRotateCredential: false, shouldFallback: true,  shouldCompress: false },
+    /* An adapter-proven LOADED, SILENT local model (#99): Ollama's native chat sent nothing for the whole connect ceiling
+       while /api/ps listed the model at every read and no other StarNet call was open on that server. A resend aborts
+       Ollama mid-request and repeats the same prompt on the same model, so no retry. No fallback either, exactly as
+       `timeout`: the turn ends with the adapter's placement sentence. A model NOT listed stays `timeout`. */
+    local_timeout:          { retryable: false, shouldRotateCredential: false, shouldFallback: false, shouldCompress: false },
     /* An adapter-proven WRONG SERVER behind the provider's URL (GH#111: the OLLAMA card pointed at LM Studio, which
        answers Ollama's /api/chat with a 200 "Unexpected endpoint or method"). The configuration is wrong, so a resend
        repeats it, and the adapter's own sentence (which server, which card speaks to it) is the fix. No fallback
@@ -265,6 +270,38 @@
   const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low|key limit exceeded/;
 
   const REGION_REFUSAL_RE = /unsupported_country_region_territory|country,? region,? or territory not supported|not available in your (?:country|region)/;
+  /* A MODEL THAT CANNOT SEE IMAGES was sent one (2026-10-23, StarNet Cloud logs: OpenRouter 404 "No endpoints found
+     that support image input", 14 managed completions in two bursts). Resending the same request repeats the refusal,
+     so it is never retryable; another model may see images, so a configured fallback is still worth taking
+     (model_not_found). The adapters (openrouter.js, openai-compatible.js) also remember the model as text-only, so the
+     NEXT request to it goes without the image. Mirrored in frontend/app/friendlyerror.js — keep the two in step.
+     Vendor wordings: OpenRouter/StarNet "no endpoints found that support image input"; DeepSeek "unknown variant
+     `image_url`"; OpenAI's own text-only models (o1-mini, o3-mini, gpt-3.5-turbo, whose /v1/models states no
+     modalities, so the image is sent) 400 "Invalid content type. image_url is only supported by certain models." */
+  const IMAGE_INPUT_REFUSED_RE = /no endpoints found that support image input|(?:does not|doesn'?t|cannot|can'?t) (?:support|accept|take|handle) (?:image|vision)|image input (?:is )?(?:not supported|unsupported)|(?:images?|vision) (?:input )?(?:is |are )?not supported (?:by|for|on) (?:this|the) model|unknown variant `image_url`|image_url is only supported by certain models/;
+  function isImageInputRefusal(text) { return IMAGE_INPUT_REFUSED_RE.test(String(text || '').toLowerCase()); }
+  const IMAGE_INPUT_FIX = ' — this model cannot take image input: pick a vision model in the COMMS model dock (or remove the image), then send again.';
+  /* A 403 THAT NAMES THE UPSTREAM PROVIDER is that provider refusing THIS request, never our credential (xai-403-1023:
+     26 managed completions answered 403 "provider xAI · Provider returned error", and a StarNet-credits user, who has no
+     key, was told the provider rejected the API key). A router that rejects OUR key answers 401 and names no provider;
+     once it names the upstream (the adapter's err.upstreamProvider, error.provider, error.metadata.provider_name, the
+     "[…; provider X]" fact the openai-compatible adapter writes, or OpenRouter's own "Provider returned error" wrapper),
+     our key got through and the upstream turned the request down. */
+  const UPSTREAM_NAMED_RE = /provider returned error|[\[;] ?provider [^\];]+\]/;
+  function namesUpstream(err, low) {
+    if (err && typeof err.upstreamProvider === 'string' && err.upstreamProvider) return true;
+    const body = extractBody(err);
+    const e = body && (body.error || body);
+    if (e && typeof e === 'object' && (e.provider || (e.metadata && (e.metadata.provider_name || e.metadata.provider)))) return true;
+    return UPSTREAM_NAMED_RE.test(low);
+  }
+  /* A model_not_found about a PART OF THIS REQUEST, not the model: OpenRouter's capability routing answers 404 "No
+     endpoints found that support image input" (a tool screenshot sent to a model that cannot read images — 14 in the
+     xai-403-1023 cloud log), "… that support tool use", "… that can handle the requested parameters". The same model
+     answers a request without that part. Never set for "No endpoints found for <model>", "matching your data policy",
+     "No allowed providers", a region or an upstream 403: those refuse every request to that model. Surfaced as the
+     classification's `unsupportedPart` fact (the failure review keys on it: its plain text request has no such part). */
+  const UNSUPPORTED_PART_RE = /no endpoints found that (?:support|can handle)\b/;
   const TOOL_GEN_FAILED_RE = /tool_use_failed|failed to call a function|tool call validation failed/;
   function classify400(low, code, ctx) {
     const c = String(code || '').toLowerCase();
@@ -320,6 +357,8 @@
     if (!status && isTlsFailure(err, low)) return 'tls_certificate';
     // The Ollama adapter proves the runtime and an explicit failed allocation, even when it returns 500.
     if (err && err.localModelMemory === true) return 'local_memory';
+    // The Ollama adapter proved the model sat loaded through a whole silent connect ceiling (openai-compatible.js).
+    if (err && err.localModelTimeout === true) return 'local_timeout';
     // The adapter proved the URL answers as a different kind of server (openai-compatible.js notOllamaError).
     if (err && err.endpointMismatch === true) return 'endpoint_mismatch';
     if (isLocalError(err, status, extractBody(err), low)) return 'local_error';
@@ -332,6 +371,10 @@
        refusal never arrives as 429/5xx; it comes as 400/403/422 or with no status at all. */
     const transportStatus = status === 429 || (status >= 500 && status < 600) || status === 408;
     if (!transportStatus && /content[ _]?policy|moderation|flagged|safety|content_filter/.test(low)) return 'content_policy_blocked';
+    // 1a. an image sent to a model that cannot see it: whatever status carried it (OpenRouter 404, a vendor 400),
+    //     the same request is refused again — never a malformed request to fold or a key to rotate
+    //     (a 401 is always our credential: it stays auth whatever its text says)
+    if (!transportStatus && status !== 401 && IMAGE_INPUT_REFUSED_RE.test(low)) return 'model_not_found';
     // 1b. OUTPUT cap — BEFORE the overflow patterns, whose `maximum.*tokens` matches this refusal's wording and
     //     used to fold history for nothing, retry the identical max_tokens, and kill the run.
     if ((!status || status === 400 || status === 422) && parseOutputCap(low) > 0) return 'output_cap';
@@ -340,6 +383,9 @@
       // a 403 the UPSTREAM gave for this region (OpenAI behind OpenRouter: unsupported_country_region_territory) is the
       // model being unavailable here — the key is fine, and another model/provider may answer (shouldFallback)
       if (status === 403 && REGION_REFUSAL_RE.test(low)) return 'model_not_found';
+      // an upstream provider's 403 (namesUpstream): a safety wording was content_policy_blocked above; anything else is
+      // this model unavailable for this request — no resend, a configured fallback may answer, no credential rotation
+      if (status === 403 && !NO_CREDIT_RE.test(low) && namesUpstream(err, low)) return 'model_not_found';
       if (status === 401 || status === 403) return NO_CREDIT_RE.test(low) ? 'billing' : 'auth';
       if (status === 402) return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
       if (status === 404) return 'model_not_found';
@@ -420,6 +466,9 @@
         + ' — this machine does not trust the provider\'s certificate. Behind a corporate proxy or an antivirus HTTPS scanner, '
         + 'point NODE_EXTRA_CA_CERTS at its root certificate and restart StarNet; for a self-hosted endpoint, give it a valid certificate. ['
         + message + ']';
+    } else if (reason === 'model_not_found' && IMAGE_INPUT_REFUSED_RE.test(low)) {
+      // the provider's words stay first (the UI routes on the adapter label + status); the fix rides after them
+      text += IMAGE_INPUT_FIX;
     }
     return {
       reason,
@@ -432,6 +481,9 @@
       resetAtMs: wait.resetAtMs,         // H6.1: server-stated absolute reset (epoch ms), or null
       // output_cap only: the output ceiling the provider named; the loop retries the turn with max_tokens at it.
       allowedMaxTokens: reason === 'output_cap' ? parseOutputCap(low) : null,
+      // model_not_found only: the model cannot take a PART of this request (image input, tool use, a parameter) —
+      // a request without that part still reaches it (UNSUPPORTED_PART_RE). False for every other verdict.
+      unsupportedPart: reason === 'model_not_found' && UNSUPPORTED_PART_RE.test(low),
       // `reason` above was already picked from the RAW message, so annotating here cannot move the verdict — it
       // only makes the text a human can act on ("fetch failed" -> "fetch failed (ENOTFOUND api.openai.com)").
       // This is the message the loop emits as agent.run.error, which is what lands in the diagnostics ring.
@@ -439,6 +491,6 @@
     };
   }
 
-  return { classifyApiError, REASONS, transportDetail, annotateTransport,
+  return { classifyApiError, REASONS, transportDetail, annotateTransport, isImageInputRefusal,
     _internals: { extractStatus, extractCode, extractMessage, classify400, pickReason, extractRetryAfter, transportCode, parseOutputCap, isTlsFailure, isLocalError } };
 });

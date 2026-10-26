@@ -182,8 +182,11 @@ const ModelDock = (() => {
     return 'openrouter';
   }
   function isAgentModel(item) {
-    return !(item && normalizeProvider(item.provider) === 'openai'
-      && /^(?:gpt-image-|chatgpt-image-|dall-e-)/i.test(String(item.id || '').trim()));
+    const p = item ? normalizeProvider(item.provider) : '';
+    const id = String((item && item.id) || '').trim();
+    if (p === 'openai' && /^(?:gpt-image-|chatgpt-image-|dall-e-)/i.test(id)) return false;
+    // an OpenRouter-catalog batch-only row ('<id>:batch') cannot run a chat turn (sidecar providers/provider.js isBatchOnlyModel)
+    return !((p === 'openrouter' || p === 'starnet') && /:batch$/i.test(id));
   }
   function apiFetch(url, init) {
     return (typeof Harness !== 'undefined' && Harness.apiFetch) ? Harness.apiFetch(url, init) : fetch(url, init);
@@ -319,7 +322,9 @@ const ModelDock = (() => {
     if (!id) return '';
     if (rows.some(m => m && m.id === id)) return id;
     let candidate = '';
-    if ((p === 'starnet' || p === 'openrouter') && id.indexOf('/') < 0) {
+    // a batch-only variant an older build saved ('<id>:batch', never offered now) runs as its base row when the catalog lists it
+    if ((p === 'starnet' || p === 'openrouter') && /:batch$/i.test(id)) candidate = id.replace(/:batch$/i, '');
+    else if ((p === 'starnet' || p === 'openrouter') && id.indexOf('/') < 0) {
       candidate = 'anthropic/' + id;
       // #93: a bare vendor id ('gpt-5.5' — the default a managed setup used to save) names its routed row
       // 'openai/gpt-5.5'. Map it only when EXACTLY ONE catalog row is <vendor>/<id>: two vendors serving the

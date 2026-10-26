@@ -243,6 +243,105 @@ function walkFiles(root, fs, path, unreadable) {
   return out;
 }
 
+/* THE PRE-UPDATE BUDGET (update-path 10-23). A bundle is ONE JSON string, every payload base64 inside it, and V8 caps
+   a string at ~536.8M chars: a station holding more than ~400 MB of included files threw RangeError in JSON.stringify,
+   so every in-app update stopped at "no verified recovery point" with no way past it. capture({ maxBytes }) — passed by
+   the pre-update preparation only; an explicit export still takes everything — fills the budget in priority order and
+   NEVER reads a file that does not fit:
+     0  the saves + the roster (the station itself)
+     1  every other station store: top-level files, dot-state (.run-journal, .spend-pending …), station directories
+        (channels, connectors, transcript-history-v2, skill-packages …)
+     2  agents' own workspace files, shadow-Git checkpoints and archived workspaces
+   smallest first inside a tier, so what is left out is the LARGEST files of the lowest tier. Each one is listed in
+   report.skipped as BUDGET_SKIP_REASON with its size: the bundle never implies a byte-complete station.
+
+   The budget is TWO limits. maxBytes bounds the file contents (memory). maxChars (default BUNDLE_MAX_CHARS, under the
+   string cap) bounds the bundle's JSON text: every file row costs its base64 PLUS its JSON framing (path, sha256,
+   categories, indentation: ~330 chars a row), so 500k small node_modules files overflowed the cap while their bytes
+   fitted. Every row is charged the exact text JSON.stringify(bundle, null, 2) gives it (rowChars), the left-out list is
+   bounded (SKIP_ROWS_LISTED rows by name per reason, the rest one row per folder, its largest possible size reserved
+   before any file is admitted), and so are the rows the walk itself produces. What is guaranteed: the written bundle
+   is at most maxChars characters. What is NOT: that every file rides — the saves + roster are admitted first, but a
+   station whose saves alone exceed the budget gets a recovery point without them (report.complete says so). */
+const BUDGET_SKIP_REASON = 'too large for the pre-update recovery point';
+const BUNDLE_MAX_CHARS = Math.min(448 * 1024 * 1024, Math.floor(require('buffer').constants.MAX_STRING_LENGTH * 0.85));
+const SKIP_ROWS_LISTED = 1000;
+const HEX64 = '0'.repeat(64);
+const BIG = Number.MAX_SAFE_INTEGER;   // stands in for any size/count when a row's largest possible text is reserved
+// the characters one array element adds to JSON.stringify(bundle, null, 2) at `depth` (files/browser rows 2, report
+// rows 3): its own text, its indentation on every line, and the ",\n" that separates it
+function rowChars(row, depth) {
+  const s = JSON.stringify(row, null, 2);
+  let lines = 1;
+  for (let i = s.indexOf('\n'); i >= 0; i = s.indexOf('\n', i + 1)) lines++;
+  return s.length + lines * 2 * depth + 2;
+}
+// a file row's text before its payload is known (sha256 is fixed-width; base64 never needs escaping)
+function fileRowChars(rel, bytes, categories, redactedFields) {
+  return rowChars({ path: rel, bytes: bytes, sha256: HEX64, encoding: 'base64', data: '', categories: categories, redactedFields: redactedFields || [] }, 2) + 4 * Math.ceil(bytes / 3);
+}
+// left-out rows past SKIP_ROWS_LISTED collapse into one row per folder: the first two segments of the parent directory
+function skipGroup(rel) { const parts = slash(rel).split('/'); parts.pop(); return parts.slice(0, 2).join('/'); }
+function groupPath(group) { return group ? group + '/**' : '*'; }
+// bounds report.skipped: per reason, the SKIP_ROWS_LISTED largest (then by name) stay; the rest are counted per folder
+function compactSkipped(rows) {
+  const byReason = new Map();
+  for (const r of rows) { const k = String(r.reason); if (!byReason.has(k)) byReason.set(k, []); byReason.get(k).push(r); }
+  const out = [];
+  for (const group of byReason.values()) {
+    if (group.length <= SKIP_ROWS_LISTED) { out.push(...group); continue; }
+    const order = group.slice().sort((a, b) => (Number(b.bytes) || 0) - (Number(a.bytes) || 0) || String(a.path).localeCompare(String(b.path)));
+    out.push(...order.slice(0, SKIP_ROWS_LISTED));
+    const folded = new Map();
+    for (const r of order.slice(SKIP_ROWS_LISTED)) {
+      const key = skipGroup(r.path);
+      let agg = folded.get(key);
+      if (!agg) { agg = { path: groupPath(key), reason: r.reason, files: 0 }; if (r.bytes != null) agg.bytes = 0; folded.set(key, agg); }
+      agg.files += Number(r.files) || 1;
+      if (agg.bytes != null) agg.bytes += Number(r.bytes) || 0;
+    }
+    out.push(...folded.values());
+  }
+  return out;
+}
+const STATION_DIRS = new Set(require('./workspace-reserved.js').STATION_DIRS.map(x => x.toLowerCase()));
+function budgetTier(rel) {
+  const p = slash(rel).toLowerCase();
+  if (p === 'agent.roster.json' || /^[^/]+\.save\.json$/.test(p)) return 0;
+  if (p.indexOf('/') < 0) return 1;
+  const top = p.split('/')[0];
+  if (top === '.checkpoints' || top === '_archive') return 2;
+  if (top.charAt(0) === '.' || STATION_DIRS.has(top)) return 1;
+  return 2;
+}
+// the set of rels that do NOT fit `maxBytes` / `maxChars` (sizes from the walk's lstat; nothing is read here). `chars`
+// is what the rest of the bundle already costs; `base` adds the left-out list's reserve to it (the text before any
+// file rides), and each admitted item carries its planned text in item.charge.
+function budgetPlan(items, maxBytes, maxChars, chars) {
+  const size = it => (it.st && Number(it.st.size)) || 0;
+  const order = items.slice().sort((a, b) => budgetTier(a.rel) - budgetTier(b.rel) || size(a) - size(b) || String(a.rel).localeCompare(String(b.rel)));
+  // the left-out list's largest possible text, whichever items end up in it (compactSkipped bounds its rows)
+  let longestRow = 0;
+  const groups = new Map();
+  for (const it of order) {
+    longestRow = Math.max(longestRow, rowChars({ path: it.rel, reason: BUDGET_SKIP_REASON, bytes: BIG }, 3));
+    const g = skipGroup(it.rel);
+    if (!groups.has(g)) groups.set(g, rowChars({ path: groupPath(g), reason: BUDGET_SKIP_REASON, files: BIG, bytes: BIG }, 3));
+  }
+  const folded = Array.from(groups.values()).sort((a, b) => b - a).slice(0, Math.max(0, order.length - SKIP_ROWS_LISTED));
+  let used = 0;
+  chars += Math.min(order.length, SKIP_ROWS_LISTED) * longestRow + folded.reduce((n, c) => n + c, 0);
+  const base = chars;
+  const over = new Set();
+  for (const it of order) {
+    const n = size(it);
+    const c = fileRowChars(it.rel, n, it.categories);
+    if (used + n <= maxBytes && chars + c <= maxChars) { used += n; chars += c; it.charge = c; }
+    else over.add(it.rel);
+  }
+  return { over, order, base };
+}
+
 function completeness(files, browser) {
   const have = new Set();
   for (const f of files) for (const c of f.categories || []) have.add(c);
@@ -260,63 +359,24 @@ function capture(opts) {
   const files = [];
   const skipped = [];
   const reauthentication = [];
-  for (const item of walkFiles(root, fs, path, skipped)) {
-    const policy = classifyPolicy(item.rel, item.st);
-    if (policy.action === 'skip') {
-      skipped.push({ path: item.rel, reason: policy.reason });
-      if (policy.reauth) reauthentication.push(policy.reauth);
-      continue;
-    }
-    let data;
-    try { data = fs.readFileSync(item.abs); }
-    catch (e) {
-      if (!unreadableCode(e)) throw e;
-      skipped.push({ path: item.rel, reason: 'unreadable: ' + e.code });
-      // a locked/denied store falls back to its last-known-good .bak exactly like a torn one (below) — dropping it
-      // dropped the .bak too, and another file of its category kept the bundle reading complete
-      data = policy.action === 'include' && /\.json$/i.test(item.rel) ? lastKnownGood(fs, item.abs) : null;
-      if (!data) continue;
-      skipped.push({ path: item.rel + '.bak', reason: 'promoted: unreadable main captured from its last-known-good .bak' });
-    }
-    /* LAST-KNOWN-GOOD SUBSTITUTION: savestore keeps <file>.bak precisely so a torn main can be recovered,
-       and this bundle intentionally excludes .bak generations — so a bundle captured after a hard kill
-       shipped the torn/zero-byte main and DROPPED the only good copy: completeness still read 'present',
-       the bundle stamped complete, and restore produced a station whose save quarantines on first load
-       with no .bak to fall back to. When an included .json main does not parse and its sibling .bak does,
-       the bundle carries the .bak bytes as the file (recorded in skipped as a promotion). */
-    if (policy.action === 'include' && /\.json$/i.test(item.rel)) {
-      let mainOk = data.length > 0;
-      if (mainOk) { try { JSON.parse(data.toString('utf8')); } catch (_) { mainOk = false; } }
-      if (!mainOk) {
-        try {
-          const bak = fs.readFileSync(item.abs + '.bak');
-          JSON.parse(bak.toString('utf8'));
-          data = bak;
-          skipped.push({ path: item.rel + '.bak', reason: 'promoted: torn main captured from its last-known-good .bak' });
-        } catch (bakErr) {
-          // No usable .bak — the torn main rides as-is (forensic truth). A MISSING sibling is the normal
-          // case; an existing-but-unusable one earns a receipt on the report so the gap is visible.
-          if (bakErr && bakErr.code !== 'ENOENT') skipped.push({ path: item.rel + '.bak', reason: 'unusable .bak: ' + ((bakErr && bakErr.message) || bakErr) });
-        }
-      }
-    }
-    let redactedFields = [];
-    if (policy.action === 'sanitize') {
-      const clean = sanitizeManagedJson(item.rel, data, o);
-      data = clean.data;
-      redactedFields = clean.redacted;
-      reauthentication.push(...clean.reauthentication);
-    }
-    files.push({ path: item.rel, bytes: data.length, sha256: sha256(data), encoding: 'base64', data: data.toString('base64'), categories: categoriesFor(item.rel), redactedFields });
+  const browserStore = isObj(o.browserStore) ? o.browserStore : {};
+  const budgeted = (Number.isFinite(o.maxBytes) && o.maxBytes >= 0) || (Number.isFinite(o.maxChars) && o.maxChars > 0);
+  let budget = null, maxChars = null;
+  if (budgeted) {
+    // the browser-owned state rides in the same JSON string, so it is taken out of the file budget first
+    budget = Number.isFinite(o.maxBytes) && o.maxBytes >= 0 ? o.maxBytes : Infinity;
+    for (const key of Object.keys(browserStore)) budget -= Buffer.byteLength(String(browserStore[key]), 'utf8');
+    budget = Math.max(0, budget);
+    maxChars = Number.isFinite(o.maxChars) && o.maxChars > 0 ? Math.min(o.maxChars, BUNDLE_MAX_CHARS) : BUNDLE_MAX_CHARS;
   }
 
-  const browser = [];
-  const browserStore = isObj(o.browserStore) ? o.browserStore : {};
+  // browser-owned state (pure: no disk), first so a budget can charge it; its report rows join after the files' as before
+  const browser = [], browserSkipped = [], browserReauth = [];
   for (const key of Object.keys(browserStore).sort()) {
-    if (!/^(?:starnet|skynet)\./i.test(key)) { skipped.push({ path: 'browser:' + key, reason: 'foreign browser key' }); continue; }
+    if (!/^(?:starnet|skynet)\./i.test(key)) { browserSkipped.push({ path: 'browser:' + key, reason: 'foreign browser key' }); continue; }
     if (browserKeyIsSecret(key)) {
-      skipped.push({ path: 'browser:' + key, reason: 'browser credential material is intentionally excluded' });
-      reauthentication.push({ kind: 'browser-credential', id: key, reason: 'Credential value is intentionally excluded.' });
+      browserSkipped.push({ path: 'browser:' + key, reason: 'browser credential material is intentionally excluded' });
+      browserReauth.push({ kind: 'browser-credential', id: key, reason: 'Credential value is intentionally excluded.' });
       continue;
     }
     const value = String(browserStore[key]);
@@ -324,16 +384,7 @@ function capture(opts) {
     browser.push({ key, bytes: data.length, sha256: sha256(data), value, categories: browserCategories(key) });
   }
 
-  stableSort(files, x => x.path); stableSort(skipped, x => x.path); stableSort(browser, x => x.key);
-  const requirements = completeness(files, browser);
-  const complete = requirements.every(x => x.status === 'present');
-  const uniqueReauth = [];
-  const seenReauth = new Set();
-  for (const row of reauthentication) {
-    const k = [row.kind, row.id, row.reason].join('|');
-    if (!seenReauth.has(k)) { seenReauth.add(k); uniqueReauth.push(row); }
-  }
-  const bundle = {
+  const head = {
     schema: SCHEMA,
     version: VERSION,
     createdAt: o.now,
@@ -345,11 +396,137 @@ function capture(opts) {
       completedMutationsLostAtPoint: 0,
       continuousRpoCompletedMutations: null,
       note: 'Zero loss is guaranteed through this successful quiescent snapshot; mutations after it require another recovery point.'
-    },
+    }
+  };
+
+  const walkSkipped = [];
+  let walked = walkFiles(root, fs, path, walkSkipped).map(item => Object.assign(item, { policy: classifyPolicy(item.rel, item.st) }));
+  let over = null, chars = 0, walkRows = null;
+  if (!budgeted) skipped.push(...walkSkipped);
+  else {
+    // what the bundle costs before any file rides: its skeleton, the browser state, and the rows the walk produced
+    // (unreadable entries + policy skips, bounded by compactSkipped) — all known now and charged exactly
+    walkRows = compactSkipped(walkSkipped.concat(walked.filter(it => it.policy.action === 'skip').map(it => ({ path: it.rel, reason: it.policy.reason }))));
+    chars = rowChars(Object.assign({}, head, {
+      files: [], browser: [],
+      report: { complete: false, requirements: REQUIRED_CATEGORIES.map(category => ({ category, status: 'missing' })), skipped: [], reauthentication: [] },
+      manifestSha256: HEX64
+    }), 0) + 64;   // + an empty array opening up (5 of them) and the trailing newline
+    for (const r of walkRows) chars += rowChars(r, 3);
+    for (const b of browser) chars += rowChars(b, 2);
+    for (const r of browserSkipped.concat(browserReauth)) chars += rowChars(r, 3);
+    for (const it of walked) if (it.policy.reauth) chars += rowChars(it.policy.reauth, 3);
+    const candidates = walked.filter(it => it.policy.action !== 'skip');
+    for (const it of candidates) it.categories = categoriesFor(it.rel);
+    const plan = budgetPlan(candidates, budget, maxChars, chars);
+    // only the list of what is left out can get here (~a million folders, or a tiny maxChars): say so instead of V8's 'Invalid string length'
+    if (plan.base > maxChars) throw new Error('the station has too many files to list within a pre-update recovery point');
+    over = plan.over;
+    chars = plan.base;   // from here: the text of what has actually been admitted, in priority order
+    // read in priority order, so the guard below (a .bak promotion can differ in size) only ever drops the LOWER rows
+    walked = walked.filter(it => it.policy.action === 'skip').concat(plan.order);
+  }
+  const tooLarge = [];
+  let used = 0;
+  for (const item of walked) {
+    const policy = item.policy;
+    if (policy.action === 'skip') {
+      if (!budgeted) skipped.push({ path: item.rel, reason: policy.reason });   // budgeted: already in walkRows
+      if (policy.reauth) reauthentication.push(policy.reauth);
+      continue;
+    }
+    if (over && over.has(item.rel)) { tooLarge.push({ path: item.rel, reason: BUDGET_SKIP_REASON, bytes: Number(item.st && item.st.size) || 0 }); continue; }
+    // a HIGHER row that grew when read (a .bak promotion, a re-printed sanitized store) can take this one's room: it is
+    // then left out unread. Passing here also covers its 'unreadable' row below, which is always shorter than its charge.
+    if (budgeted && (used + ((item.st && Number(item.st.size)) || 0) > budget || chars + item.charge > maxChars)) {
+      tooLarge.push({ path: item.rel, reason: BUDGET_SKIP_REASON, bytes: Number(item.st && item.st.size) || 0 });
+      continue;
+    }
+    // this file's own report rows. Only 'unreadable' is true whether or not the file rides: a "promoted" row for a
+    // file the budget then leaves out would claim a capture that never happened.
+    const notes = [];
+    let data;
+    try { data = fs.readFileSync(item.abs); }
+    catch (e) {
+      if (!unreadableCode(e)) throw e;
+      notes.push({ row: { path: item.rel, reason: 'unreadable: ' + e.code }, stays: true });
+      // a locked/denied store falls back to its last-known-good .bak exactly like a torn one (below) — dropping it
+      // dropped the .bak too, and another file of its category kept the bundle reading complete
+      data = policy.action === 'include' && /\.json$/i.test(item.rel) ? lastKnownGood(fs, item.abs) : null;
+      if (data) notes.push({ row: { path: item.rel + '.bak', reason: 'promoted: unreadable main captured from its last-known-good .bak' } });
+    }
+    /* LAST-KNOWN-GOOD SUBSTITUTION: savestore keeps <file>.bak precisely so a torn main can be recovered,
+       and this bundle intentionally excludes .bak generations — so a bundle captured after a hard kill
+       shipped the torn/zero-byte main and DROPPED the only good copy: completeness still read 'present',
+       the bundle stamped complete, and restore produced a station whose save quarantines on first load
+       with no .bak to fall back to. When an included .json main does not parse and its sibling .bak does,
+       the bundle carries the .bak bytes as the file (recorded in skipped as a promotion). */
+    if (data && policy.action === 'include' && /\.json$/i.test(item.rel)) {
+      let mainOk = data.length > 0;
+      if (mainOk) { try { JSON.parse(data.toString('utf8')); } catch (_) { mainOk = false; } }
+      if (!mainOk) {
+        try {
+          const bak = fs.readFileSync(item.abs + '.bak');
+          JSON.parse(bak.toString('utf8'));
+          data = bak;
+          notes.push({ row: { path: item.rel + '.bak', reason: 'promoted: torn main captured from its last-known-good .bak' } });
+        } catch (bakErr) {
+          // No usable .bak — the torn main rides as-is (forensic truth). A MISSING sibling is the normal
+          // case; an existing-but-unusable one earns a receipt on the report so the gap is visible.
+          if (bakErr && bakErr.code !== 'ENOENT') notes.push({ row: { path: item.rel + '.bak', reason: 'unusable .bak: ' + ((bakErr && bakErr.message) || bakErr) } });
+        }
+      }
+    }
+    if (!data) {   // unreadable with no last-known-good: only its receipt rides
+      for (const n of notes) skipped.push(n.row);
+      if (budgeted) chars += notes.reduce((s, n) => s + rowChars(n.row, 3), 0);
+      continue;
+    }
+    let redactedFields = [];
+    let reauth = [];
+    if (policy.action === 'sanitize') {
+      const clean = sanitizeManagedJson(item.rel, data, o);
+      data = clean.data;
+      redactedFields = clean.redacted;
+      reauth = clean.reauthentication;
+    }
+    if (budgeted) {
+      // the exact text this file adds now that its bytes are known (a .bak promotion or a sanitized store can differ
+      // from the walk's size); past either limit it is left out like any other, with only its 'unreadable' row kept
+      const cost = fileRowChars(item.rel, data.length, item.categories, redactedFields)
+        + notes.reduce((s, n) => s + rowChars(n.row, 3), 0) + reauth.reduce((s, r) => s + rowChars(r, 3), 0);
+      if (used + data.length > budget || chars + cost > maxChars) {
+        const kept = notes.filter(n => n.stays).map(n => n.row);
+        skipped.push(...kept);
+        chars += kept.reduce((s, r) => s + rowChars(r, 3), 0);
+        tooLarge.push({ path: item.rel, reason: BUDGET_SKIP_REASON, bytes: data.length });
+        continue;
+      }
+      chars += cost;
+    }
+    for (const n of notes) skipped.push(n.row);
+    reauthentication.push(...reauth);
+    used += data.length;
+    files.push({ path: item.rel, bytes: data.length, sha256: sha256(data), encoding: 'base64', data: data.toString('base64'), categories: item.categories || categoriesFor(item.rel), redactedFields });
+  }
+  if (budgeted) skipped.push(...walkRows, ...compactSkipped(tooLarge));
+  skipped.push(...browserSkipped);
+  reauthentication.push(...browserReauth);
+
+  stableSort(files, x => x.path); stableSort(skipped, x => x.path); stableSort(browser, x => x.key);
+  const requirements = completeness(files, browser);
+  const complete = requirements.every(x => x.status === 'present');
+  const uniqueReauth = [];
+  const seenReauth = new Set();
+  for (const row of reauthentication) {
+    const k = [row.kind, row.id, row.reason].join('|');
+    if (!seenReauth.has(k)) { seenReauth.add(k); uniqueReauth.push(row); }
+  }
+  const bundle = Object.assign({}, head, {
     files,
     browser,
     report: { complete, requirements, skipped, reauthentication: uniqueReauth }
-  };
+  });
   bundle.manifestSha256 = sha256(Buffer.from(JSON.stringify({ files: files.map(x => ({ path: x.path, bytes: x.bytes, sha256: x.sha256 })), browser: browser.map(x => ({ key: x.key, bytes: x.bytes, sha256: x.sha256 })), recoveryPoint: bundle.recoveryPoint }), 'utf8'));
   return bundle;
 }
@@ -500,8 +677,8 @@ function semanticFingerprint(bundle) {
 }
 
 module.exports = {
-  SCHEMA, VERSION, REQUIRED_CATEGORIES,
+  SCHEMA, VERSION, REQUIRED_CATEGORIES, BUDGET_SKIP_REASON, BUNDLE_MAX_CHARS, SKIP_ROWS_LISTED,
   capture, validate, writeBundleAtomic, readBundle, restore, semanticFingerprint,
   browserKeyIsSecret, categoriesFor,
-  _internals: { sanitizeManagedJson, classifyPolicy, completeness, sha256 }
+  _internals: { sanitizeManagedJson, classifyPolicy, completeness, sha256, budgetTier, rowChars, compactSkipped }
 };

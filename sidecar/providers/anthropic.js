@@ -947,12 +947,15 @@
     // spentUsd crosses the cap). Resolved off the dated list-rate table, independent of catalog warm state so
     // the cap works from the first turn; an unrecognized model still returns null and stays 'unpriced'.
     function priceOf(id) { return prices.priceOf('anthropic', id); }
+    // the most output one call can bill (provider.js outputLimit): the max_tokens this adapter sends a request that names
+    // none — Anthropic requires one, so it is always known (the catalog's, a configured one, or the 32000 fallback)
+    function outputLimit(id) { return resolveMaxTokens({ model: id }); }
     function supportsTools(id) { const m = findModel(id); return m ? m.supportsTools : true; }
     // Resolved from the model NAME, not the warm catalog: /v1/models publishes no capability data, and the
     // dock asks this before a catalog fetch has necessarily landed.
     function reasoningEfforts(id) { return effortsFor(id); }
 
-    return { stream, listModels, warmCatalog, catalogHttpStatus, catalogFetchError, contextLimit, priceOf, supportsTools, reasoningEfforts };
+    return { stream, listModels, warmCatalog, catalogHttpStatus, catalogFetchError, contextLimit, outputLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
   return { makeAnthropicProvider, _internals: { messagesToAnthropic, toAnthropicTools, normalizeUsage, normalizeModel, cleanBaseUrl, headerBag } };

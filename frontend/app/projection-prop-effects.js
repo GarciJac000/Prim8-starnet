@@ -162,13 +162,21 @@ const ProjectionPropEffects = (() => {
     const b=bbox(e.patch),pad=.025,x=Math.max(0,b.x-pad),y=Math.max(0,b.y-pad),right=Math.min(1,b.x+b.width+pad),bottom=Math.min(1,b.y+b.height+pad);
     clipped(c,e.patch,()=>c.drawImage(p.image,x*p.width,y*p.height,(right-x)*p.width,(bottom-y)*p.height,x+dx,y+dy,right-x,bottom-y));
   }
+  /* STILL READOUT (world.js STILL VERDICT, 2026-10-21): when the LAST draw's overlay next changes on its own clock, read
+     back by PropRemaster with lastChange(). Its `t` while an effect MOVES (a sweep line, a ripple, fish, wax, a specimen,
+     plasma arcs, rising steam, a throbbing cone), the start of the next cycle while a steam plume is between puffs, and
+     Infinity for everything else: alpha-only glow (lamps, heat, bands, samples, holograms, holo, cold), static marks (result,
+     connector, door, pins, awards, light) and a frozen draw (t = 0 under reduced motion). Allocation-free. */
+  let changeAt=Infinity;
+  const moved=t=>{if(t>0&&t<changeAt)changeAt=t;};
+  const dueAt=(t,at)=>{if(t>0&&at<changeAt)changeAt=at;};
   function emit(c,e,s,t,p){
     const b=bbox(e.region),v=amount(e.gate,s),phase=e.phase||0,wave=.5+.5*Math.sin(t/670+phase);
     const fill=(col,a)=>{c.fillStyle=rgb(col,a);c.fillRect(b.x,b.y,b.width,b.height);};
     if(e.kind==='screen'||e.kind==='lamp'||e.kind==='scan'||e.kind==='bands'||e.kind==='heat'){
       if(!v){const opacity=e.idleOpacity??.88;if(opacity>0)fill([6,13,17],opacity);return;}
       if(e.kind==='screen'||e.kind==='scan'){
-        const y=b.y+b.height*frac(t/2400+phase);line(c,[[b.x,y],[b.x+b.width,y]],rgb(e.colour,.16+.14*clamp(s.heat)),Math.min(.012,b.height*.08));
+        const y=b.y+b.height*frac(t/2400+phase);line(c,[[b.x,y],[b.x+b.width,y]],rgb(e.colour,.16+.14*clamp(s.heat)),Math.min(.012,b.height*.08));moved(t);
       }else if(e.kind==='bands'){
         for(let i=0;i<5;i++)c.fillStyle=rgb(e.colour,.035+.075*(.5+.5*Math.sin(t/860-i))),c.fillRect(b.x,b.y+b.height*i/5,b.width,b.height*.07);
       }else fill(e.colour,(e.kind==='heat'?.08:.12)+wave*.12);
@@ -199,16 +207,16 @@ const ProjectionPropEffects = (() => {
     }
     if(!v)return;
     if(e.kind==='ripple'||e.kind==='water'){
-      const q=frac(t/3800);c.beginPath();c.ellipse(b.x+b.width*.5,b.y+b.height*.5,b.width*(.10+.32*q),b.height*(.12+.3*q),0,0,Math.PI*1.6);c.strokeStyle=rgb(e.colour,.20*(1-q));c.lineWidth=.005;c.stroke();
+      const q=frac(t/3800);c.beginPath();c.ellipse(b.x+b.width*.5,b.y+b.height*.5,b.width*(.10+.32*q),b.height*(.12+.3*q),0,0,Math.PI*1.6);c.strokeStyle=rgb(e.colour,.20*(1-q));c.lineWidth=.005;c.stroke();moved(t);
     }else if(e.kind==='samples'){for(let i=0;i<3;i++)ellipse(c,b.x+b.width*(.13+i*.33),b.y+b.height*.70,b.width*.045,b.height*.05,rgb(e.colour,.14+.10*Math.sin(t/1300+i)));}
     else if(e.kind==='fish'||e.kind==='wax'||e.kind==='specimen'){
       const dx=e.kind==='fish'?.007*Math.sin(t/2200+phase):0,dy=(e.kind==='wax'?.010:e.kind==='specimen'?.005:.003)*Math.sin(t/3900+phase);
-      sourcePatch(c,p,e,dx,dy);
+      sourcePatch(c,p,e,dx,dy);moved(t);
       if(e.kind!=='wax')for(let i=0;i<2;i++){const q=frac(t/7100+i*.43+phase);ellipse(c,b.x+b.width*(.85-i*.1),b.y+b.height*(1-q),.003,.005,rgb(e.colour,.16*(1-q)));}
     }else if(e.kind==='plasma'){
-      for(let i=0;i<4;i++){const a=i*Math.PI/2+t/4200,ox=e.origin[0],oy=e.origin[1],tx=ox+Math.cos(a)*b.width*.42,ty=oy+Math.sin(a)*b.height*.42;line(c,[[ox,oy],[(ox+tx)/2+.014*Math.sin(t/380+i),(oy+ty)/2],[tx,ty]],rgb(e.colour,.24),.005);}
+      for(let i=0;i<4;i++){const a=i*Math.PI/2+t/4200,ox=e.origin[0],oy=e.origin[1],tx=ox+Math.cos(a)*b.width*.42,ty=oy+Math.sin(a)*b.height*.42;line(c,[[ox,oy],[(ox+tx)/2+.014*Math.sin(t/380+i),(oy+ty)/2],[tx,ty]],rgb(e.colour,.24),.005);}moved(t);
     }else if(e.kind==='steam'){
-      const q=frac(t/3400);if(q>.78)return;const k=q/.78,rise=e.rise*k,ox=e.origin[0],oy=e.origin[1];
+      const q=frac(t/3400);if(q>.78){dueAt(t,t+(1-q)*3400);return;}moved(t);const k=q/.78,rise=e.rise*k,ox=e.origin[0],oy=e.origin[1];
       for(let i=0;i<3;i++)ellipse(c,ox+Math.sin(t/900+i)*.025,oy-rise+i*e.rise*.13,.028+i*.009,.045,rgb(e.colour,.15*(1-k)*(1-i*.22)));
     }else if(e.kind==='hologram'){
       const ox=e.origin[0],oy=e.origin[1],top=oy-e.rise;
@@ -216,10 +224,11 @@ const ProjectionPropEffects = (() => {
       line(c,[[ox-.21,top+.18],[ox+.21,top+.18]],rgb(e.colour,.18),.018);
     }else if(e.kind==='holo'){line(c,[[b.x+b.width*.24,b.y+b.height*.20],[b.x+b.width*.74,b.y+b.height*.20]],rgb(e.colour,.08+.06*wave),.007);}
     else if(e.kind==='cold'){line(c,[[b.x+b.width*.18,b.y+b.height*.18],[b.x+b.width*.23,b.y+b.height*.80]],rgb(e.colour,.07+.025*wave),.007);}
-    else if(e.kind==='cone'){ellipse(c,b.x+b.width*.5,b.y+b.height*.5,b.width*(.32+.006*wave),b.height*(.32+.006*wave),rgb(e.colour,.09));}
+    else if(e.kind==='cone'){ellipse(c,b.x+b.width*.5,b.y+b.height*.5,b.width*(.32+.006*wave),b.height*(.32+.006*wave),rgb(e.colour,.09));moved(t);}
     else if(e.kind==='light')fill(e.colour,.035); // steady fixture illumination, never activity
   }
   function draw(ctx,id,view,box,state={},prepared=null){
+    changeAt=Infinity;
     const entry=classify(id,view);if(!entry||entry.classification!=='effects'||!box)return false;
     const sw=box.sourceWidth,sh=box.sourceHeight,crop=box.crop||{x:0,y:0,width:sw,height:sh};
     if(sw!==entry.binding.width||sh!==entry.binding.height||![box.x,box.y,box.width,box.height,crop.x,crop.y,crop.width,crop.height].every(finite)||box.width<=0||box.height<=0||crop.width<=0||crop.height<=0||crop.x<0||crop.y<0||crop.x+crop.width>sw||crop.y+crop.height>sh)return false;
@@ -240,6 +249,6 @@ const ProjectionPropEffects = (() => {
   }
   const ids=Object.freeze(Object.keys(designs));
   function dispose(p){if(p&&p.image){p.image.width=1;p.image.height=1;p.image=null;}}
-  return {ids,regions,classify,matches,prepare,draw,frameBounds,dispose,screenEmission,coverage:()=>Object.fromEntries(Object.keys(BINDINGS).map(id=>[id,Object.fromEntries(Object.keys(BINDINGS[id]).map(v=>[v,classify(id,v)]))]))};
+  return {ids,regions,classify,matches,prepare,draw,lastChange:()=>changeAt,frameBounds,dispose,screenEmission,coverage:()=>Object.fromEntries(Object.keys(BINDINGS).map(id=>[id,Object.fromEntries(Object.keys(BINDINGS[id]).map(v=>[v,classify(id,v)]))]))};
 })();
 if(typeof module!=='undefined')module.exports=ProjectionPropEffects;

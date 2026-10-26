@@ -62,6 +62,25 @@ const lineage = require('../sidecar/workspace-lineage.js');
   A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: false }], noSpawn: true }).mode, 'refuse', '--no-spawn refuses');
   A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: true }], forceSpawn: true }).mode, 'spawn', '--spawn boots even when a station answers');
   A.eq(c({ forceSpawn: true, noSpawn: true }).mode, 'refuse', '--spawn + --no-spawn refuses');
+  /* The desktop app's station while the app is CLOSED: its keys, bot tokens and credits token live in the OS keychain,
+     which only the app hands its sidecar. A station the terminal boots there would be a keyless second copy of the real
+     one (routines firing and failing, bots offline) — so `starnet` says to open the app instead. */
+  const dead = [{ source: 'default', port: 8787, reachable: false }];
+  const closedApp = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true } });
+  A.eq(closedApp.mode, 'refuse', 'the desktop app\'s station with the app closed is never booted keyless from a terminal');
+  A.ok(/open the StarNet app/i.test(closedApp.reason) && /keys/.test(closedApp.reason), 'and the refusal says to open the app, which holds the keys: ' + closedApp.reason);
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true }, noSpawn: true }).reason, closedApp.reason, '--no-spawn gets the same, more useful, reason');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true }, workspaceOverride: true }).mode, 'spawn', '…a workspace the operator named still boots (headless use)');
+  /* --spawn alone still targets that same workspace (defaultWorkspace picks the desktop station whenever it holds one), so
+     it is the same keyless copy: refused too, and the reason names the flag that DOES give a separate station */
+  const closedSpawn = c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true }, forceSpawn: true });
+  A.eq(closedSpawn.mode, 'refuse', '…an explicit --spawn never boots the closed app\'s station either');
+  A.ok(/open the StarNet app/i.test(closedSpawn.reason) && /--workspace <dir>/.test(closedSpawn.reason), '…and says to open the app, or name a --workspace for a separate station: ' + closedSpawn.reason);
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: true }, forceSpawn: true, workspaceOverride: true }).mode, 'spawn', '--spawn --workspace <dir> still boots (headless use)');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: false }, forceSpawn: true }).mode, 'spawn', '--spawn on a terminal-only station still boots');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: true, appRan: false } }).mode, 'spawn', 'a station in that folder that no desktop app ever ran (a terminal-only one) still boots');
+  A.eq(c({ candidates: dead, desktop: { ownerAlive: false, station: false, appRan: true } }).mode, 'spawn', 'no station there yet → the terminal may set one up (the awakening)');
+  A.eq(c({ candidates: [{ source: 'default', port: 8787, reachable: true }], desktop: { ownerAlive: false, station: true, appRan: true } }).mode, 'attach', 'a reachable station still wins');
 }
 
 // ---- discovery parsers --------------------------------------------------------------------------

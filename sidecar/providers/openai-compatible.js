@@ -304,7 +304,8 @@
       id,
       name: m.name || id,
       context_length: reportedWindow(m),
-      max_completion_tokens: Number(m.max_completion_tokens || m.max_output_tokens || 0) || null,
+      // an OpenRouter-shaped list (the StarNet proxy relays OpenRouter's) names it under top_provider
+      max_completion_tokens: Number(m.max_completion_tokens || m.max_output_tokens || (m.top_provider && m.top_provider.max_completion_tokens) || 0) || null,
       pricing: m.pricing || null,
       supported_parameters: params,
       supportsTools: typeof m.supportsTools === 'boolean' ? m.supportsTools : (params.length ? params.indexOf('tools') >= 0 : null),
@@ -313,7 +314,10 @@
       supportsReasoning: typeof m.supportsReasoning === 'boolean' ? m.supportsReasoning : ((declared && declared.some(e => e !== 'none')) ? true : null),
       reasoningEfforts: declared ? declared : (Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts.slice() : []),
       reasoningEffortsDeclared: !!declared,
-      defaultReasoningLevel: (defaultLevel && declared && declared.indexOf(defaultLevel) >= 0) ? defaultLevel : null
+      defaultReasoningLevel: (defaultLevel && declared && declared.indexOf(defaultLevel) >= 0) ? defaultLevel : null,
+      // image input as the row states it (the StarNet managed list relays OpenRouter's architecture.input_modalities);
+      // null when the row says nothing, which is every vendor /v1/models list — those keep sending images as before
+      supportsImages: provider.imageInputOf(m)
     };
   }
 
@@ -564,11 +568,12 @@
     function waitProbe(body, onWait, self) {
       const promptTokens = ollamaNative.estimateTokens(body);
       const server = ollamaIsLoopback ? 'Ollama' : 'Ollama at ' + ollamaHost;
-      let timer = null, stopped = false, last = '';
+      let timer = null, stopped = false, last = '', missing = false;
       const arm = ms => { timer = setTimeout(read, ms); if (timer && typeof timer.unref === 'function') timer.unref(); };
       async function read() {
         timer = null;
         const ps = await ollamaStatus();
+        if (ps && !ollamaNative.psRow(ps, body.model)) missing = true;   // a read that did not list the model (see sawMissing)
         if (stopped) return;
         const others = otherOllamaCalls(nativeBase, self);
         const note = ollamaNative.placementFacts(ps, body.model, promptTokens, server)
@@ -578,7 +583,11 @@
         arm(waitNoteMs * 3);
       }
       arm(waitNoteMs);
-      return { stop() { stopped = true; if (timer) clearTimeout(timer); timer = null; } };
+      return {
+        stop() { stopped = true; if (timer) clearTimeout(timer); timer = null; },
+        // true once any read of this attempt answered without the model listed: it may have been loading during the wait
+        sawMissing() { return missing; }
+      };
     }
     // The window this model actually gets here: a pinned size, else min(its trained maximum, the ceiling).
     function usableWindow(modelMax) {
@@ -668,8 +677,12 @@
       maybeRewarmCatalog();
       const dropped = droppedParams.get(String(req.model || ''));
       const skip = p => !!(dropped && dropped.has(p));
+      // A model the catalog (or its own earlier refusal) calls text-only gets each image as a short note instead: the
+      // managed route answers an image to such a model with 404 "No endpoints found that support image input". Unknown
+      // capability (every vendor list that states none) keeps them, exactly as before.
+      const sent = supportsImages(req.model) === false ? provider.withoutImageParts(req.messages || [], req.model) : (req.messages || []);
       // ONE pre-send normalization (provider.js prepareWireMessages) — for this wire, exactly repairToolPairs.
-      const prepared = provider.prepareWireMessages(req.messages || [], 'chat');
+      const prepared = provider.prepareWireMessages(sent, 'chat');
       // Keep the profile's SYSTEM projection even after nativeWire falls back to /v1. Do not
       // infer this policy from a model name or change generic/hosted Chat Completions requests.
       // Every other route: ONE role projection (provider.chatRoleProjection) — a Claude model keeps its continuation
@@ -869,6 +882,7 @@
       // This turn's reasoning_content (replayReasoning endpoints only), parked on the turn as ONE block just before
       // the terminal event, so the next request can hand it back (see replayReasoningContent).
       let reasoningText = '';
+      let reasoningSeen = false;   // this stream already said reasoning is streaming (emitFrom)
       function* flushReasoning() {
         if (!replayReasoning || !reasoningText) return;
         noteEmitter(baseUrl, req.model);
@@ -888,6 +902,12 @@
         if (!choice) return;
         const d = choice.delta || choice.message || {};
         if (replayReasoning && typeof d.reasoning_content === 'string' && d.reasoning_content) reasoningText += d.reasoning_content;
+        /* REASONING IS STREAM OUTPUT (80de2a75 review). A reasoning model (deepseek-reasoner, OpenRouter's reasoning
+           models, Ollama thinking) streams reasoning (billed output) for seconds or minutes before any answer text, and
+           nothing here showed it: a Stop in that phase looked like a Stop before the first byte, a known $0 run. The
+           first reasoning chunk says so once as a blockless { type:'reasoning' } (the loop parks only a block). */
+        if (!reasoningSeen && ((typeof d.reasoning_content === 'string' && d.reasoning_content) || (typeof d.reasoning === 'string' && d.reasoning)
+          || (Array.isArray(d.reasoning_details) && d.reasoning_details.length))) { reasoningSeen = true; yield { type: 'reasoning' }; }
         if (typeof d.content === 'string' && d.content) yield { type: 'text', delta: d.content };
         if (Array.isArray(d.tool_calls)) {
           for (const tc of d.tool_calls) {
@@ -987,12 +1007,21 @@
           if (isAbort(e, signal)) throw e;
           provider.runtime.stampRequestHost(e, native ? nativeBase : baseUrl);   // a TLS/socket cause names no host: say which one we dialled
           // Local Ollama silent past the connect ceiling: say where the model actually runs (one /api/ps read).
-          // Appended, so the message still reads "timed out" and classifies exactly as before.
+          // Appended, so the message still reads "timed out".
           if (native && e && e.timeout && e.phase === 'connect' && !e.ollamaPlacement) {
             e.ollamaPlacement = true;
-            e.message += ' — ' + ollamaNative.placementNote(await ollamaStatus(), body.model, ollamaNative.estimateTokens(body), ollamaIsLoopback ? 'on this computer' : 'at ' + ollamaHost);
+            const ps = await ollamaStatus();
+            e.message += ' — ' + ollamaNative.placementNote(ps, body.model, ollamaNative.estimateTokens(body), ollamaIsLoopback ? 'on this computer' : 'at ' + ollamaHost);
+            /* NO RE-SEND OF A LOADED MODEL'S SILENCE (#99 follow-up). Every re-send aborts Ollama mid-request and sends the
+               same prompt to the same model, so a CPU-spilled model that needs longer than the ceiling to answer a task
+               prompt got 7 sends and never finished. When /api/ps listed the model at every read of this attempt and no
+               other StarNet call is open on that server (none of ours it could have queued behind), the turn ends now
+               on errorClass `local_timeout` with the placement above. Still re-sent: a model missing from any read (a
+               load may have eaten the wait, or hung), an unreadable status, another StarNet call open there. */
+            if (ollamaNative.psRow(ps, body.model) && !(probe && probe.sawMissing()) && !otherOllamaCalls(nativeBase, wire.openCall).n) e.localModelTimeout = true;
           }
-          // a TLS rejection or a crash in our own request code cannot heal by re-sending: fail fast, unmarked
+          // a TLS rejection, a crash in our own request code or a loaded model's silence (above) cannot heal by re-sending:
+          // fail fast, unmarked
           if (!classifyApiError(e, { model: body.model }).retryable) throw e;
           if (attempt < retries) { waited += RETRY_DELAYS[attempt]; await delay(RETRY_DELAYS[attempt], signal); continue; }
           throw provider.runtime.markPreStreamRetriesExhausted(e, { attempts: attempt + 1, waitedMs: waited });
@@ -1065,6 +1094,8 @@
             detail += ' — the endpoint did not accept the model id "' + sent + '"; check the exact id in your endpoint\'s model list.';
           }
         }
+        // the model refused image input: text-only for this process, so the next request to it goes without the image
+        if (errorClass.isImageInputRefusal(detail)) provider.noteImageRefusal(baseUrl, body.model);
         const err = new Error(errLabel + ' http ' + res.status + ' - ' + detail);
         err.status = res.status;
         err.headers = res.headers;
@@ -1223,6 +1254,13 @@
       if (served) return served;
       return (shared && shared.windowFact(id)) || defaultContext;
     }
+    // the most output one call can bill (provider.js outputLimit): the catalog's max output for the model, or the
+    // max_tokens this profile sends (profile.maxOutputTokens), whichever is lower; 0 = neither is known
+    function outputLimit(id) {
+      const m = findModel(id);
+      const cat = Math.floor(Number(m && m.max_completion_tokens) || 0);
+      return (cat > 0 && maxTokens > 0) ? Math.min(cat, maxTokens) : (cat > 0 ? cat : maxTokens);
+    }
     function catalogPriceOf(id) {
       const m = findModel(id);
       if (!m || !m.pricing) return null;
@@ -1245,6 +1283,13 @@
       if (f && typeof f.supportsTools === 'boolean') return f.supportsTools;
       return profileSupportsTools;
     }
+    // Image input: false once this model refused an image on this endpoint, else the catalog row's word, else null —
+    // unknown, and an unknown model is sent images exactly as before.
+    function supportsImages(id) {
+      if (provider.refusedImages(baseUrl, id)) return false;
+      const m = findModel(id);
+      return (m && typeof m.supportsImages === 'boolean') ? m.supportsImages : null;
+    }
     function reasoningEfforts(id) {
       const m = findModel(id);
       // declared levels are exact; a declared "no dial" offers only 'none' (= send nothing)
@@ -1257,7 +1302,7 @@
 
     // localRuntime names the Ollama server this instance talks to, so the loop never fails a local out-of-memory
     // over to another model on the same server.
-    return { stream, listModels, warmCatalog, contextLimit, priceOf, supportsTools, reasoningEfforts, localRuntime: nativeBase || undefined };
+    return { stream, listModels, warmCatalog, contextLimit, outputLimit, priceOf, supportsTools, supportsImages, reasoningEfforts, localRuntime: nativeBase || undefined };
   }
 
   return { makeOpenAICompatibleProvider, _internals: { normalizeModel, reportedWindow, cleanBaseUrl, responseErrorDetail, safeErrorField, makeArgsTracker, clampToDeclared, canonicalEffort, paramNamed, supportedEffortsFrom, toolsForceNone, replayReasoningContent } };

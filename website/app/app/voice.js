@@ -1910,7 +1910,13 @@ const Voice = (() => {
      UI wiring
      ====================================================================== */
 
+  /* STILL WAKE (world.js RENDER PACING, 2026-10-21): the floor draws a still scene 30/s and reads isSpeaking/isListening
+     once per frame, but they flip HERE, from audio playback and STT callbacks, between frames — the hero's talk track, the
+     listening ring at its feet and a bubble the voice holds up would otherwise land up to a still tick late. Every flip of
+     `speaking` goes through setSpeaking and every flip of `listening` through setMicState, so both wake the floor first. */
+  function wakeFloor() { if (typeof World !== 'undefined' && World && typeof World.voiceChanged === 'function') World.voiceChanged(); }
   function setMicState(on) {
+    wakeFloor();
     if (!micBtn) return;
     micBtn.classList.toggle('rec', on);
     micBtn.title = on ? 'recording — click again to finish and send' : 'click to talk';
@@ -1918,6 +1924,7 @@ const Voice = (() => {
     micBtn.setAttribute('aria-label', on ? 'Recording, click again to finish and send' : 'Click to talk');
   }
   function setSpeaking(on) {
+    wakeFloor();
     if (toggleBtn) toggleBtn.classList.toggle('speaking', on);
     // a spoken reply streams as several chunks — don't flip back to 'online' between them (draining),
     // and don't clobber a still-running task's 'working…' status.

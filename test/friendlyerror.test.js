@@ -300,6 +300,23 @@ for (const raw of [
   A.eq(rl.retryable, true, 'and still offers a retry');
 }
 
+/* ---- bug 06331054: a ChatGPT plan has a SHORT window (hours) and a weekly one ----------------------------
+   "resets weekly" sent a user whose multi-hour window was spent away for days. The copy names both windows, and
+   quotes the provider's own reset time when the error carries one. */
+{
+  const bare = friendlyError(Object.assign(new Error('codex http 429 — The usage limit has been reached'), { status: 429 })).userMessage;
+  A.ok(/a few hours for the short window, up to a week for the weekly one/.test(bare), 'ChatGPT: both windows are named: ' + bare);
+  A.ok(!/resets weekly/.test(bare), 'ChatGPT: never "resets weekly" as if that were the only window');
+  const said = friendlyError(Object.assign(new Error("codex http 429 — You've hit your usage limit. Resets in 3 days"), { status: 429 })).userMessage;
+  A.ok(/ChatGPT says it resets in 3 days\. To keep working now/.test(said), 'ChatGPT: the provider\'s own reset time is quoted: ' + said);
+  const soon = friendlyError(Object.assign(new Error("codex http 429 — You've hit your usage limit. Try again in 4h 12m."), { status: 429 })).userMessage;
+  A.ok(/ChatGPT says it resets in 4h 12m\./.test(soon), 'ChatGPT: a short-window reset is quoted too: ' + soon);
+  const kimi = friendlyError(Object.assign(new Error('Kimi For Coding http 429 - weekly limit reached, resets in 2 days'), { status: 429 })).userMessage;
+  A.ok(/^Your Kimi plan allowance is used up — it resets on Kimi's own schedule, not in seconds\. Kimi says it resets in 2 days\./.test(kimi), 'another plan quotes its reset the same way: ' + kimi);
+  A.ok(!/resets weekly/.test(KINDS.quota_exhausted.msg) && /weekly/.test(KINDS.quota_exhausted.msg) && /hours/.test(KINDS.quota_exhausted.msg),
+    'the provider-neutral copy names both ChatGPT windows: ' + KINDS.quota_exhausted.msg);
+}
+
 /* ---- THE BROWSER PATH, which is the one real users take -------------------------------------------
    friendlyerror.js pulls the sidecar's classifyApiError in through `require` — "never required in the
    browser", says its own comment. So under node every verdict comes from the shared truth table, and in the
@@ -650,7 +667,10 @@ const wrongServerCase = (async () => {
   const xaiKey = friendlyError(Object.assign(new Error('xai http 402 - add credits at console.x.ai'), { status: 402 }));
   A.ok(xaiKey.kind === 'billing' && /^Your xAI account is out of credit/.test(xaiKey.userMessage), 'the xAI API key (a wallet) is not the Grok sign-in: ' + xaiKey.userMessage);
   const unnamed = friendlyError(Object.assign(new Error("You've hit your usage limit. Resets in 3 days"), { status: 429 }));
-  A.eq(unnamed.userMessage, KINDS.quota_exhausted.msg, 'an unnamed spent allowance keeps the neutral quota copy');
+  A.eq(unnamed.userMessage, KINDS.quota_exhausted.msg.replace('To keep working now', 'The provider says it resets in 3 days. To keep working now'),
+    'an unnamed spent allowance keeps the neutral quota copy, plus the reset time it stated (naming no provider)');
+  A.eq(friendlyError(Object.assign(new Error("You've hit your usage limit."), { status: 429 })).userMessage, KINDS.quota_exhausted.msg,
+    'with no stated reset time it is the neutral copy exactly');
   // a ChatGPT adapter auth failure names codex: its door is the reconnect, never a key field
   const codexAuth = friendlyError(Object.assign(new Error('codex http 401 — Unauthorized'), { status: 401 }));
   A.eq(codexAuth.provider, 'codex', 'a codex 401 names codex');

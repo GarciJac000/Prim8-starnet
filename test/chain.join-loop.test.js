@@ -405,6 +405,108 @@ function rig(floor, script, opts) {
     const big = 'x'.repeat(30000);
     const clipped = loopDecision(gate(), ctxRevise, 0, {}, 'notes', big);
     A.ok(clipped.text.length < 17000 && /characters of the work omitted/.test(clipped.text), 'a huge draft is clipped (head + tail), never the whole thing');
+
+    /* THE APPROVED WORK (2026-10-18): an approval that does not restate the work hands on the work it approved */
+    const ctxOk = { verdict: 'approved' };
+    const W = 'The draft: rooftop installs grew 34% in 2025, battery attach passed half, permits are the top soft cost.';
+    const okDock = loopDecision(gate(), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', W);
+    A.eq(okDock.text, '[LOOP — approved round the gate at 12,4 — the reviewer passed the work on without restating it]\nTHE WORK UNDER REVIEW (what the reviewer was handed):\n' + W + '\n\nREVIEW:\nLooks good.',
+      'a terse approval going to a dock: the work it approved, then the approval as its review (no VERDICT line)');
+    A.ok(!okDock.again && !okDock.exhausted && okDock.target === 'publisher', '...and it still leaves on the done lane, approved');
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', W).text, W, 'a terse approval that ships straight out delivers the work alone');
+    A.ok(/^\[LOOP — approved[^\n]*\]\nTHE WORK UNDER REVIEW[^\n]*\n/.test(loopDecision(gate({ next: null, afterJoin: { join: '14,8', expect: 2, next: 'synth' } }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', W).text),
+      'past a JOINER that feeds a dock: framed for that dock');
+    A.eq(loopDecision(gate({ next: null, afterJoin: { join: '14,8', expect: 2, next: null } }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', W).text, W,
+      'past a JOINER that ships straight out: the work alone (the joined product carries no frame)');
+    A.eq(loopDecision(gate(), ctxOk, 0, {}, 'VERDICT: approved', W).text, W, 'a reply that is only the verdict line hands on the work (no empty review)');
+    const restated = W.replace('34%', '34 percent') + '\n\nSpelled out one unit.';
+    A.eq(loopDecision(gate(), ctxOk, 0, {}, restated + '\nVERDICT: approved', W).text, restated, 'a reply that RESTATED the work is the work (R1) — no second copy');
+    A.eq(loopDecision(gate(), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', '').text, 'Looks good.', 'no reviewed text (a self-loop) -> the reply as before');
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'fine\nVERDICT: approved', okDock.text).text, W,
+      'two gates in a row, both terse: the second reviews the work inside the first one\'s frame — frames never nest or ship');
+    A.ok(loopDecision(gate(), ctxRevise, 0, {}, 'tighten it\nVERDICT: revise', okDock.text).text.indexOf('THE WORK UNDER REVIEW (what the reviewer was handed):\n' + W + '\n\nREVIEW:\ntighten it') > 0,
+      '...and a loop-back at the second gate shows the work, not the first gate\'s frame');
+    /* (review of 77b627c18, 2026-10-21) only THAT frame is unwrapped. An exhausted, escalated or looping gate's frame holds the earlier
+       reviewer's last word (perhaps its own redacted version): a later gate reviews the frame whole, and a bare approval of it swaps
+       nothing in — the draft that reviewer redacted never moves on in its place */
+    const DRAFT_PII = 'Call Jane Doe at 555-123-4567.';
+    const LAST_WORD = 'Call [redacted] at [redacted].\nVERDICT: revise';
+    const exhaustedFrame = loopDecision(gate(), ctxRevise, 2, {}, LAST_WORD, DRAFT_PII).text;
+    const escalatedFrame = loopDecision(gate({ esc: 'fixer' }), ctxRevise, 2, {}, LAST_WORD, DRAFT_PII).text;
+    const loopBackFrame = loopDecision(gate(), ctxRevise, 0, {}, LAST_WORD, DRAFT_PII).text;
+    A.ok(/^\[LOOP — exhausted/.test(exhaustedFrame) && /^\[LOOP — escalated/.test(escalatedFrame) && /^\[LOOP — pass 1 of 2/.test(loopBackFrame), 'the three other frames, each carrying the draft and the reviewer\'s last word');
+    for (const [name, frame] of [['an exhausted', exhaustedFrame], ['an escalated', escalatedFrame], ['a loop-back', loopBackFrame]]) {
+      for (const [where, g] of [['to a dock', gate()], ['out of the line', gate({ next: null })]]) {
+        const d = loopDecision(g, ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', frame);
+        A.eq(d.text, 'Looks good.', name + ' gate\'s frame, a bare approval ' + where + ': the reply moves on as it is (as on trunk), never the draft inside');
+      }
+      const again = loopDecision(gate(), ctxRevise, 0, {}, 'Needs a source.\nVERDICT: revise', frame);
+      A.ok(again.text.indexOf('THE WORK UNDER REVIEW (what the reviewer was handed):\n' + frame + '\n\nREVIEW:\nNeeds a source.') > 0,
+        name + ' gate\'s frame, a loop-back at the next gate: the whole frame is what the reviewer was handed, its last word included');
+    }
+    const longWork = Array.from({ length: 6000 }, (_, i) => 'w' + i).join(' ');
+    const okLong = loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Ship it.\nVERDICT: approved', longWork);
+    A.eq(okLong.text, longWork, 'the approved work is the product: never clipped');
+    A.eq(loopDecision(gate({ when: 'code' }), { tag: 'general' }, 0, {}, 'tag reply', W).text, 'tag reply', 'a classifier-tag gate is untouched (no verdict, no approval)');
+
+    /* FRAMES ANYWHERE (review of 524522d2c, 2026-10-22): a gate's done lane that meets a JOINER parks its frame as one BRANCH of the
+       merged crate (Pipeline.joinPayload), so the frame does not start the crate. Only the crate's first line was read: a bare
+       approval past the joiner swapped in the whole merged crate, an exhausted frame's draft (the personal data its reviewer had
+       redacted) and a passed-on frame's wrapper with it. Now an exhausted, escalated or looping frame anywhere keeps the reply, and
+       a passed-on frame that is a whole branch is unwrapped in place to the work it carries. */
+    const { hopTurn } = require('../sidecar/routing/chain.js');
+    const OTHER = 'Branch two: permits average 40 days.';
+    const piiFree = (t) => String(t).indexOf('Jane Doe') < 0 && String(t).indexOf('555-123-4567') < 0;
+    for (const [name, frame] of [['an exhausted', exhaustedFrame], ['an escalated', escalatedFrame], ['a loop-back', loopBackFrame]]) {
+      for (const [order, crate] of [['first', P.joinPayload([{ agentId: 'reviewer', text: frame }, { agentId: 'researcher', text: OTHER }], [])],
+        ['second', P.joinPayload([{ agentId: 'researcher', text: OTHER }, { agentId: 'reviewer', text: frame }], [])]]) {
+        A.ok(!/^\[LOOP — /.test(crate) && crate.indexOf('Jane Doe') > 0, name + ' frame as the ' + order + ' branch of a joined crate: the frame sits inside it, the draft with it');
+        for (const [where, g] of [['to a dock', gate()], ['out of the line', gate({ next: null })]]) {
+          const d = loopDecision(g, ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', crate);
+          A.eq(d.text, 'Looks good.', name + ' frame as the ' + order + ' branch, a bare approval ' + where + ': the reply moves on as on trunk, never the joined crate');
+          A.ok(piiFree(d.text), name + ' frame as the ' + order + ' branch, ' + where + ': the draft its reviewer redacted never moves on');
+        }
+        const again = loopDecision(gate(), ctxRevise, 0, {}, 'Needs a source.\nVERDICT: revise', crate);
+        A.ok(again.text.indexOf('THE WORK UNDER REVIEW (what the reviewer was handed):\n' + crate + '\n\nREVIEW:\nNeeds a source.') > 0,
+          name + ' frame as the ' + order + ' branch, a loop-back: the whole joined crate is what the reviewer was handed');
+      }
+    }
+    // a passed-on frame that is a whole branch: unwrapped IN PLACE, the joiner's header, the other branch and its seams kept
+    const passedBranch = P.joinPayload([{ agentId: 'reviewer', text: okDock.text }, { agentId: 'researcher', text: OTHER }], []);
+    const cleanJoined = P.joinPayload([{ agentId: 'reviewer', text: W }, { agentId: 'researcher', text: OTHER }], []);
+    A.ok(passedBranch.indexOf('passed the work on without restating it') > 0, 'a joined crate whose first branch is a passed-on frame');
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Ship it.\nVERDICT: approved', passedBranch).text, cleanJoined,
+      'a passed-on branch, a bare approval out of the line: the joined work ships, the frame unwrapped to its work (no wrapper, no REVIEW part)');
+    const passedDock = loopDecision(gate(), ctxOk, 0, {}, 'Ship it.\nVERDICT: approved', passedBranch).text;
+    A.eq(passedDock, '[LOOP — approved round the gate at 12,4 — the reviewer passed the work on without restating it]\nTHE WORK UNDER REVIEW (what the reviewer was handed):\n' + cleanJoined + '\n\nREVIEW:\nShip it.',
+      'a passed-on branch, a bare approval to a dock: one frame round the joined work — frames never nest');
+    const passedSecond = P.joinPayload([{ agentId: 'researcher', text: OTHER }, { agentId: 'reviewer', text: okDock.text }], ['late'], ['fixer failed']);
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'LGTM\nVERDICT: approved', passedSecond).text,
+      P.joinPayload([{ agentId: 'researcher', text: OTHER }, { agentId: 'reviewer', text: W }], ['late'], ['fixer failed']),
+      'a passed-on LAST branch of a partial join: unwrapped to the end of its branch, the PARTIAL marks kept as they are');
+    const bothPassed = P.joinPayload([{ agentId: 'reviewer', text: okDock.text }, { agentId: 'reviewer2', text: okDock.text }], []);
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Approved.\nVERDICT: approved', bothPassed).text,
+      P.joinPayload([{ agentId: 'reviewer', text: W }, { agentId: 'reviewer2', text: W }], []), 'two passed-on branches: both unwrapped');
+    const mixed = P.joinPayload([{ agentId: 'reviewer', text: okDock.text }, { agentId: 'reviewer2', text: exhaustedFrame }], []);
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', mixed).text, 'Looks good.',
+      'a passed-on branch beside an exhausted one: the reply moves on as on trunk, never the exhausted draft');
+    const midText = P.joinPayload([{ agentId: 'reviewer', text: 'Intro the reviewer wrote.\n' + okDock.text }, { agentId: 'researcher', text: OTHER }], []);
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', midText).text, 'Looks good.',
+      'a frame that does not start its branch cannot be read back exactly: the reply moves on as on trunk');
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', 'Notes:\n' + exhaustedFrame).text, 'Looks good.',
+      'a frame mid-crate with no joiner at all: the reply moves on as on trunk');
+    // a passed-on frame round a joined crate (gate 1 approved a merged job), itself one branch of a later join: unwrapped to the inner joined work
+    const nestedWork = P.joinPayload([{ agentId: 'a', text: 'alpha work' }, { agentId: 'b', text: 'beta work' }], []);
+    const nestedFrame = loopDecision(gate(), ctxOk, 0, {}, 'Looks good.\nVERDICT: approved', nestedWork).text;
+    A.ok(nestedFrame.indexOf('THE WORK UNDER REVIEW (what the reviewer was handed):\n' + nestedWork + '\n\nREVIEW:\nLooks good.') > 0, 'gate 1 passes a joined crate on in its frame');
+    A.eq(loopDecision(gate({ next: null }), ctxOk, 0, {}, 'Ship it.\nVERDICT: approved', P.joinPayload([{ agentId: 'reviewer', text: nestedFrame }, { agentId: 'researcher', text: OTHER }], [])).text,
+      P.joinPayload([{ agentId: 'reviewer', text: nestedWork }, { agentId: 'researcher', text: OTHER }], []), 'a passed-on frame round a joined crate, as a branch: unwrapped to that joined work');
+    // the brief makes the bare-approval promise exactly where it holds
+    const turnFor = (upstream) => hopTurn({ loopGateAfter: () => ({ when: 'approved', max: 2, backTo: 'writer', backDock: null }), originalText: 'go', from: 'researcher', upstream, hop: 3, target: 'editor', lineId: 'p1' });
+    const PROMISE = /a reply of only the VERDICT line, or a bare approval such as "Looks good\.", passes it on exactly as you were handed it/;
+    A.ok(PROMISE.test(turnFor(passedBranch)) && PROMISE.test(turnFor(cleanJoined)), 'the reviewer of a joined crate of plain or passed-on branches is told a bare approval passes it on');
+    for (const [name, crate] of [['an exhausted', P.joinPayload([{ agentId: 'researcher', text: OTHER }, { agentId: 'reviewer', text: exhaustedFrame }], [])], ['a mixed', mixed]])
+      A.ok(!PROMISE.test(turnFor(crate)) && /your reply is what moves on past the gate/.test(turnFor(crate)), 'the reviewer of a joined crate with ' + name + ' branch is never promised a bare approval passes it on');
   }
 
   A.report('chain.join-loop');

@@ -272,12 +272,25 @@
     function admissionCommand(m) {
       if (!m || m.forwarded || m.channelPost || m.edited) return false;
       if (!String(m.userId == null ? '' : m.userId)) return false;
-      const hit = ADMISSION_CMD.exec(String(m.text == null ? '' : m.text).trim());
+      const text = String(m.text == null ? '' : m.text).trim();
+      const hit = ADMISSION_CMD.exec(text);
       if (!hit) return false;
       const suffix = String(hit[2] || '').toLowerCase();
-      if (!suffix) return true;
+      // a bare command with ARGUMENTS ("/allow @newmember") is another bot's — a moderation bot's — never an admission:
+      // ours takes none unless it names us. Taken as ours it admitted the owner's station to a room nobody meant to open.
+      if (!suffix) return !text.slice(hit[0].length).trim() || admissionArgNamesUs(text);
       const me = botUsernameNow();
       return !!me && suffix === me;
+    }
+    /* "/allow @thisbot" / "/deny @thisbot": the argument is OUR name and nothing else — the same address as the
+       "/allow@thisbot" form, and the natural one in a room with several bots. Read from the text, so it holds before
+       any platform's mention entities do; while our own name is unknown nothing can name us. */
+    function admissionArgNamesUs(text) {
+      const t = String(text == null ? '' : text).trim();
+      const hit = ADMISSION_CMD.exec(t);
+      if (!hit || hit[2]) return false;
+      const me = botUsernameNow();
+      return !!me && t.slice(hit[0].length).trim().toLowerCase() === '@' + me;
     }
     /* A non-owner's /allow in a group we do not answer in gets ONE line saying why, straight through the
        transport like the offline notice: never the hub, so a stranger's group never reaches the durable inbox
@@ -446,6 +459,9 @@
         // ADMISSION-ONLY: the owner's /allow or /deny from a chat that is not admitted yet. The hub acts on that
         // command and nothing else — this message got past the allow-list only because of what it says.
         if (verdict === 'admit') im.admissionOnly = true;
+        // an /allow or /deny whose only argument is our own @name: the hub reads it as ours, like "/deny@thisbot"
+        // (it cannot tell our name from a moderation bot's "/deny @spammer" on its own). Additive.
+        if (m.chatType !== 'dm' && admissionArgNamesUs(m.text)) im.argNamesUs = true;
         if (Array.isArray(m.mentions) && m.mentions.length) im.mentions = m.mentions.slice();
         onInbound(im);   // production hub durably claims synchronously; a failed claim throws before acknowledgement
         acknowledge();

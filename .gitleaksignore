@@ -120,3 +120,22 @@ b887cb75b8b5f4fd1a713ebd97c40cbff69f3772:test/tasteref.http.test.js:generic-api-
 b887cb75b8b5f4fd1a713ebd97c40cbff69f3772:test/tasteref.http.test.js:generic-api-key:65
 d26549162aa41c080ef3c0f40f075f03174f2bbe:test/earlier-conversation.http.test.js:generic-api-key:37
 d26549162aa41c080ef3c0f40f075f03174f2bbe:test/earlier-conversation.http.test.js:generic-api-key:45
+
+# 0.14.0 candidate (reviewed 2026-10-22): eight hits, all synthetic fixtures in tests — a jwt.io-style sample JWT
+# (sub 1234567890) and stub "MIIx" private-key blocks in the redaction tests, and patterned fake keys
+# (sk-live-ISOLATION-SECRET-…, sk-or-v1-unpriced-e2e, sk_live_NEW1234 / sk_live_SECRETVALUE) driven against mock providers.
+1235814f19519fe153bb08f6930c3346b12acf67:test/redact.linear.test.js:jwt:48
+f2bc03e7693fca7ac361fef94cc8094f9d12d6b1:test/redact.linear.test.js:private-key:31
+f2bc03e7693fca7ac361fef94cc8094f9d12d6b1:test/redact.linear.test.js:private-key:67
+0dcfc92aa5f434255c28c7b3824e5a650a1ddfbe:test/provider.catalog-cache.test.js:generic-api-key:209
+3c53fa524daeb9ec3b45f8c727599510049cad68:test/unpriced-run-label.e2e.test.js:generic-api-key:51
+d43ab06e62b5b3a51c4a37820477fd7b06a2dc9a:test/onepassword.test.js:stripe-access-token:56
+d43ab06e62b5b3a51c4a37820477fd7b06a2dc9a:test/onepassword.test.js:generic-api-key:50
+d43ab06e62b5b3a51c4a37820477fd7b06a2dc9a:test/onepassword.test.js:generic-api-key:51
+# 0.14.0 night fixes (reviewed 2026-10-23): five hits, all the literal placeholder key 'sk-or-v1-fixture' passed to a mock
+# OpenRouter provider aimed at .test hosts (provider-403-upstream-refusal and vision-input tests).
+5c832f5f82c61b29af8712557b1c5f0338565e37:test/provider-403-upstream-refusal.test.js:generic-api-key:111
+31aedfb9d65e80b5c68218afa4cb7843dbe5ad02:test/provider-403-upstream-refusal.test.js:generic-api-key:44
+9b2b1c9352f0dfb05bce280dc241ebfe2174b637:test/vision-input.test.js:generic-api-key:297
+cff098ae174fb5a68c63e88c2483dbcef4272386:test/vision-input.test.js:generic-api-key:117
+cff098ae174fb5a68c63e88c2483dbcef4272386:test/vision-input.test.js:generic-api-key:153

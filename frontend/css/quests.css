@@ -210,7 +210,7 @@
 .quests-win .bp-day.future { opacity: .45; }
 @keyframes bp-flicker { 0%,100% { opacity: 1; } 50% { opacity: .78; } }
 
-.quests-win .bp-claimbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; padding: 8px 12px; border: 1px solid rgba(var(--gold-rgb),.55); border-radius: 8px; color: var(--gold); background: rgba(var(--gold-rgb),.07); animation: bp-pulse 2s ease-in-out infinite; }
+.quests-win .bp-claimbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; padding: 8px 12px; border: 1px solid rgba(var(--gold-rgb),.55); border-radius: 8px; color: var(--gold); background: rgba(var(--gold-rgb),.07); animation: bp-pulse 2s steps(9, jump-none) infinite; }
 @keyframes bp-pulse { 0%,100% { box-shadow: 0 0 0 rgba(var(--gold-rgb),0); } 50% { box-shadow: 0 0 14px rgba(var(--gold-rgb),.35); } }
 .quests-win .bp-track { position: relative; min-width: 0; max-width: 100%; display: flex; align-items: flex-start; gap: 0; list-style: none; margin: 0; padding: 4px 2px 12px; overflow-x: auto; scrollbar-width: thin; }
 .quests-win .bp-node { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 96px; text-align: center; }

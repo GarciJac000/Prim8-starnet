@@ -61,6 +61,14 @@ const ApprovedSheetEffects = (() => {
     clip(c,polygon,()=>c.drawImage(prepared.image,x*prepared.width,y*prepared.height,(r-x)*prepared.width,(bot-y)*prepared.height,x+dx,y+dy,r-x,bot-y));
     return true;
   }
+  /* STILL READOUT (world.js STILL VERDICT, 2026-10-21): when the LAST draw's overlay next changes on its own clock, read
+     back by PropRemaster with lastChange(). Its `t` while it MOVES (water and its bubbles, wax, a specimen, rising steam or
+     coffee vapour, a dye ripple, a screen's refresh line), the next step of a stepped one (plasma's branch, every 190 ms;
+     steam between puffs), Infinity for alpha-only glow (samples, biology, cold, heat, audio, a result fill) and for a
+     frozen draw (t = 0 under reduced motion). Allocation-free. */
+  let changeAt=Infinity;
+  const moved=t=>{if(t>0&&t<changeAt)changeAt=t;};
+  const dueAt=(t,at)=>{if(t>0&&at<changeAt)changeAt=at;};
   function glow(c,cfg,a) { clip(c,cfg.region,()=>{c.fillStyle=rgba(cfg.colour,a);c.fillRect(0,0,1,1);}); }
   function emit(c,id,s,cfg,t) {
     const prepared=s.prepared&&s.prepared.id===id?s.prepared:null;
@@ -73,28 +81,31 @@ const ApprovedSheetEffects = (() => {
         for(let i=0;i<3;i++){const q=frac(t/3400+i*.31);ellipse(c,.78+.008*Math.sin(t/900+i),.69-q*.33,.004,.006,rgba(cfg.colour,.17*(1-q)));}
         line(c,[[.18,.37],[.46,.375+.006*Math.sin(t/620)],[.81,.37]],rgba(cfg.colour,.10),.006);
       });
+      moved(t);
     } else if(cfg.kind==='wax') {
       cfg.patches.forEach(p=>sourcePatch(c,prepared,p,.003*Math.sin(t/3000),.014*Math.sin(t/6820)));
-      glow(c,cfg,.013+.012*breath);
+      glow(c,cfg,.013+.012*breath);moved(t);
     } else if(cfg.kind==='specimen') {
       cfg.patches.forEach(p=>sourcePatch(c,prepared,p,0,.007*Math.sin(t*.0009)));
-      clip(c,cfg.region,()=>{for(let i=0;i<4;i++){const q=frac(t/(9200+i*710)+i*.23);ellipse(c,.38+frac(i*.618)*.21,.65-q*.31,.003,.004,rgba(cfg.colour,.16));}});
+      clip(c,cfg.region,()=>{for(let i=0;i<4;i++){const q=frac(t/(9200+i*710)+i*.23);ellipse(c,.38+frac(i*.618)*.21,.65-q*.31,.003,.004,rgba(cfg.colour,.16));}});moved(t);
     } else if(cfg.kind==='steam') {
       // Existing translucent plume stays intact. Overlay-only drawing cannot
       // erase its old alpha safely on a world canvas, so avoid double-stamping.
       const q=frac(t/3400);if(q<.78)clip(c,cfg.region,()=>{
         ellipse(c,.50+.025*Math.sin(t/520),.48-q*.32,.045,.030,rgba(cfg.colour,.045*Math.sin(q/.78*Math.PI)));
       });
+      if(q<.78)moved(t);else dueAt(t,t+(1-q)*3400);
     } else if(cfg.kind==='coffee') {
       // Native brewer ambiance is clock-driven. This steam is not a work claim.
       const q=frac(t/2400);clip(c,rect(.32,.37,.36,.24),()=>{
         line(c,[[.50,.55-q*.06],[.49+.01*Math.sin(t/600),.50-q*.06],[.51,.46-q*.06]],rgba(cfg.colour,.10*(1-q)),.011);
       });
-      clip(c,cfg.region,()=>ellipse(c,.48,.59,.055,.014,rgba([115,83,49],.035+.015*breath)));
+      clip(c,cfg.region,()=>ellipse(c,.48,.59,.055,.014,rgba([115,83,49],.035+.015*breath)));moved(t);
     } else if(cfg.kind==='dye') {
       clip(c,cfg.region,()=>{
         const q=frac(t/4400);c.beginPath();c.ellipse(.48,.235,.06+q*.16,.017+q*.025,0,0,Math.PI*2);c.strokeStyle=rgba(cfg.colour,(.065+.05*w)*(1-q));c.lineWidth=.009;c.stroke();
       });
+      moved(t);
     } else if(cfg.kind==='plasma') {
       // Illuminate successive existing branches. Preserve the approved electrode,
       // glass and actual arc layout; no geometric replacement of the sphere.
@@ -102,6 +113,7 @@ const ApprovedSheetEffects = (() => {
         const k=Math.floor(t/190)%4,angle=k*Math.PI/2;
         ellipse(c,.5+Math.cos(angle)*.19,.32+Math.sin(angle)*.14,.07,.05,rgba(cfg.colour,.065));
       });
+      dueAt(t,(Math.floor(t/190)+1)*190);
     } else if(cfg.kind==='samples') {
       clip(c,cfg.region,()=>{for(let i=0;i<3;i++)ellipse(c,.39+i*.08,.27,.017,.05,rgba(cfg.colour,(.025+.035*w)*(.6+.4*Math.sin(t/760+i*1.7))));});
     } else if(cfg.kind==='biology') {
@@ -113,7 +125,7 @@ const ApprovedSheetEffects = (() => {
       glow(c,cfg,.035+.045*breath+.065*w);
     } else if(cfg.kind==='screen') {
       // Broad low-contrast phosphor refresh over existing drawing, no new text.
-      clip(c,cfg.region,()=>{c.fillStyle=rgba(cfg.colour,.014+.026*w);c.fillRect(.08,.12+frac(t/4200)*.24,.4,.018);});
+      clip(c,cfg.region,()=>{c.fillStyle=rgba(cfg.colour,.014+.026*w);c.fillRect(.08,.12+frac(t/4200)*.24,.4,.018);});moved(t);
     } else if(cfg.kind==='audio') {
       // Connection/actual work gates music ambiance. No unbound playback fiction.
       if(s.live===true||s.work)glow(c,cfg,.015+.025*breath);
@@ -124,6 +136,7 @@ const ApprovedSheetEffects = (() => {
     }
   }
   function draw(ctx,id,box,state) {
+    changeAt=Infinity;
     const cfg=config[id];if(!cfg||!ctx||!box)return false;
     const bw=box.width==null?box.w:box.width,bh=box.height==null?box.h:box.height;
     if(![box.x,box.y,bw,bh].every(Number.isFinite)||bw<=0||bh<=0)return false;
@@ -139,6 +152,6 @@ const ApprovedSheetEffects = (() => {
     return true;
   }
   function frameBounds(id) { return config[id]?{x:0,y:0,width:1,height:1}:null; }
-  return Object.freeze({ids,regions,prepare,draw,frameBounds});
+  return Object.freeze({ids,regions,prepare,draw,lastChange:()=>changeAt,frameBounds});
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=ApprovedSheetEffects;

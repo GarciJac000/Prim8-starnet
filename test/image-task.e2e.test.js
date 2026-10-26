@@ -94,7 +94,8 @@ async function run(base, token, body) {
 (async () => {
   const provider = await startProvider();
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'starnet-image-task-e2e-'));
-  const noOpenRouterKey = { STARNET_OPENROUTER_KEY: '', SKYNET_OPENROUTER_KEY: '', OPENROUTER_KEY: '', OPENROUTER_API_KEY: '' };
+  const noOpenRouterKey = { STARNET_OPENROUTER_KEY: '', SKYNET_OPENROUTER_KEY: '', OPENROUTER_KEY: '', OPENROUTER_API_KEY: '',
+    STARNET_OPENROUTER_API_KEY: '', SKYNET_OPENROUTER_API_KEY: '', OPENAI_API_KEY: '', STARNET_OPENAI_API_KEY: '', SKYNET_OPENAI_API_KEY: '' };
   const env = Object.assign({}, noOpenRouterKey, {
     SKYNET_WORKSPACES: workspace,
     STARNET_OPENROUTER_BASE: provider.baseUrl,
@@ -175,6 +176,41 @@ async function run(base, token, body) {
     A.eq(openAIGeneration && openAIGeneration.authorization, 'Bearer openai-run-key', 'native Images API uses the configured OpenAI run key');
     A.eq(openAIGeneration && openAIGeneration.body, { model: 'gpt-image-2', prompt: 'a blue cube', size: '1024x1024' }, 'native Images API receives the non-streaming image request shape');
     A.ok(fs.readdirSync(path.join(workspace, 'openai-image-produced', 'images')).some(name => /^gen-.*\.png$/.test(name)), 'the OpenAI run has a real saved PNG artifact');
+
+    // #146: an OpenRouter key saved in a BROWSER page (the station's engine-key copy, no env var, no desktop push) lets a
+    // run on another provider make images — but only where no image route existed: a route that already worked (here a
+    // station OpenAI key) keeps rendering and billing where it did.
+    const engineKey = body => fetch(base + '/api/providers/engine-key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-StarNet-Token': token, Origin: base }, body: JSON.stringify(body)
+    });
+    A.eq((await engineKey({ provider: 'openai', key: 'page-saved-openai-key', baseUrl: provider.baseUrl })).status, 200, 'the page hands the station its OpenAI key');
+    const saved = await engineKey({ provider: 'openrouter', key: 'page-saved-or-key' });
+    A.eq(saved.status, 200, 'the page hands the station its OpenRouter key');
+    const beforeKept = provider.requests.length;
+    const kept = await run(base, token, {
+      provider: 'custom', baseUrl: provider.baseUrl, key: 'custom-model-key', model: 'test/model',
+      agentId: 'image-kept-route', isTask: true, placed: ['studio'],
+      messages: [{ role: 'user', content: 'Generate an image of a blue cube' }]
+    });
+    A.ok(kept.some(e => e.name === 'agent.tool_result' && e.payload.callId === 'make_image' && e.payload.ok), 'image_generate runs on the route the station already had');
+    const keptCall = provider.requests.slice(beforeKept).find(r => r.path && r.path.includes('/images/generations'));
+    A.eq(keptCall && keptCall.authorization, 'Bearer page-saved-openai-key', 'the image keeps its OpenAI route once an OpenRouter key is saved too');
+    A.ok(!provider.requests.slice(beforeKept).some(r => Array.isArray(r.body.modalities) && r.body.modalities.includes('image')), 'the page-saved OpenRouter key is not spent while another image route exists');
+    A.eq((await engineKey({ provider: 'openai', key: '', baseUrl: '' })).status, 200, 'the page removes its OpenAI key');
+    const beforeBorrow = provider.requests.length;
+    const borrowed = await run(base, token, {
+      provider: 'custom', baseUrl: provider.baseUrl, key: 'custom-model-key', model: 'test/model',
+      agentId: 'image-page-key', isTask: true, placed: ['studio'],
+      messages: [{ role: 'user', content: 'Generate an image of a blue cube' }]
+    });
+    A.ok(!borrowed.some(e => e.name === 'agent.run.error'), 'a page-saved OpenRouter key leaves no STUDIO blocker on a custom-model run');
+    A.ok(borrowed.some(e => e.name === 'agent.tool_result' && e.payload.callId === 'make_image' && e.payload.ok), 'image_generate runs on the page-saved station OpenRouter key');
+    const borrowCall = provider.requests.slice(beforeBorrow).find(r => Array.isArray(r.body.modalities) && r.body.modalities.includes('image'));
+    A.eq(borrowCall && borrowCall.authorization, 'Bearer page-saved-or-key', 'STUDIO used the page-saved OpenRouter key, never the custom model key');
+    A.eq(borrowed.filter(e => e.name === 'agent.run.end').pop().payload.reason, 'done', 'the borrowed-key image earns done');
+    // the web-search OpenRouter fallback sends the RUN's model: it stays armed only by the run's own OpenRouter key or the
+    // desktop / OPENROUTER_KEY one, never by a page-saved key on another provider's (or a StarNet-credits) run
+    A.ok(/const openrouterToolKey = providerId === 'openrouter' \? runKey : runtimeKey;/.test(fs.readFileSync(INDEX, 'utf8')), 'the web-search OpenRouter fallback never borrows the page-saved key');
   } finally {
     try { child.kill(); } catch (_) {}
     await new Promise(resolve => provider.server.close(resolve));

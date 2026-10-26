@@ -4,3 +4,5 @@ website/skills/** -text
 # Community maps: the gallery pins each build and picture by sha256, and the build re-checks the sources byte for byte.
 website/maps/** -text
 maps-catalog/** -text
+# The sh launcher of the `starnet` command: a CR breaks sh (macOS, Linux, Git Bash on Windows), whatever core.autocrlf says.
+bin/starnet text eol=lf

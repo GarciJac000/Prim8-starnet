@@ -275,19 +275,33 @@ function boot(port, workspaces, attemptsLeft, extraEnv) {
     try { child.kill(); } catch (_) {} await sleep(250);
     fs.writeFileSync(HALT_FILE, JSON.stringify({ version: 1, halted: false }));
     fs.writeFileSync(path.join(ws, 'cron.armed.json'), JSON.stringify({ version: 1, armed: true }));
+    // Beside it, a routine the Commander PAUSED that still holds an undelivered result (a 0.13.5 digest that kept
+    // failing 'message is too long', paused by hand): cron-store holds it until resume, so it is no background work.
     fs.writeFileSync(path.join(ws, 'cron.jobs.json'), JSON.stringify({ version: 1, jobs: [{
       id: 'pending-result', enabled: false, state: 'completed', agentId: 'agent',
       schedule: { kind: 'once', runAt: new Date().toISOString() },
       finalization: { runId: 'completed-run', state: 'pending', deliver: 'local', nextAttemptAt: new Date(Date.now() + 3600000).toISOString() }
+    }, {
+      id: 'paused-held', name: 'Paused digest', prompt: 'summarize the news', enabled: false, state: 'paused', disabledReason: 'paused', agentId: 'agent',
+      schedule: { kind: 'cron', expr: '0 9 * * *' },
+      finalization: { runId: 'paused-run', state: 'pending', deliver: 'local', nextAttemptAt: new Date(Date.now() - 60000).toISOString() }
     }] }));
     booted = await boot(port + 100, ws, 20, { SKYNET_CRON_TICK_MS: '300' });
     child = booted.child; port = booted.port; getOut = booted.out;
     apiToken = await bootToken(B(), B());
     const pendingLife = await j('GET', '/api/lifecycle/armed');
     A.eq(pendingLife.body.categories.routines.armed, true, 'pending delivery keeps an armed ticker alive after execution completes');
-    A.eq(pendingLife.body.categories.routines.count, 1, 'pending result is counted once as background work');
+    A.eq(pendingLife.body.categories.routines.count, 1, 'pending result is counted once as background work; a paused routine\'s held result is not counted');
+    const heldJob = ((await j('GET', '/api/cron')).body.jobs || []).find(x => x && x.id === 'paused-held');
+    A.eq(heldJob && heldJob.finalization && heldJob.finalization.state, 'pending', 'fixture: the paused routine still holds its undelivered result (held, not delivered)');
     await j('POST', '/api/cron/arm', { enabled: false });
     A.eq((await j('GET', '/api/lifecycle/armed')).body.categories.routines.armed, false, 'explicit scheduler disarm still permits exit with a retained receipt');
+    await j('POST', '/api/cron/arm', { enabled: true });
+    A.eq((await j('POST', '/api/cron/remove', { id: 'pending-result' })).status, 200, 'remove the completed routine, leaving only the paused one');
+    const heldLife = await j('GET', '/api/lifecycle/armed');
+    A.eq(heldLife.body.categories.routines.count, 0, 'a paused routine with an undelivered result is not counted as armed');
+    A.eq(heldLife.body.armed, false, 'only a paused routine (its result held until resume) does not keep the desktop resident');
+    A.eq(heldLife.body.reasons, [], 'a paused routine\'s held result leaves no "1 routine armed" tray reason');
   } finally {
     try { child.kill(); } catch (_) {}
     await sleep(150);

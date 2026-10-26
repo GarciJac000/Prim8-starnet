@@ -10,7 +10,7 @@
    real screen. Solid ink so there's never a flash of the wrong screen (the old #screen-connect .active
    bug); reuses the phosphor vars so it matches whatever theme is about to load. */
 #screen-boot { background: var(--ink); align-items: center; justify-content: center; }
-.boot-veil { text-align: center; opacity: .82; animation: boot-fade 2.4s ease-in-out infinite; }
+.boot-veil { text-align: center; opacity: .82; animation: boot-fade 2.4s steps(9, jump-none) infinite; }
 .boot-mark { color: var(--ph-bright); font-size: 30px; letter-spacing: 8px; text-shadow: 0 0 14px var(--ph-glow), 0 0 3px var(--ph-glow); }
 .boot-line { color: var(--ph-dim); font-size: 14px; letter-spacing: 3px; text-transform: uppercase; margin-top: 12px; }
 .boot-dots::after { content: '…'; animation: cc-blink 1.1s steps(1) infinite; }
@@ -292,7 +292,7 @@ input[type=file]::file-selector-button:hover { border-color: var(--ph); backgrou
     repeating-linear-gradient(90deg, rgba(var(--ph-rgb),.30) 0 1px, transparent 1px 64px),
     repeating-linear-gradient(0deg, rgba(var(--ph-rgb),.30) 0 1px, transparent 1px 56px);
   box-shadow: inset 0 0 120px rgba(0,0,0,.75);
-  animation: sp-scroll 9s linear infinite;
+  animation: sp-scroll 9s steps(56, jump-end) infinite;
 }
 @keyframes sp-scroll { from { background-position: 0 0, 0 0; } to { background-position: 0 0, 0 56px; } }
 @media (prefers-reduced-motion: reduce) { .sp-grid { animation: none; } }
@@ -305,7 +305,7 @@ input[type=file]::file-selector-button:hover { border-color: var(--ph); backgrou
 .sp-logo {
   width: min(58vw, 640px); height: auto; image-rendering: auto; user-select: none;
   filter: drop-shadow(0 0 18px var(--ph-glow)) drop-shadow(0 0 60px var(--ph-glow2));
-  animation: sp-breathe 4.2s ease-in-out infinite;
+  animation: sp-breathe 4.2s steps(9, jump-none) infinite;
 }
 @keyframes sp-breathe {
   0%, 100% { filter: drop-shadow(0 0 18px var(--ph-glow)) drop-shadow(0 0 60px var(--ph-glow2)); }
@@ -1701,7 +1701,7 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 /* mic HOT = the held selection block in red: solid inverted --bad with a breathing bloom */
 .mic-btn.rec {
   color: var(--ink); background: var(--bad);
-  animation: mic-pulse 1s infinite;
+  animation: mic-pulse 1s steps(8, jump-none) infinite;
 }
 .mic-btn.rec svg { filter: none; }
 @keyframes mic-pulse { 0%,100% { box-shadow: 0 0 4px var(--bad); } 50% { box-shadow: 0 0 16px var(--bad); } }
@@ -1717,7 +1717,7 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 }
 .voice-toggle.off:hover svg { filter: none; }
 /* agent-voice speaking: amber glow pulse on the chip */
-.voice-toggle.speaking { animation: chip-spk .8s infinite; }
+.voice-toggle.speaking { animation: chip-spk .8s steps(6, jump-none) infinite; }
 .voice-live[aria-pressed="true"] { color: var(--ink); background: var(--ph); box-shadow: 0 0 16px var(--ph-glow); }
 .voice-live[aria-pressed="true"] svg { filter: none; }
 
@@ -1807,7 +1807,7 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 .lv-pip {
   flex: 0 0 auto; width: 5px; height: 5px;
   background: var(--lv-accent); box-shadow: 0 0 6px var(--lv-accent);
-  animation: lv-pip 1.3s infinite;
+  animation: lv-pip 1.3s steps(8, jump-none) infinite;
 }
 @keyframes lv-pip { 0%, 100% { opacity: 1; } 50% { opacity: .28; } }
 /* the state WORD is gone from the resting module (Andrew, 2026-07-29). It was the widest thing in
@@ -1897,7 +1897,7 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
   content: ''; position: absolute; inset: 0; width: 45%;
   pointer-events: none;
   background: linear-gradient(90deg, transparent, var(--ph-glow2), transparent);
-  animation: lv-sweep 1.6s var(--ease-soft) infinite;
+  animation: lv-sweep 1.6s steps(16, jump-none) infinite;
 }
 @keyframes lv-sweep {
   from { transform: translateX(-100%); }
@@ -2473,7 +2473,7 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
   color: var(--link-down); border-color: rgba(255,80,60,0.6);
   text-shadow: 0 0 6px rgba(255,80,60,0.9);
   box-shadow: 0 0 12px rgba(255,80,60,0.35), inset 0 0 10px rgba(0,0,0,0.6);
-  animation: pill-down-breathe 2.2s ease-in-out infinite;
+  animation: pill-down-breathe 2.2s steps(9, jump-none) infinite;
 }
 @keyframes pill-down-breathe { 0%,100% { opacity: 0.62; } 50% { opacity: 1; } }
 /* STANDBY: the bridge isn't proven up yet — a dim, neutral pill (never the confident ONLINE green). */
@@ -2516,7 +2516,7 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
   min-width: 16px; padding: 0 4px; border-radius: 8px; flex: 0 0 auto;
   font-size: 11px; line-height: 15px; letter-spacing: 0; text-align: center;
   color: var(--ink); background: var(--warn); text-shadow: none;
-  box-shadow: 0 0 8px var(--warn); animation: bb-alert 1.4s ease-in-out infinite;
+  box-shadow: 0 0 8px var(--warn); animation: bb-alert 1.4s steps(8, jump-none) infinite;
 }
 .bb-group.open .bb-grp-badge { animation: none; box-shadow: none; }
 @keyframes bb-alert { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
@@ -2657,7 +2657,7 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
 .kb-state.running { color: var(--ph-bright); }
 .kb-state.done { color: var(--gold); }
 .kb-state.failed { color: var(--bad); }
-.kb-live { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--ph-bright); animation: wsPulse 1.15s ease-in-out infinite; }
+.kb-live { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--ph-bright); animation: wsPulse 1.15s steps(8, jump-none) infinite; }
 
 /* SKILLS — honest capability readout (reuses v7 .perk-grid/.perk) */
 .term.skills-term { max-height: var(--term-band, calc(100vh * var(--sn-unzoom, 1) - 96px)); }
@@ -2985,7 +2985,7 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
 .ws-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--ph-dim); }
 .ws-dot.seen { background: var(--ph-dim); box-shadow: none; }
 .ws-dot.unseen { background: var(--gold); box-shadow: 0 0 7px rgba(var(--gold-rgb), .6); }
-.ws-dot.working { background: var(--ph-bright); animation: wsPulse 1.15s ease-in-out infinite; }
+.ws-dot.working { background: var(--ph-bright); animation: wsPulse 1.15s steps(8, jump-none) infinite; }
 /* NEEDS YOU gets its own RHYTHM, not just its own colour — faster, and dipping harder. The six
    preset themes separate --gold from --ph-bright by ΔE 38-57, so colour alone would do there; the
    CUSTOM theme does not. Its --gold is the base hue rotated +42°, and hue is meaningless at low
@@ -2994,7 +2994,7 @@ body:not(.no-flicker) #screen-game.active.flick-dip { animation: flick-dip 280ms
    telling "the agent is working" from "it is blocked on you" would be a small lightness step.
    Rhythm survives every palette, and this is the one state on a fail-closed deny timer — so the
    more urgent beat is honest rather than decorative. */
-.ws-dot.needsyou { background: var(--gold); animation: wsPulseUrgent .72s ease-in-out infinite; }
+.ws-dot.needsyou { background: var(--gold); animation: wsPulseUrgent .72s steps(6, jump-none) infinite; }
 .ws-dot.connecting { background: transparent; border: 1px dashed var(--ph-dim); animation: none; }
 .ws-dot.failed { background: var(--bad); animation: none; box-shadow: none; }
 @keyframes wsPulseUrgent {
@@ -3367,7 +3367,7 @@ body:not(.rows-inbox) #workstreams .ws-row.attn:not(.renaming):has(> .ws-agent-g
 .chat-elapsed > .ce-num { min-width: 30px; text-align: right; }
 .chat-elapsed::before {
   content: ''; width: 5px; height: 5px; border-radius: 50%; background: var(--ink);
-  animation: chat-elapsed-pulse 1.1s ease-in-out infinite;
+  animation: chat-elapsed-pulse 1.1s steps(8, jump-none) infinite;
 }
 @keyframes chat-elapsed-pulse { 0%, 100% { opacity: .3; transform: scale(.82); } 50% { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .chat-elapsed::before { animation: none; opacity: .8; } }
@@ -3399,7 +3399,7 @@ body:not(.rows-inbox) #workstreams .ws-row.attn:not(.renaming):has(> .ws-agent-g
 .ag-psweep {
   position: absolute; left: 0; right: 0; height: 20px; z-index: 2; pointer-events: none;
   background: linear-gradient(180deg, transparent, rgba(255, 205, 130, 0.16), transparent);
-  animation: ag-psweep 2.8s linear infinite;
+  animation: ag-psweep 2.8s steps(23, jump-none) infinite;
 }
 @keyframes ag-psweep { 0% { top: -20px; } 100% { top: 112px; } }
 .ag-info { flex: 1; min-width: 0; }
@@ -3415,10 +3415,10 @@ body:not(.rows-inbox) #workstreams .ws-row.attn:not(.renaming):has(> .ws-agent-g
   background: var(--ph-dim); flex: none;
 }
 .ag-sdot.on { background: var(--ok); box-shadow: 0 0 5px rgba(123,200,138,.55); }
-.ag-sdot.working { background: var(--gold); box-shadow: 0 0 7px rgba(var(--gold-rgb),.7); animation: sdot-pulse 1.1s infinite; }
-.ag-sdot.thinking { background: var(--ph-bright); box-shadow: 0 0 6px var(--ph-glow); animation: sdot-pulse .7s infinite; }
+.ag-sdot.working { background: var(--gold); box-shadow: 0 0 7px rgba(var(--gold-rgb),.7); animation: sdot-pulse 1.1s steps(8, jump-none) infinite; }
+.ag-sdot.thinking { background: var(--ph-bright); box-shadow: 0 0 6px var(--ph-glow); animation: sdot-pulse .7s steps(6, jump-none) infinite; }
 /* E2: link down → OFFLINE dot, red-phosphor breathing, matching the canvas LINK DOWN marker */
-.ag-sdot.down { background: var(--link-down); box-shadow: 0 0 6px rgba(255,80,60,.75); animation: sdot-pulse 2.2s infinite; }
+.ag-sdot.down { background: var(--link-down); box-shadow: 0 0 6px rgba(255,80,60,.75); animation: sdot-pulse 2.2s steps(9, jump-none) infinite; }
 @keyframes sdot-pulse { 0%,100%{ opacity:1; } 50%{ opacity:.3; } }
 
 /* 3-cell RPG stat grid */
@@ -4499,7 +4499,7 @@ body.crew-rail-off #screen-game.active {
 /* a brief attention pulse (undo button after a reclaim; dock button on first run) */
 @keyframes refit-pulse { 0%,100% { box-shadow: 0 0 0 0 var(--ph-glow2); } 50% { box-shadow: 0 0 0 3px var(--ph), 0 0 16px var(--ph-glow); } }
 .bb.pulse { animation: refit-pulse .45s ease-in-out 0 2; }
-#bb-build.refit-nudge { color: var(--ph-bright); animation: refit-pulse 2s ease-in-out infinite; }
+#bb-build.refit-nudge { color: var(--ph-bright); animation: refit-pulse 2s steps(9, jump-none) infinite; }
 
 /* first-use guide card */
 .station-build-box { box-sizing: border-box; width: min(850px, calc(94vw / var(--station-build-scale, 1))); max-height: calc(88vh / var(--station-build-scale, 1)); overflow: auto; padding: 22px; background: var(--panel); border: 1px solid var(--ph); color: var(--text); }
@@ -5239,7 +5239,7 @@ select.fbc-sel:focus { border-color: var(--ph); box-shadow: inset 0 2px 5px rgba
   color: var(--link-down); background: rgba(0,0,0,0.92);
   border: 1px solid rgba(255,80,60,0.7); border-radius: var(--r-sm);
   box-shadow: 0 0 14px rgba(255,80,60,0.35);
-  animation: unsaved-pulse 1.1s ease-in-out infinite;
+  animation: unsaved-pulse 1.1s steps(8, jump-none) infinite;
 }
 @keyframes unsaved-pulse { 0%,100% { opacity: 0.72; } 50% { opacity: 1; } }
 

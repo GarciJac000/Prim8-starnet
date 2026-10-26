@@ -292,11 +292,29 @@
       const ac = new AbortController();
       // lastProgressAt/openTools are in-memory liveness state for THIS generation only (checkStalls): a restart
       // already stales every running record in load(), so nothing here needs to be durable.
-      controllers.set(rec.id, { ac: ac, generation: rec.generation, lastProgressAt: now(), openTools: new Set() });
+      controllers.set(rec.id, { ac: ac, generation: rec.generation, lastProgressAt: now(), openTools: new Set(), holds: 0, heldSince: 0 });
       const runEmit = function (name, payload) {
         noteProgress(rec.id, rec.generation, name, payload);
         appendEvent(rec.id, name, payload);
         try { emit(name, payload); } catch (_) {}
+      };
+      /* A CALL HELD BY THE RUN'S SPEND POOL IS NOT A STALL (bug d3a76db3, review of 8f4267c08). The PER RUN pool
+         (run-spend-pool.js) makes a worker's call WAIT while the calls in flight leave no room under the shared cap, and
+         a held worker emits nothing: the sweep below stopped clones and background workers as "stalled" while a fellow's
+         long call ran, in a family well under its cap. The runner reports each hold (orchestration.js, through the
+         pool's watchHolds): while one is open the stall clock is stopped, and on release it resumes where it stopped —
+         a held stretch is neither progress nor silence. Every hold waits on a call that IS in flight, which its own run's
+         liveness and the provider's idle watchdog bound, so a hold always ends. */
+      const ownControl = function () { const c = controllers.get(rec.id); return c && c.generation === rec.generation ? c : null; };
+      const holdStall = function () {
+        const c = ownControl();
+        if (c && c.holds++ === 0) c.heldSince = now();
+      };
+      const releaseStall = function () {
+        const c = ownControl();
+        if (!c || c.holds === 0 || --c.holds > 0) return;
+        const t = now();
+        c.lastProgressAt = Math.min(t, (Number(c.lastProgressAt) || 0) + Math.max(0, t - c.heldSince));
       };
       /* HOOKS — subagent_stop. Fired on BOTH settle paths below, because "a delegated worker finished" is
          true whether it succeeded or died, and a hook that only hears about successes is a hook that cannot
@@ -321,7 +339,8 @@
       };
       Promise.resolve().then(function () {
         return runner({ id: rec.id, runId: rec.runId, signal: ac.signal, emit: runEmit, record: view(rec),
-          generation: rec.generation, steer: function () { return drainSteer(rec.id, rec.generation); } });
+          generation: rec.generation, steer: function () { return drainSteer(rec.id, rec.generation); },
+          holdStall: holdStall, releaseStall: releaseStall });
       }).then(function (result) {
         const owned = controllers.get(rec.id);
         if (owned && owned.generation === rec.generation) controllers.delete(rec.id);
@@ -504,6 +523,7 @@
         const i = findIndex(id);
         const r = i >= 0 ? records[i] : null;
         if (!r || r.status !== 'running' || r.generation !== control.generation) continue;
+        if (control.holds > 0) continue;   // its call is waiting for room in the run's spend pool (holdStall above)
         const inTool = !!(control.openTools && control.openTools.size);
         const limit = inTool ? inToolStallMs : stallMs;
         const quiet = Math.max(0, t - (Number(control.lastProgressAt) || 0));

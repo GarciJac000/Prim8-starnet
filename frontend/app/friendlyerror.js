@@ -92,7 +92,7 @@
        The copy names the meter that was actually spent — the ChatGPT subscription, NOT API billing — and the
        door is PROVIDERS, where a different key or provider can pick the work up now. retryable:false, so the
        row offers no ↻ Try again. */
-    quota_exhausted: { retryable: false, action: 'settings', msg: "This provider's plan allowance is used up — it resets on the provider's own schedule (a ChatGPT subscription resets weekly, not in seconds). To keep working now, switch to another provider or key under SETTINGS → AI & MODELS." },
+    quota_exhausted: { retryable: false, action: 'settings', msg: "This provider's plan allowance is used up — it resets on the provider's own schedule (a ChatGPT plan's short window comes back within hours, its weekly one within a week — not in seconds). To keep working now, switch to another provider or key under SETTINGS → AI & MODELS." },
     // auth: the pure message is context-blind (classify time can't know if ChatGPT is already connected). It names the
     // one honest next step; the action BUTTON (actionButton) tailors the door — "add a key" vs "sign in with ChatGPT".
     auth:          { retryable: false, action: 'settings', msg: 'No model is connected yet — add a provider key (or sign in with ChatGPT) to let it run.' },
@@ -197,12 +197,21 @@
      quota verdict on one is a spent plan allowance that resets on the provider's own schedule: never "out of credit — top
      it up" (there is no balance to top up). */
   const SUBSCRIPTION_IDS = ['codex', 'grok', 'kimi'];
-  function quotaMessage(provider) {
+  /* bug 06331054: a ChatGPT plan has a short rolling window (hours) AND a weekly one, so "resets weekly" sent a user whose
+     short window was spent away for days. Name both, and quote the provider's own reset time when the error carries one
+     ("Resets in 3 days", "try again in 4h 12m") — only its numbers and units, never other words from the error. */
+  function quotaResetIn(raw) {
+    const m = String(raw || '').match(/\b(?:resets?|try again) in\s+((?:\d+(?:\.\d+)?\s*(?:weeks?|w|days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,]*(?:and\s+)?){1,4})/i);
+    return m ? m[1].replace(/[\s,]*(?:and\s*)?$/i, '').replace(/\s+/g, ' ').trim() : '';
+  }
+  function quotaMessage(provider, raw) {
     const nm = SUBSCRIPTION_IDS.indexOf(provider) >= 0 ? PROVIDER_PROSE[provider] : null;
-    if (!nm) return KINDS.quota_exhausted.msg;
+    const when = quotaResetIn(raw);
+    const said = when ? (nm || 'The provider') + ' says it resets in ' + when + '. ' : '';
+    if (!nm) return KINDS.quota_exhausted.msg.replace('To keep working now', said + 'To keep working now');
     return 'Your ' + nm + " plan allowance is used up — it resets on " + nm + "'s own schedule"
-      + (provider === 'codex' ? ' (a ChatGPT subscription resets weekly, not in seconds)' : ', not in seconds')
-      + '. To keep working now, switch to another provider or key under SETTINGS → AI & MODELS.';
+      + (provider === 'codex' ? ' (a few hours for the short window, up to a week for the weekly one)' : ', not in seconds')
+      + '. ' + said + 'To keep working now, switch to another provider or key under SETTINGS → AI & MODELS.';
   }
   function providerFromRaw(raw) {
     const low = String(raw || '').toLowerCase();
@@ -416,6 +425,22 @@
   const NO_CREDIT_RE = /(?:doesn'?t|does not) have any credits|purchase (?:more )?credits|used all (?:of )?(?:its |your )?available credits|(?:reached|exceeded|hit) (?:its |your |the |their )?(?:monthly )?spending limit|insufficient[_ ]?(?:credit|funds|balance)|out of credits?|credit balance is too low|key limit exceeded/;
   // mirrored from errorClass.js: an upstream region refusal is the model being unavailable here, not a bad key
   const REGION_REFUSAL_RE = /unsupported_country_region_territory|country,? region,? or territory not supported|not available in your (?:country|region)/;
+  /* mirrored from errorClass.js (IMAGE_INPUT_REFUSED_RE) — keep the two in step: an image sent to a model that cannot see
+     it (OpenRouter 404 "No endpoints found that support image input", 2026-10-23). Not "that model isn't available":
+     the model is fine, the image is what it refused, and a vision model is the fix. OpenAI's own text-only models say
+     "image_url is only supported by certain models" (400). */
+  const IMAGE_INPUT_RE = /no endpoints found that support image input|(?:does not|doesn'?t|cannot|can'?t) (?:support|accept|take|handle) (?:image|vision)|image input (?:is )?(?:not supported|unsupported)|(?:images?|vision) (?:input )?(?:is |are )?not supported (?:by|for|on) (?:this|the) model|unknown variant `image_url`|image_url is only supported by certain models/;
+  const IMAGE_INPUT_MSG = "This model can't see images — pick a vision model from the model dock in COMMS, then send again.";
+  /* mirrored from errorClass.js (namesUpstream): a 403 that names the UPSTREAM provider ("[…; provider xAI]" from the
+     openai-compatible adapter, or OpenRouter's "Provider returned error") is that provider refusing this request — the
+     router accepted our key (a rejected key is a 401 naming nobody). xai-403-1023. */
+  const UPSTREAM_NAMED_RE = /provider returned error|[\[;] ?provider [^\];]+\]/;
+  // the upstream's name as the adapter's own allowlisted fact carries it — a plain brand name or nothing
+  function upstreamName(raw) {
+    const m = String(raw || '').match(/[\[;] ?provider ([^\];]+)\]/i);
+    const nm = m ? m[1].trim() : '';
+    return /^[A-Za-z0-9][A-Za-z0-9 .()-]{0,39}$/.test(nm) ? nm : '';
+  }
   // a provider adapter's own failure sentence ("openrouter http 403 — …", "openai-compatible http 403 - …")
   const PROVIDER_HTTP_RE = /\b(?:openrouter|anthropic|gemini|codex|openai-compatible|grok \(xai\)|kimi for coding|xai) http \d{3}\b/;
   // the ONE sentence both classifier paths use for "no model is picked": the sidecar guard and the page preflight
@@ -468,12 +493,15 @@
     if (/content[ _]?policy|moderation|flagged|safety|content_filter/.test(low)) return 'content_policy_blocked';
     // HTTP status from "sidecar HTTP <status>" or an explicit status arg
     const s = status || (low.match(/\b(?:http|status)\s+(\d{3})\b/) ? Number(RegExp.$1) : null);
+    // an image refused by a model that cannot see it, whatever status carried it (errorClass.js reads it the same way)
+    if (IMAGE_INPUT_RE.test(low) && s !== 401 && !(s === 429 || s === 408 || (s >= 500 && s < 600))) return 'model_not_found';
     if (s) {
       // OUR OWN sidecar's token gate (crash+respawn → stale X-StarNet-Token): a "sidecar HTTP 403" throw or a
       // "forbidden token/origin/host" body means reload for the fresh boot token — never the provider-key door.
       // …but a PROVIDER's own "Forbidden" (its adapter label names it) is the provider's refusal, never this page's token
       if (s === 403 && (/sidecar http/.test(low) || (/\bforbidden\b/.test(low) && !PROVIDER_HTTP_RE.test(low)))) return 'stale_session';
       if (s === 403 && REGION_REFUSAL_RE.test(low)) return 'model_not_found';
+      if (s === 403 && !NO_CREDIT_RE.test(low) && UPSTREAM_NAMED_RE.test(low)) return 'model_not_found';
       if (s === 401 || s === 403) return NO_CREDIT_RE.test(low) ? 'billing' : 'auth';
       if (s === 402) return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
       if (s === 404) return 'model_not_found';
@@ -710,6 +738,19 @@
       }
       return { userMessage: userMessage, kind: kind, retryable: k.retryable, action: k.action, provider: providerFromRaw(raw), raw: raw };
     }
+    /* an UPSTREAM provider's 403 (xai-403-1023): the router (StarNet Cloud or OpenRouter) passed the request on, so the
+       account and credits checks were met, and the provider behind it refused this request (xAI's safety check answers
+       this way; the managed proxy keeps no reason). Say exactly that, never "your key" (a StarNet-credits user has
+       none) — the model dock door stays (another model may answer); a region refusal keeps the model-unavailable copy. */
+    if (kind === 'model_not_found') {
+      const low = raw.toLowerCase();
+      if (/\bhttp 403\b/.test(low) && UPSTREAM_NAMED_RE.test(low) && !REGION_REFUSAL_RE.test(low)) {
+        const who = upstreamName(raw);
+        const userMessage = (who ? who + ', the provider serving this model,' : 'The provider serving this model')
+          + ' refused this request (HTTP 403), so the model did not answer. This is not a problem with your account or credits. Try rephrasing it, or pick a different model from the model dock in COMMS.';
+        return { userMessage: userMessage, kind: kind, retryable: k.retryable, action: k.action, raw: raw };
+      }
+    }
     // billing: name the account that is out of credit when the error proves which provider it was (org P03) — a wallet
     // provider only: a sign-in subscription was turned into quota_exhausted above
     if (kind === 'billing') {
@@ -727,7 +768,7 @@
       // OpenRouter's free-model daily cap is not a plan: the levers are a paid model, credits, or tomorrow
       const msg = DAILY_FREE_CAP_RE.test(raw.toLowerCase())
         ? "OpenRouter's daily limit for free models is used up — it resets tomorrow (UTC), not in seconds. To keep working now, pick a paid model in the COMMS model dock, or add credits on OpenRouter to raise the free limit."
-        : quotaMessage(provider);
+        : quotaMessage(provider, raw);
       return { userMessage: msg, kind: kind, retryable: k.retryable, action: k.action, provider: provider, raw: raw };
     }
     if (kind === 'spend_unknown') {
@@ -739,6 +780,10 @@
     // arm COMMS's reconnect watch. An unmarked text keeps the network copy but never claims the connection was lost.
     if (kind === 'network') {
       return { userMessage: transportMessage(engineAlive), kind: kind, retryable: k.retryable, action: k.action, raw: raw, engineAlive: engineAlive, transport: transport };
+    }
+    // the model refused an IMAGE, not the request: say so, and the same model-dock door picks a vision model
+    if (kind === 'model_not_found' && IMAGE_INPUT_RE.test(raw.toLowerCase())) {
+      return { userMessage: IMAGE_INPUT_MSG, kind: kind, retryable: k.retryable, action: k.action, raw: raw };
     }
     return { userMessage: k.msg, kind: kind, retryable: k.retryable, action: k.action, raw: raw };
   }
