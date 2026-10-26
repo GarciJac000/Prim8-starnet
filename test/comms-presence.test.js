@@ -118,12 +118,14 @@ A.ok(/hydrateRunTelemetry\(ws,\s*entry,\s*runId\)[\s\S]{0,300}if\s*\(!arts\.leng
   // the glass layer's register for the steps and the footer (pipglass.css)
   const pip = fs.readFileSync(path.join(__dirname, '../frontend/css/pipglass.css'), 'utf8');
   const steps = pip.slice(pip.indexOf('PIP-BOY COMMS STEPS'));
-  A.ok(pip.indexOf('PIP-BOY COMMS STEPS') > 0 && /\.tool-chip \.tc-head \{[^}]*font-size: var\(--sn-type-meta\);/.test(steps), 'a step row reads at the floor, 16px (its head was 12.5px, its time 11px, then 15)');
+  // QUIET AGAIN (Andrew 10-25): the machinery sits below the 18px speech — dim phosphor, lowercase, never the bright caps opcode
+  A.ok(pip.indexOf('PIP-BOY COMMS STEPS') > 0 && /\.tool-chip \.tc-head \{[^}]*font-size: 14px;[^}]*color: var\(--ph-dim\);/.test(steps), 'a step row is quiet: 14px dim phosphor (16px bright caps read as loud as the reply)');
+  A.ok(/\.tool-chip \.tc-name \{[^}]*text-transform: none;/.test(steps) && !/\.tool-chip \.tc-name \{[^}]*--ph-bright/.test(steps), 'the tool name is plain lowercase phosphor, not a bright caps opcode');
   A.ok(/\.tool-chip \.tc-glyph \{[^}]*animation: none;/.test(steps), 'a running step\'s glyph is steady (the working line\'s meter says the run is live)');
   A.ok(/\.tool-chip\.held :is\(\.tc-glyph, \.tc-stat\) \{ color: var\(--ph-dim\); \}/.test(steps), 'a held step stays plain dim phosphor over the brighter step text');
   A.ok(/\.tool-chip \.tc-exp \{[^}]*font-size: 0;[^}]*border-right: 2px solid/.test(steps) && /\.comms-presence\.resolved \.cp-chev \{[^}]*font-size: 0;[^}]*border-right: 2px solid currentColor;/.test(steps),
     '"open me" is a drawn caret on the step and on the footer, never the ▸ a running step starts with');
-  A.ok(/\.comms-presence\.resolved \{\s*font-size: var\(--sn-type-meta\);[^}]*opacity: \.9;/.test(steps), 'RUN COMPLETE stays the quiet footer but legible, at the floor (was 14px at half opacity, then 15)');
+  A.ok(/\.comms-presence\.resolved \{\s*font-size: 14px;[^}]*opacity: \.5;/.test(steps), 'RUN COMPLETE is the quiet footer again: 14px at half strength (0.13.5), bright only on hover or open');
 }
 
 A.report('comms-presence.test');
