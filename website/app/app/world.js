@@ -8491,6 +8491,33 @@ const World = (() => {
     }
     return best ? String(best.title) : '';
   }
+  // the plate speaks in the STATION's phosphor (Andrew's hue 216 = the same blue as every desk screen), not a fixed
+  // green/amber that belongs to no theme. Read off <body> (stationui writes --ph-rgb / --ph-bright-rgb there).
+  let plateInk = null, plateInkAt = -1e9;
+  function plateTheme(now) {
+    if (plateInk && now - plateInkAt < 1000) return plateInk;
+    plateInkAt = now;
+    let ph = [154, 220, 176], br = [214, 245, 226];
+    try {
+      const cs = getComputedStyle(document.body);
+      const p = String(cs.getPropertyValue('--ph-rgb') || '').split(',').map(Number), q = String(cs.getPropertyValue('--ph-bright-rgb') || '').split(',').map(Number);
+      if (p.length >= 3 && p.every(isFinite)) ph = p.slice(0, 3);
+      if (q.length >= 3 && q.every(isFinite)) br = q.slice(0, 3);
+    } catch (e) { plateInk = plateInk || null; }
+    const rgba = (c, a) => 'rgba(' + c.join(',') + ',' + a + ')';
+    plateInk = { ph: rgba(ph, 1), dim: rgba(ph, 0.62), faint: rgba(ph, 0.35), bright: rgba(br, 0.95), glow: rgba(ph, 0.9) };
+    return plateInk;
+  }
+  // word-wrap to at most n lines of w monospace chars; the last line keeps the overflow (fadeText fades it)
+  function wrapChars(t, w, n) {
+    const out = []; let line = '';
+    for (const word of String(t).split(' ')) {
+      if (out.length === n - 1) { line = line ? line + ' ' + word : word; continue; }
+      if ((line ? line.length + 1 : 0) + word.length > w && line) { out.push(line); line = word; } else line = line ? line + ' ' + word : word;
+    }
+    if (line) out.push(line);
+    return out.slice(0, n);
+  }
   // VT323's "…" is a flat bar: a line that runs out of room FADES its last glyphs instead (one VT323 advance each)
   function fadeText(t, x, y, maxW, cw) {
     const n = Math.floor(maxW / cw);
@@ -8519,7 +8546,9 @@ const World = (() => {
       const task = String(k.task || '').replace(/\s+/g, ' ').trim();
       const caret = k.live && Math.floor(now / 420) % 2 ? '_' : '';
       const what = k.name ? (k.live ? '> ' : '. ') + tickerTool(k.name).toLowerCase() + (k.target ? ' ' + k.target : '') : '. thinking';
-      const rows = task ? 3 : 2;
+      // the task gets up to TWO lines — "a small description of what it's doing", not one clipped line
+      const taskLines = task ? wrapChars(task, ACT_PLATE_W, 2) : [];
+      const rows = 1 + taskLines.length + 1;
       ctx.save();
       ctx.font = ACT_PLATE_FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
       const cw = ctx.measureText('M').width, PAD = 2, w = cw * ACT_PLATE_W + PAD * 2, LH = 6;
@@ -8536,8 +8565,8 @@ const World = (() => {
       const atDesk = !!(dp && Math.abs(hx - (dp.x + (dp.w || 1) / 2) * T) < T * 2.5 && Math.abs(bodyPosY(b) - (dp.y + (dp.h || 1)) * T) < T * 2.5);
       let x = clampX(hx - w / 2), y = Math.max(vy0, top - LH * rows), side = 0, found = false;
       if (atDesk) {
-        const midY = Math.round((dp.y + (dp.h || 1)) * T - H / 2);   // the desk's front edge = the seated worker's shoulders
-        for (const [sd, sx0] of [[1, (dp.x + (dp.w || 1)) * T + 4], [-1, dp.x * T - w - 4]]) {
+        const midY = Math.round(dp.y * T - 4);   // top-aligned with the desk's monitor, so the plate reads as the desk's own readout
+        for (const [sd, sx0] of [[1, (dp.x + (dp.w || 1)) * T + 3], [-1, dp.x * T - w - 3]]) {
           if (sx0 < vx0 - 0.5 || sx0 > vx1 + 0.5) continue;
           for (const dy of [0, -H - 1, H + 1]) if (!hits(sx0, midY + dy)) { x = Math.round(sx0); y = midY + dy; side = sd; found = true; break; }
           if (found) break;
@@ -8549,27 +8578,31 @@ const World = (() => {
       placed.push({ x, y, w, h: H });
       if (linkStaleDim) ctx.globalAlpha = 0.3;   // link down → last-known, not live
       const a0 = ctx.globalAlpha;
-      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = '#9adcb0';
+      const ink = plateTheme(now), suit = b.color || ink.ph, HH = LH * rows + 2;
+      ctx.globalAlpha = a0 * 0.55; ctx.fillStyle = ink.ph;
       if (side) {   // beside a desk: a short tick from the plate's inner edge to the desk
-        const ty = Math.round(y + H / 2), ex = side > 0 ? x - 4 : x + w + 1;
-        ctx.fillRect(ex, ty, 3, 0.6);
+        const ty = Math.round(y + LH / 2 + 1), ex = side > 0 ? x - 3 : x + w + 1;
+        ctx.fillRect(ex, ty, 2, 0.6);
       } else {      // above a body: a stem down to the head
         const sx = Math.round(Math.max(x + 2, Math.min(x + w - 2, hx)));
         ctx.fillRect(sx, y + LH * rows + 1, 0.6, Math.max(0, top + 2 - (y + LH * rows + 1)));
       }
-      ctx.globalAlpha = a0 * 0.78; ctx.fillStyle = '#05080a'; ctx.fillRect(x - 1, y - 1, w + 2, LH * rows + 2);
-      ctx.globalAlpha = a0;
-      // a thin matte frame (no dash runs), then: lamp + NAME ............ clock · cost / task / > tool
-      ctx.globalAlpha = a0 * 0.4; ctx.strokeStyle = '#9adcb0'; ctx.lineWidth = 0.5; ctx.strokeRect(x - 0.75, y - 0.75, w + 1.5, LH * rows + 1.5);
+      // IDENTITY (picked 10-26): a dark, slightly see-through plate (the deck shows through, so it sits IN the room),
+      // the agent's suit colour as its edge and its name, a hairline under the name, the task in bright phosphor
+      ctx.globalAlpha = a0 * 0.72; ctx.fillStyle = '#04070b'; ctx.fillRect(x - 1, y - 1, w + 2, HH);
+      ctx.globalAlpha = a0 * 0.9; ctx.fillStyle = suit; ctx.fillRect(x - 1, y - 1, 0.75, HH);
+      ctx.globalAlpha = a0 * 0.3; ctx.fillStyle = ink.ph; ctx.fillRect(x + PAD, y + LH + 0.25, w - PAD * 2, 0.4);
       ctx.globalAlpha = a0;
       const base = y + LH - 1, tx = x + PAD + 4, inner = w - PAD * 2 - 4;
-      ctx.fillStyle = k.live ? '#9adcb0' : 'rgba(154,220,176,.55)'; ctx.fillRect(x + PAD, base - 3.5, 2, 2);   // the run lamp: lit on a live tool
-      ctx.shadowBlur = 2;
-      ctx.shadowColor = '#62ff9e'; ctx.fillStyle = 'rgba(154,220,176,.72)'; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
-      ctx.textAlign = 'left'; ctx.fillStyle = '#d6f5e2'; fadeText(nm, tx, base, inner - ctx.measureText(right).width - cw, cw);
+      ctx.fillStyle = k.live ? ink.bright : suit; ctx.fillRect(x + PAD, base - 3.5, 2, 2);   // the run lamp: lit on a live tool
+      ctx.shadowBlur = 2; ctx.shadowColor = ink.glow;
+      ctx.fillStyle = ink.dim; ctx.textAlign = 'right'; ctx.fillText(right, x + w - PAD, base);
+      ctx.textAlign = 'left'; ctx.shadowColor = suit; ctx.fillStyle = suit;
+      fadeText(nm, tx, base, inner - ctx.measureText(right).width - cw, cw);
       let ly = base + LH;
-      if (task) { ctx.shadowColor = '#62ff9e'; ctx.fillStyle = 'rgba(214,245,226,.86)'; fadeText(task, x + PAD, ly, w - PAD * 2, cw); ly += LH; }
-      ctx.shadowColor = '#ffae3a'; ctx.fillStyle = k.live ? '#ffc978' : 'rgba(255,201,120,.62)'; fadeText(what + caret, x + PAD, ly, w - PAD * 2, cw);
+      ctx.shadowColor = ink.glow;
+      for (const tl of taskLines) { ctx.fillStyle = ink.bright; fadeText(tl, x + PAD, ly, w - PAD * 2, cw); ly += LH; }
+      ctx.fillStyle = k.live ? ink.ph : ink.faint; fadeText(what + caret, x + PAD, ly, w - PAD * 2, cw);
       ctx.restore();
     }
   }
