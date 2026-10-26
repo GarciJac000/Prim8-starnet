@@ -4742,6 +4742,16 @@ body.crew-rail-off #screen-game.active {
 .mc-adv > summary::-webkit-details-marker { display: none; }
 .mc-adv > summary:hover { color: var(--ph); }
 .mc-adv[open] > summary { color: var(--ph); margin-bottom: 4px; }
+/* ONE FLAT LIST (UX night 10-26): CONNECTED's two "add your own" forms fold under their own lists; the closed line reads as
+   the action it opens, with the category folds' ＋ / − mark */
+.mc-add-fold { margin: 10px 0 6px; }
+.mc-add-fold > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--ph-dim); color: var(--ph); }
+.mc-add-fold > summary::-webkit-details-marker { display: none; }
+.mc-add-fold > summary::before { content: '＋'; color: var(--ph-dim); }
+.mc-add-fold[open] > summary::before { content: '−'; }
+.mc-add-fold > summary:hover { color: var(--ph-bright); border-color: var(--ph); }
+.mc-add-fold > summary:focus-visible { outline: 1px solid var(--ph-bright); outline-offset: 2px; }
+.mc-add-fold[open] > .mc-form { margin-top: 10px; }
 /* BUDGET panel — number-input phosphor styling (the base rule at top only covers text/password) + label→input row.
    Additive: new selectors only, on-theme via the same vars. */
 input[type=number].key-input {

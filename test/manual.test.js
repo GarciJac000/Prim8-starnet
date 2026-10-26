@@ -54,7 +54,7 @@ const { starnetManual } = require('../sidecar/manual.js');
         Bay/APPROVALS and NEVER the window where platforms are actually connected, so a model asked "how do I
         connect X" had nothing true to say and invented a menu path. These assertions pin the surfaces. */
   A.ok(/ABILITIES/.test(m), 'names the ABILITIES window (where platforms are connected)');
-  A.ok(/CATALOG/.test(m) && /SAVED API CONNECTIONS/.test(m) && /CONNECTED SERVICES/.test(m), 'names the three connect routes, by the tabs on screen');
+  A.ok(/\bAPPS\b/.test(m) && /CONNECTED › API KEYS/.test(m) && /CONNECTED, by address/.test(m), 'names the three connect routes, by the places on screen (ONE FLAT LIST 2026-10-26: APPS, CONNECTED › API KEYS, CONNECTED by address)');
   A.ok(/CHANNELS/.test(m), 'names the CHANNELS window (inbound messaging)');
   A.ok(/SETTINGS › AI & MODELS/.test(m), 'separates AI-provider keys from platform keys');
 

@@ -134,7 +134,9 @@ for (const o of [undefined, { cancelSource: 'estop_by_run' }]) {
 
 /* ---- org P05: "where do I paste my key?" has one answer per kind of key ----
    SETTINGS' tip and dock subtitle say what is actually in there; ABILITIES' own copy names its real tabs; AI & MODELS'
-   API KEYS points service keys at CONNECT › ABILITIES › SAVED API CONNECTIONS through the places.js target. */
+   API KEYS points service keys at CONNECT › ABILITIES › CONNECTED › API KEYS through the places.js target.
+   (UX night 2026-10-26, Andrew: CONNECT "more like the settings menu" — ONE flat list APPS / CONNECTED / SKILL MARKET /
+   SKILLS / TOOLS / EXTENSIONS; the old keys tab is the API KEYS block inside CONNECTED, reached by the same 'keys' section.) */
 {
   const rd = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   const sys = rd('frontend/app/systems.js'), idx = rd('frontend/index.html'), con = rd('frontend/app/windows/connectors.js');
@@ -143,26 +145,31 @@ for (const o of [undefined, { cancelSource: 'estop_by_run' }]) {
   A.ok(/<small>models, keys, permissions, spending &amp; more<\/small>/.test(idx), 'the SETTINGS dock subtitle says the same line, on one line like its neighbours');
   A.ok(!/Keys, models, voice, data|keys, models, voice, data/.test(sys + idx), 'the old "keys, models, voice, data" line is gone');
   A.ok(!/in <b>MCP CONNECTORS<\/b>|in <b>KEYS<\/b>|in TOOLSETS:|'CATALOG' : 'MCP CONNECTORS'/.test(con), 'ABILITIES copy names no retired tab (MCP CONNECTORS, KEYS, TOOLSETS)');
-  A.ok(/in <b>CONNECTED SERVICES<\/b>, or paste a custom platform key in <b>SAVED API CONNECTIONS<\/b>/.test(con), 'the catalog footer names CONNECTED SERVICES and SAVED API CONNECTIONS');
-  A.ok(/\{ id: 'keys', label: 'SAVED API CONNECTIONS'/.test(con) && /\{ id: 'mcp', label: 'CONNECTED SERVICES'/.test(con) && /\{ id: 'toolsets', label: 'BUILT-IN ABILITIES'/.test(con), 'the names it uses are the real tab labels');
-  // (live walk 10-14) the service-key door lands ON SAVED API CONNECTIONS — the place its sentence names — and the sign-in
-  // services are named at CATALOG, the neighbouring tab of that same window
-  A.ok(/A key for any other service goes in CONNECT › ABILITIES › SAVED API CONNECTIONS; Gmail, Notion and other sign-in services connect from CATALOG beside it\.<\/p>' \+\s*'<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ SAVED API CONNECTIONS<\/button><\/div>/.test(ui), 'API KEYS: one full-strength glass key to SAVED API CONNECTIONS, outside the dimmed prose; Gmail/Notion named at CATALOG');
+  A.ok(!/SAVED API CONNECTIONS|CONNECTED SERVICES|BUILT-IN ABILITIES|label: 'CATALOG'/.test(con.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '')), 'ABILITIES copy names none of the pre-flat-list tabs (SAVED API CONNECTIONS, CONNECTED SERVICES, BUILT-IN ABILITIES, CATALOG)');
+  A.ok(/Not listed\? Add it yourself in <b>CONNECTED<\/b>: a service by its address, or any platform’s API key\./.test(con), 'the APPS footer sends an unlisted platform to CONNECTED (a service by its address, or an API key)');
+  A.ok(/\{ id: 'catalog', label: 'APPS'/.test(con) && /\{ id: 'mcp', label: 'CONNECTED'/.test(con) && /\{ id: 'toolsets', label: 'TOOLS'/.test(con) && /id="ab-keys"><span class="sec-l">API KEYS</.test(con), 'the names it uses are the real rail labels, and API KEYS is a real block of CONNECTED');
+  // (live walk 10-14) the service-key door lands ON the API KEYS block — the place its sentence names — and the sign-in
+  // services are named at APPS, the neighbouring section of that same window
+  A.ok(/A key for any other service goes in CONNECT › ABILITIES › CONNECTED › API KEYS; Gmail, Notion and other sign-in services connect from APPS beside it\.<\/p>' \+\s*'<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ CONNECT › API KEYS<\/button><\/div>/.test(ui), 'API KEYS: one full-strength glass key to CONNECTED › API KEYS, outside the dimmed prose; Gmail/Notion named at APPS');
   A.ok(!/data-act="to-service-catalog"|↗ CATALOG<\/button>/.test(ui), 'the old door to CATALOG (which the sentence never named as the key place) is gone');
-  A.ok(!/Keys for Gmail, Notion and other services live in CONNECT › ABILITIES › SAVED API CONNECTIONS/.test(ui), 'never the old wrong claim: SAVED API CONNECTIONS cannot connect Gmail or Notion');
-  A.ok(/toServiceKeys\.addEventListener\('click', \(\) => \{ sfx\('click'\); openTerm\('connectors', 'keys'\); \}\)/.test(ui), 'the key opens the connectors SAVED API CONNECTIONS section');
-  A.ok(/P\('api-connections', 'CONNECT › ABILITIES › SAVED API CONNECTIONS', [^\n]*\{ term: 'connectors', section: 'keys' \}\)/.test(places), 'which is the places.js api-connections target');
-  A.ok(/P\('find-a-service', [^\n]*\{ term: 'connectors', section: 'catalog' \}\)/.test(places) && /\{ id: 'catalog', label: 'CATALOG'/.test(con), 'CATALOG, named for the sign-in services, is a real tab of that window');
+  A.ok(!/Keys for Gmail, Notion and other services live in CONNECT › ABILITIES › (?:SAVED API CONNECTIONS|CONNECTED › API KEYS)/.test(ui), 'never the old wrong claim: an API key cannot connect Gmail or Notion');
+  A.ok(/toServiceKeys\.addEventListener\('click', \(\) => \{ sfx\('click'\); openTerm\('connectors', 'keys'\); \}\)/.test(ui), 'the key opens the connectors keys section');
+  A.ok(/connectors: \{ keys: \['mcp', '#ab-keys'\]/.test(ui), 'and the keys section lands on CONNECTED, scrolled to its API KEYS block');
+  A.ok(/P\('api-connections', 'CONNECT › ABILITIES › CONNECTED › API KEYS', [^\n]*\{ term: 'connectors', section: 'keys' \}\)/.test(places), 'which is the places.js api-connections target');
+  A.ok(/P\('find-a-service', [^\n]*\{ term: 'connectors', section: 'catalog' \}\)/.test(places) && /\{ id: 'catalog', label: 'APPS'/.test(con), 'APPS, named for the sign-in services, is a real section of that window');
   // (live walk 10-14) the STORE under the key keeps the section's spacing, never flush against the key
   const setCss = rd('frontend/css/settings.css');
   A.ok(/\.settings-console \.mc-acts \+ #credits-store:not\(:empty\) \{ margin-top: 18px; \}/.test(setCss) && /'<div id="credits-store"><\/div>';/.test(ui), 'the STORE sits 18px below the API KEYS key row');
-  // the named examples really are SIGN IN catalog connectors (the reason the door is CATALOG, not SAVED API CONNECTIONS)
+  // the named examples really are SIGN IN catalog connectors (the reason the door is APPS, not API KEYS)
   const cat = rd('sidecar/mcp/catalog.js');
   for (const id of ['gmail', 'notion']) A.ok(new RegExp("\\{ id: '" + id + "', [^\\n]*authType: 'oauth'").test(cat), id + ' is an oauth CATALOG connector');
   // the public "Connect a service" guide walks the same paths the app shows (P05 review): no retired window or tab name
   const guide = rd('website/docs/connect-a-platform.html');
-  A.ok(!/TOOLSETS &amp; CONNECTORS|&#8644; TOOLSETS|in <b>KEYS<\/b>|row in\s+KEYS|in TOOLSETS\.|MCP CONNECTORS|PICK A PLATFORM/.test(guide), 'the Connect a service guide names no retired window or tab (TOOLSETS & CONNECTORS, KEYS, TOOLSETS, PICK A PLATFORM)');
-  A.ok(/CONNECT &rsaquo; ABILITIES &rarr; SAVED API CONNECTIONS &rarr; ADD A KEY/.test(guide) && /\(dock: <b>&#8644; CONNECT<\/b>\)/.test(guide), 'its paths read CONNECT › ABILITIES › SAVED API CONNECTIONS, from the ⇄ CONNECT dock button');
+  A.ok(!/TOOLSETS &amp; CONNECTORS|&#8644; TOOLSETS|in <b>KEYS<\/b>|row in\s+KEYS|in TOOLSETS\.|MCP CONNECTORS|PICK A PLATFORM|SAVED API CONNECTIONS|CONNECTED SERVICES|BUILT-IN ABILITIES|<b>CATALOG<\/b>/.test(guide), 'the Connect a service guide names no retired window or tab (TOOLSETS & CONNECTORS, KEYS, TOOLSETS, PICK A PLATFORM, SAVED API CONNECTIONS, CONNECTED SERVICES, BUILT-IN ABILITIES, CATALOG)');
+  A.ok(/CONNECT &rsaquo; ABILITIES &rarr; CONNECTED &rarr; Add an API key/.test(guide) && /\(dock: <b>&#8644; CONNECT<\/b>\)/.test(guide), 'its paths read CONNECT › ABILITIES › CONNECTED › Add an API key, from the ⇄ CONNECT dock button');
+  // the other public pages that name the key place say the same thing (privacy names it as the place a key is saved)
+  for (const f of ['website/docs/glossary.html', 'website/docs/providers.html', 'website/legal/privacy.html', 'website/legal/_privacy.nocredits.html', 'website/docs/skills.html', 'website/docs/guides/routines.html'])
+    A.ok(!/SAVED API CONNECTIONS|CONNECTED SERVICES|BUILT-IN ABILITIES|SKILL LIBRARY|AGENT SKILLS|SKILL EXCHANGE|DISCOVER › SKILL MARKET/.test(rd(f)), f + ' names no pre-flat-list ABILITIES tab');
 }
 
 A.report('help-copy-matches-screen.test');

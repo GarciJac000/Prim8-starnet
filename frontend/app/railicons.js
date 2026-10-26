@@ -38,12 +38,15 @@ const RailIcons = (() => {
     chat:     '<path d="M2.2 3.2h11.6v7.6H7l-3 2.6v-2.6H2.2z"/>',
     flow:     '<rect x="1.8" y="5.8" width="3.6" height="4.4" rx=".8"/><rect x="10.6" y="5.8" width="3.6" height="4.4" rx=".8"/><path d="M5.4 8h5.2M8.8 6.2L10.6 8 8.8 9.8"/>',
     moon:     '<path d="M12.8 9.6A5.6 5.6 0 0 1 6.4 3.2a5.6 5.6 0 1 0 6.4 6.4z"/>',
-    search:   '<circle cx="7" cy="7" r="4.4"/><path d="M10.3 10.3l3.4 3.4"/>'
+    search:   '<circle cx="7" cy="7" r="4.4"/><path d="M10.3 10.3l3.4 3.4"/>',
+    bag:      '<path d="M3 5.5h10l-.9 8.5H3.9z"/><path d="M5.8 5.5V4.4a2.2 2.2 0 0 1 4.4 0v1.1"/>',
+    puzzle:   '<path d="M2.5 5.2h3.1a1.6 1.6 0 1 1 3.2 0h3.1v3.1a1.6 1.6 0 1 1 0 3.2v2.7h-9.4z"/>'
   };
   // first match wins — specific words before generic ones
   const RULES = [
-    [/\bbuilt-?in\b/, 'cube'], [/computer/, 'monitor'], [/\bapi\b|\bkeys?\b/, 'key'], [/connected|connector|integration/, 'plug'],
-    [/agent skills/, 'pen'], [/exchange|import/, 'download'], [/market|catalog|discover/, 'grid'], [/library|skills?\b|recipes?/, 'book'],
+    [/\bbuilt-?in\b|\btools?\b|toolsets?/, 'cube'], [/computer/, 'monitor'], [/\bapi\b|\bkeys?\b/, 'key'], [/connected|connector|integration/, 'plug'],
+    [/agent skills/, 'pen'], [/exchange|import/, 'download'], [/market/, 'bag'], [/\bapps\b|catalog|discover/, 'grid'],
+    [/library|skills?\b|recipes?/, 'book'], [/extension|plugin|hook/, 'puzzle'],
     [/installed/, 'cube'], [/create|advanced|new schedule|\bnew\b/, 'plus'],
     [/\bbrief\b|about you|profile|identity/, 'person'], [/briefing/, 'doc'], [/growth|achievement|trophy/, 'star'],
     [/record|history|log\b|logbook/, 'record'], [/memory|remember/, 'memory'], [/config|app & backup|system|general/, 'gear'],

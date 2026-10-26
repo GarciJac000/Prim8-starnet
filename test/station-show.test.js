@@ -36,10 +36,23 @@ const aliases = new Set([...ui.slice(ui.indexOf('const TERM_ALIAS = {'), ui.inde
 const sectionIds = src => new Set([...src.matchAll(/\{ id: '([a-z-]+)', label:/g)].map(m => m[1]));
 const sections = {
   settings: sectionIds(ui.slice(ui.indexOf("{ id: 'providers', label: 'AI & MODELS'"), ui.indexOf("mountConsole(body, 'settings'"))),
-  connectors: new Set([...sectionIds(read('frontend/app/windows/connectors.js')), ...sectionIds(ui.slice(ui.indexOf("{ id: 'market', label: 'SKILL MARKET'") - 10, ui.indexOf("{ id: 'exchange', label: 'SKILL EXCHANGE'") + 60))]),
+  connectors: new Set([...sectionIds(read('frontend/app/windows/connectors.js')), ...sectionIds(ui.slice(ui.indexOf("{ id: 'market', label: 'SKILL MARKET'") - 10, ui.indexOf("{ id: 'library', label: 'SKILLS'") + 60))]),
   automation: new Set(['routines', 'routines-create', 'loops', 'loops-start', 'away']),
   quests: new Set(['progress'])
 };
+// ONE FLAT LIST (UX night 2026-10-26): a retired ABILITIES section (keys, computer, agent, exchange) is a SECTION_ALIAS
+// that opens the section which absorbed it, scrolled to its block — so a door may name it if that block really exists
+const sectionAlias = {};
+for (const m of ui.slice(ui.indexOf('const SECTION_ALIAS = {'), ui.indexOf('function revealInTerm(')).matchAll(/^\s{4}([a-z]+): \{([^\n]*)\}/gm)) {
+  sectionAlias[m[1]] = {};
+  for (const a of m[2].matchAll(/([a-z]+): \['([a-z-]+)', '#([a-z-]+)'\]/g)) sectionAlias[m[1]][a[1]] = { section: a[2], anchor: a[3] };
+}
+ok(Object.keys(sectionAlias.connectors || {}).length === 4, 'the four merged ABILITIES sections are SECTION_ALIAS entries');
+const blockSrc = read('frontend/app/windows/connectors.js') + ui;
+for (const [k, al] of Object.entries(sectionAlias.connectors || {})) {
+  ok(sections.connectors.has(al.section), 'merged section ' + k + ' lands on a real section (' + al.section + ')');
+  ok(blockSrc.indexOf('id="' + al.anchor + '"') >= 0 || blockSrc.indexOf("block('" + al.anchor + "'") >= 0, 'merged section ' + k + ' scrolls to a block that exists (#' + al.anchor + ')');
+}
 const autoSrc = read('frontend/app/windows/automation.js');
 for (const s of sections.automation) ok(autoSrc.indexOf("'" + s + "'") >= 0, 'the AUTOMATION console still has section ' + s);
 ok(/openTerm\('quests', 'progress'\)/.test(ui), 'QUESTS still opens on PROGRESS');
@@ -47,7 +60,7 @@ for (const p of Places.PLACES) {
   const o = p.open;
   if (o.term) {
     ok(windows.has(o.term) || aliases.has(o.term), p.id + ': window "' + o.term + '" exists (a builder, a registered window or an alias)');
-    if (o.section) ok(sections[o.term] && sections[o.term].has(o.section), p.id + ': ' + o.term + ' has section "' + o.section + '"');
+    if (o.section) ok(sections[o.term] && (sections[o.term].has(o.section) || !!(sectionAlias[o.term] && sectionAlias[o.term][o.section])), p.id + ': ' + o.term + ' has section "' + o.section + '" (or a merged block of one)');
   }
   if (o.agent) ok(sectionIds(ui.slice(ui.indexOf("mountConsole(body, 'agents', ["), ui.indexOf("mountConsole(body, 'agents', [") + 4000)).has(o.agent), p.id + ': the dossier has tab ' + o.agent);
   if (o.fn) ok(['build', 'recruit', 'recipes', 'needs-you'].indexOf(o.fn) >= 0, p.id + ': a known door');

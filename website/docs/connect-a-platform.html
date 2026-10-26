@@ -91,12 +91,12 @@
 
 <ol>
   <li><b>Does the platform publish a <i>remote</i> MCP server?</b> Then add it in
-    <b>CONNECT &rsaquo; ABILITIES &rarr; CONNECTED SERVICES</b>, or find it already sitting in <b>CATALOG</b>.
+    <b>CONNECT &rsaquo; ABILITIES &rarr; CONNECTED</b> (Add a service by its address), or find it already sitting in <b>APPS</b>.
     You get ready-made tools, and it is the least work. Notion, Linear, Stripe, GitHub and Sentry are here.</li>
   <li><b>Does it publish only a local stdio MCP server?</b> Put an agent on the <b>SAFE CELL</b> execution
-    profile, choose <b>STDIO (Safe Cell)</b> in CONNECTED SERVICES, and enter the command and exact arguments.
+    profile, choose <b>STDIO (Safe Cell)</b> in CONNECTED, and enter the command and exact arguments.
     StarNet runs it inside that agent's persistent Docker environment, never as an interactive host child.</li>
-  <li><b>Otherwise it has a plain REST API.</b> Paste its key in <b>SAVED API CONNECTIONS</b> and your agent calls the API
+  <li><b>Otherwise it has a plain REST API.</b> Paste its key in <b>CONNECTED &rsaquo; API KEYS</b> and your agent calls the API
     directly with <code>web_request</code>. This is the route for most of the long tail — including every
     print-on-demand and marketplace service we checked.</li>
 </ol>
@@ -109,9 +109,9 @@ the lighter option when you do not want to maintain a container command.</div>
 <h2 id="route-1-a-remote-mcp-server">Route 1 — a remote MCP server</h2>
 <p>Open <b>CONNECT &rsaquo; ABILITIES</b> (dock: <b>&#8644; CONNECT</b>).</p>
 <ul>
-  <li><b>CATALOG</b> — browse vetted servers. <b>&#9656; no setup</b> connects instantly, <b>API key</b> takes a
+  <li><b>APPS</b> — browse vetted servers. <b>&#9656; no setup</b> connects instantly, <b>API key</b> takes a
     pasted token, <b>OAUTH</b> opens a browser sign-in. One click and its tools are live.</li>
-  <li><b>CONNECTED SERVICES</b> — for anything not in the catalog. Give it a short id, paste the server's
+  <li><b>CONNECTED</b> (Add a service by its address) — for anything not in the catalog. Give it a short id, paste the server's
     <b>Streamable-HTTP endpoint</b> (usually ending <code>/mcp</code>), and a bearer token if it needs one.</li>
 </ul>
 <p>A local <code>stdio</code> command (<code>npx …</code>, <code>uvx …</code>) requires a named agent on the
@@ -122,7 +122,7 @@ interactive host.</p>
 <h2 id="route-2-an-api-key-web-request">Route 2 — an API key + <code>web_request</code></h2>
 
 <h3 id="paste-the-key">1. Paste the key</h3>
-<p><b>CONNECT &rsaquo; ABILITIES &rarr; SAVED API CONNECTIONS &rarr; ADD A KEY</b>. Type the platform name (or pick it in CATALOG, which fills it in),
+<p><b>CONNECT &rsaquo; ABILITIES &rarr; CONNECTED &rarr; Add an API key</b>. Type the platform name (or pick it in APPS, which fills it in),
 paste your key, and save. StarNet stores it locally and shows only the last four characters, ever.</p>
 <p>Keep your keys in 1Password? Paste a reference like <code>op://vault/item/field</code> instead of the key. StarNet reads it
 with the 1Password CLI (<code>op</code>) when a run needs it and holds the value in memory only &mdash; it is never written to disk.</p>
@@ -178,7 +178,7 @@ through the model, and the limit is 20MB per file / 25MB per request.</p>
 <p>By default a key is usable only in <b>watched sessions</b> — you are at the station and approve the call.
 Scheduled routines, autonomy, and channel messages cannot spend it &mdash; except your own direct message as the paired owner, which counts as watched.</p>
 <p>To change that for one platform, tick <b>&ldquo;usable in scheduled &amp; messaged runs&rdquo;</b> on that key's row in
-SAVED API CONNECTIONS. It is per key, off by default, and revocable at any time — the next tool call sees the change
+CONNECTED &rsaquo; API KEYS. It is per key, off by default, and revocable at any time — the next tool call sees the change
 immediately. Nothing else about unattended runs widens: they still cannot run shell commands (unless you let that routine use the terminal), and they still
 cannot spend any key you have not ticked.</p>
 
@@ -187,12 +187,12 @@ cannot spend any key you have not ticked.</p>
   <tr><th>What you see</th><th>What it means</th></tr>
   <tr><td>&ldquo;no enabled service key provides X_API_KEY&rdquo;</td>
       <td>The placeholder name does not match a key you saved, or that key is switched off. Check the exact
-          env-var name shown on the key's row in SAVED API CONNECTIONS.</td></tr>
+          env-var name shown on the key's row in CONNECTED &rsaquo; API KEYS.</td></tr>
   <tr><td>&ldquo;this run is unattended and &lsquo;X&rsquo; is not approved for unattended use&rdquo;</td>
       <td>A scheduled or messaged run tried to spend a watched-only key. Tick the unattended box on that key,
           or run the task while you are at the station.</td></tr>
   <tr><td>The agent has no <code>web_request</code></td>
-      <td>No <b>dish</b> is placed in that agent's bay, or the <b>web</b> toolset is switched off in BUILT-IN ABILITIES.</td></tr>
+      <td>No <b>dish</b> is placed in that agent's bay, or the <b>web</b> toolset is switched off in TOOLS.</td></tr>
   <tr><td>HTTP 401 / 403 from the platform</td>
       <td>The key reached the platform and the platform rejected it — wrong key, wrong scope, or the wrong
           header name. Check the platform's docs for the header it expects.</td></tr>

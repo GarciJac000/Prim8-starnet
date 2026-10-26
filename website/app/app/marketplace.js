@@ -2744,7 +2744,7 @@ const Marketplace = (() => {
     // warnings: render every entry the scan returned verbatim, and ALWAYS state the keys-never-transfer truth
     // (added only if the scan didn't already say it).
     const warns = Array.isArray(s.warnings) ? s.warnings.slice() : [];
-    if (!warns.some(w => /key/i.test(w) && /transfer/i.test(w))) warns.push('keys never transfer — re-enter them in ABILITIES › INSTALLED › SAVED API CONNECTIONS');
+    if (!warns.some(w => /key/i.test(w) && /transfer/i.test(w))) warns.push('keys never transfer — re-enter them in CONNECT › ABILITIES › CONNECTED › API KEYS');
     const warnHTML = warns.map(w => '<div class="mkt-r-warn dim">⚠ ' + esc(w) + '</div>').join('');
     return '<div class="mkt-save mkt-imp mkt-imp-preview">' +
       '<div class="mkt-save-h">⇪ IMPORT — ' + esc(s.name || H) + '</div>' +

@@ -16,7 +16,7 @@
    SECURITY LAW (mirrors configexport's philosophy — non-negotiable): this module NEVER sees or emits a secret.
    It extracts only the MODEL id from a config; if that config carries any key-shaped field (an `env` section,
    `api_key`, or a key matching /(token|secret|key|password|auth|bearer|credential)/i) it pushes ONE warning
-   ("API keys never transfer — re-enter them in ABILITIES › INSTALLED › SAVED API CONNECTIONS") and drops it on the floor — no secret value ever
+   ("API keys never transfer — re-enter them in CONNECT › ABILITIES › CONNECTED › API KEYS") and drops it on the floor — no secret value ever
    enters the returned object. Fail-soft everywhere: a missing/unparseable file is skipped + noted, never thrown.
 
    filesWanted(harness) returns [{ rel, base:'root'|'state' }] so index.js knows which directory each rel resolves
@@ -38,7 +38,7 @@
 
   // key-name secrets: the SAME family configexport redacts. `env` is caught explicitly (a whole section of secrets).
   const SECRET_KEY_RE = /(token|secret|key|password|passwd|pwd|auth|bearer|credential)/i;
-  const SECRET_WARNING = 'API keys never transfer — re-enter them in ABILITIES › INSTALLED › SAVED API CONNECTIONS';
+  const SECRET_WARNING = 'API keys never transfer — re-enter them in CONNECT › ABILITIES › CONNECTED › API KEYS';
 
   function isObj(x) { return x != null && typeof x === 'object' && !Array.isArray(x); }
   function clampStr(s, max) { return String(s == null ? '' : s).slice(0, max || TEXT_MAX); }

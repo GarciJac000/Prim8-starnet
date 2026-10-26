@@ -33,11 +33,12 @@ function makeComputerControl(deps) {
       backend: selection(), supported, nativeSupported: platform === 'win32', desktopShell: shell, installed: installed(),
       customBinary: !!env.STARNET_CUA_BINARY,
       available: available(), installing: !!installing, envLocked: locked, version: VERSION,
-      detail: !shell ? 'Native control requires the StarNet desktop app.'
-        : !supported ? 'CUA installation currently supports Windows x64. The existing Windows driver remains available on Windows.'
-        : selection() === 'off' ? 'Native control is off.'
-        : selection() === 'cua' && !installed() ? 'Install CUA to use accessibility targeting.'
-        : 'Driver configured. Each action checks its target and reports its actual outcome. Full Power or a paired remote-owner lease is required.'
+      // plain words (UX night 10-26): this line is what TOOLS › COMPUTER CONTROL shows a newcomer, after the backend name
+      detail: !shell ? 'Works only in the StarNet desktop app.'
+        : !supported ? 'CUA needs Windows x64. WINDOWS · CLASSIC still works on Windows.'
+        : selection() === 'off' ? 'Agents do not use the apps on your computer.'
+        : selection() === 'cua' && !installed() ? 'Install CUA first, with the button below.'
+        : 'Ready. Each action checks what it targets and reports what really happened. It needs FULL POWER, or a request from your paired Telegram chat.'
     };
   }
   async function check() {

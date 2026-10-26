@@ -71,19 +71,23 @@
     // form/list handlers) resolves against the mounted panes with no rewrite.
     // ---- TOOLSETS pane: rendered async from GET /api/toolsets; the Spotify flow markup is embedded in-line so
     //      the JUKEBOX row can host it (kept verbatim from the old SPOTIFY section, ids unchanged). ----
+    // FOLDED, NOT REMOVED (UX night 10-26, "pretend these users are like 5"): the developer-app setup stood open in the
+    // middle of the TOOLS list ("Redirect URI to whitelist", "OAuth PKCE"). The status line stays in sight; the steps
+    // and fields are one click away, numbered, every sp-* id unchanged so setupSpotify() is untouched.
     const spotifyInline =
       '<div class="ts-spotify" id="ts-spotify">' +
-        '<p class="set-about">One-time setup: make a free app at <span class="dim">developer.spotify.com/dashboard</span>, add the redirect URI below to it, paste the Client ID, then connect. ' +
-          '<span class="dim">(OAuth PKCE — no client secret is ever stored.)</span></p>' +
         '<div id="sp-status" class="mc-url dim">checking…</div>' +
+        '<details class="mc-add-fold" id="sp-setup-fold"><summary>Connect your Spotify</summary>' +
+        '<p class="set-about">1. Make a free app at <span class="dim">developer.spotify.com/dashboard</span>.<br>2. Add the Redirect URI below to that app.<br>3. Paste the app’s Client ID here, then choose CONNECT SPOTIFY. ' +
+          '<span class="dim">StarNet never stores a client secret.</span></p>' +
         '<div class="mc-form">' +
           '<input id="sp-client" class="key-input" placeholder="Spotify Client ID" autocomplete="off" spellcheck="false" maxlength="64">' +
-          '<div class="mc-url dim">Redirect URI to whitelist: <code id="sp-redir">…</code></div>' +
+          '<div class="mc-url dim">Redirect URI: <code id="sp-redir">…</code></div>' +
           '<div class="mc-acts">' +
             '<button class="bb sm" id="sp-connect">▶ CONNECT SPOTIFY</button>' +
             '<button class="bb xs danger" id="sp-disconnect" style="display:none">✕ DISCONNECT</button>' +
           '</div>' +
-        '</div>' +
+        '</div></details>' +
         '<div id="sp-msg" class="msg" role="status" aria-live="polite"></div>' +
       '</div>';
     // NO LEAD PARAGRAPH HERE. mountConsole already prints this section's `desc` as `.con-sec-desc`
@@ -97,7 +101,7 @@
       '<div id="ts-authority" class="set-about" role="status"></div>' +
       '<div class="ts-core set-row"><span class="ts-glyph" aria-hidden="true">◉</span>' +
         '<span class="ts-main"><span class="ts-name">COMPUTE <span class="ts-core-tag">CORE</span></span>' +
-        '<span class="ts-desc dim">The compute gate — an agent can always think. Always on.</span></span></div>' +
+        '<span class="ts-desc dim">Thinking and talking to you. Every agent can always think; it has no switch.</span></span></div>' +
       '<div id="ts-list"><span class="loading pulse">loading toolsets…</span></div>';
     // ---- CONNECTORS pane markup (unchanged generic MCP manager) ----
     // The lead sentence that used to open this pane restated the section `desc` verbatim; only the two
@@ -118,7 +122,9 @@
       '<details class="mc-adv"><summary>About connected services</summary>' +
         '<p class="set-about">Remote http(s) MCP servers. Secrets are stored locally by the sidecar and never displayed. ' +
         'Looking to chat with your agent <i>from</i> Slack or Telegram instead? That’s the <b>CHANNELS</b> window.</p></details>' +
-      '<div class="sec"><span class="sec-l" id="mc-form-h">ADD A CONNECTOR</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+      // CONNECTED shows what you have first (UX night 10-26): this form stood open under the list, so a newcomer's first
+      // sight of the section was "a short handle for this server … mcp__<id>__<tool>". It is one click away instead.
+      '<details class="mc-add-fold" id="mc-add-fold"><summary><span id="mc-form-h">Add a service by its address</span> <span class="dim">(advanced)</span></summary>' +
       '<div class="mc-form" id="mc-form">' +
         '<input id="mc-id" class="key-input" placeholder="id — e.g. github (a-z 0-9 _ -)" autocomplete="off" spellcheck="false" maxlength="40">' +
         '<div class="mc-hint">A short handle for this server. Its tools appear to agents as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>.</div>' +
@@ -164,7 +170,7 @@
           '<button class="bb sm" id="mc-add">+ ADD &amp; CONNECT</button>' +
           '<button class="bb xs" id="mc-cancel" style="display:none">CANCEL EDIT</button>' +
         '</div>' +
-      '</div>' +
+      '</div></details>' +
       '<div id="mc-msg" class="msg" role="status" aria-live="polite"></div>';
     // ---- CATALOG pane markup: one-click, vetted MCP servers and platform APIs. Cards render async from
     //      both catalog endpoints and route through the existing connector/key setup flows. ----
@@ -177,15 +183,16 @@
       (typeof Tutorial !== 'undefined' && Tutorial.platformGuideHTML ? Tutorial.platformGuideHTML('apps') : '') +
       '<div class="cc-filters" id="cc-filters" role="group" aria-label="Filter connectors by setup type">' +
         '<button type="button" class="cc-filter active" data-cc-filter="all" aria-pressed="true" data-tip="Every service in the catalog">ALL</button>' +
-        '<button type="button" class="cc-filter cc-lg-none" data-cc-filter="none" aria-pressed="false" data-tip="No credentials needed: add it and it works">▸ no setup</button>' +
-        '<button type="button" class="cc-filter cc-lg-key" data-cc-filter="apikey" aria-pressed="false" data-tip="You paste a key from your account; the setup walks you through it">API key</button>' +
+        '<button type="button" class="cc-filter cc-lg-none" data-cc-filter="none" aria-pressed="false" data-tip="No credentials needed: add it and it works">NO SETUP</button>' +
+        '<button type="button" class="cc-filter cc-lg-key" data-cc-filter="apikey" aria-pressed="false" data-tip="You paste a key from your account; the setup walks you through it">API KEY</button>' +
         '<button type="button" class="cc-filter cc-lg-oauth" data-cc-filter="oauth" aria-pressed="false" data-tip="Connect through your browser">SIGN IN</button>' +
         '<button type="button" class="cc-filter" data-cc-filter="manual" aria-pressed="false" data-tip="Needs a one-time app setup on the service first">MANUAL SETUP</button>' +
         '<button type="button" class="cc-filter cc-f-on" data-cc-filter="installed" aria-pressed="false" data-tip="Services you have set up (a saved setup, not a live connection check)">YOUR SERVICES</button>' +
       '</div>' +
       '<div id="cc-list" class="cc-list"><span class="loading pulse">loading catalog…</span></div>' +
       '<div id="cc-msg" class="msg" role="status" aria-live="polite"></div>' +
-      '<p class="set-about dim">Need something not listed? Add any remote MCP server by URL in <b>CONNECTED SERVICES</b>, or paste a custom platform key in <b>SAVED API CONNECTIONS</b>.</p>';
+      // the two cross-window answers the old ADD AN ABILITY fold gave live here now: chat apps are the CHANNELS tab above
+      '<p class="set-about dim">Not listed? Add it yourself in <b>CONNECTED</b>: a service by its address, or any platform’s API key. AI models like Claude or ChatGPT are set up in <b>SETTINGS › AI &amp; MODELS</b>.</p>';
     // ---- KEYS pane markup: every platform key the agents hold, in one place. Top = keyed catalog/MCP platforms
     //      currently connected (truth from /api/connectors — managed on their own tab, read-only here). Bottom =
     //      encrypted API credentials (POST /api/servicekeys): the sidecar exposes each as an env var in
@@ -205,12 +212,15 @@
        and prefill this form; KEYS stays the inventory/setup surface for credentials the Commander actually
        holds, plus the escape hatch for a custom platform the catalog does not list. */
     const secKeys =
-      '<div class="sec"><span class="sec-l">YOUR KEYS</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
-      '<div class="set-sub"><span class="set-sub-k">CONNECTED PLATFORMS</span><span class="set-sub-d" id="ky-plat-n">0</span></div>' +
-      '<div id="ky-platforms" class="mc-list"><span class="loading pulse">loading…</span></div>' +
-      '<div class="set-sub"><span class="set-sub-k">CONNECTED API KEYS</span><span class="set-sub-d" id="ky-mine-n">0</span></div>' +
+      '<div class="sec" id="ab-keys"><span class="sec-l">API KEYS</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+      // ONE EMPTY LINE (UX night 10-26): with nothing saved, two labelled lists each said "none yet" and each offered OPEN
+      // APPS. The keyed-platform group shows only when it has rows (or a failed read to report); the key list's own
+      // label shows only beside it, where the two groups need telling apart.
+      '<div class="set-sub" id="ky-plat-head" hidden><span class="set-sub-k">CONNECTED PLATFORMS</span><span class="set-sub-d" id="ky-plat-n">0</span></div>' +
+      '<div id="ky-platforms" class="mc-list" hidden></div>' +
+      '<div class="set-sub" id="ky-mine-head" hidden><span class="set-sub-k">CONNECTED API KEYS</span><span class="set-sub-d" id="ky-mine-n">0</span></div>' +
       '<div id="ky-list" class="mc-list"></div>' +
-      '<div class="sec"><span class="sec-l">ADD A KEY</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+      '<details class="mc-add-fold" id="ky-add-fold"><summary>Add an API key</summary>' +
       '<div class="mc-form">' +
         '<div id="ky-guide" class="mc-hint" hidden></div>' +
         '<input id="ky-name" class="key-input" placeholder="platform name — e.g. Resend" autocomplete="off" spellcheck="false" maxlength="64">' +
@@ -225,10 +235,10 @@
         // TRUTHFUL TELEMETRY: the key alone is not enough. The shell it is handed to only exists when a WORKBENCH
         // prop is placed (capability/office.js grants it nowhere by default), and workspace-process tools are not
         // projected onto unattended surfaces at all (inputpolicy.js), so a saved key is inert until both hold.
-        '<div class="mc-hint">These API keys are used through the terminal. Check the selected agent in BUILT-IN ABILITIES: access may come from a workbench, an execution profile or Full Access. ' +
+        '<div class="mc-hint">These API keys are used through the terminal. Check the selected agent in TOOLS: access may come from a workbench, an execution profile or Full Access. ' +
           'Scheduled work also follows its saved unattended access settings. Saving a key does not verify that the service accepts it.</div>' +
         '<div class="mc-acts"><button class="bb sm" id="ky-add">+ SAVE KEY</button></div>' +
-      '</div>' +
+      '</div></details>' +
       '<div id="ky-msg" class="msg" role="status" aria-live="polite"></div>';
     /* ---- EXTENSIONS: the Commander's OWN code, running inside the station ----
        Sits in this console and not in SETTINGS because "MCP server", "hook" and "plugin" are one user intent —
@@ -295,80 +305,45 @@
     // onto window.AbilityLanes ((body)=>({sections,wire}), the windows/automation.js shape); the
     // lanes' sections mount in THIS console and their wire() runs after ours, against the same body.
     const lanes = (window.AbilityLanes || []).map(fn => { try { return fn(body); } catch (_) { return null; } }).filter(l => l && Array.isArray(l.sections));
-    // TOOLSETS first (audit finding 5): the dock button says TOOLSETS, so the panel must open on the tab it's
-    // named for — a first click used to land on the CATALOG storefront, which read as "TOOLSETS = connectors".
-    /* ---- THE FRONT DOOR ----
-       This console's five tabs are five MECHANISMS (curated MCP server · platform API key · MCP server by
-       URL · hook/plugin · built-in toolset), and picking the right one is a question a newcomer cannot
-       answer — they know the NAME of the thing they want, not which of six subsystems implements it.
-       Landing on TOOLSETS and reading a rail of jargon is where that user stops.
+    /* ONE FLAT LIST (UX night 10-26, Andrew: "more like the settings menu where u can see all the different options …
+       better off perfectly organizing every category, and condensing those that need it"). The rail was three intent
+       keys (INSTALLED / DISCOVER / CREATE) that each swapped in a different set of sections, so most of the window was
+       always out of sight, and above every section an ADD AN ABILITY fold asked "what are you adding?" all over again.
+       Now every place shows at once, like SETTINGS, in the order a newcomer needs them: find an app, see what is
+       connected, get skills, the skills you have, the built-in tools, your own code. Four sections became blocks of the
+       neighbour that already held the same kind of thing (API keys under CONNECTED, COMPUTER CONTROL under TOOLS, and in
+       the skills lane SKILL EXCHANGE under SKILL MARKET, AGENT SKILLS under SKILLS); every element id is unchanged and
+       every old section id still opens on its block (stationui SECTION_ALIAS). Chat apps stay the CHANNELS tab. */
+    const secComputer =
+      '<div class="sec" id="ab-computer"><span class="sec-l">COMPUTER CONTROL</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+      // plain first (UX night 10-26): what it does and when it works; how the drivers work is one click away
+      '<div class="set-about">Let agents use the apps on your computer: open windows, click and type. It works for an agent on FULL POWER, or when you ask from your paired Telegram chat.</div>' +
+      '<div id="cu-status" class="set-about" role="status" aria-live="polite">Checking computer control…</div>' +
+      '<div class="mc-acts" role="group" aria-label="Computer control backend">' +
+      '<button type="button" class="bb sm" data-cu-backend="cua" data-tip="Finds buttons and fields by name, and can work in the background where Windows allows it. Install it first.">CUA · ACCESSIBILITY</button>' +
+      '<button type="button" class="bb sm" data-cu-backend="win32" data-tip="The Windows driver StarNet already has: nothing to install">WINDOWS · CLASSIC</button>' +
+      '<button type="button" class="bb sm" data-cu-backend="off" data-tip="Agents cannot use the apps on your computer">OFF</button></div>' +
+      '<div class="mc-acts"><button type="button" class="bb sm" id="cu-install">INSTALL CUA</button>' +
+      '<button type="button" class="bb sm" id="cu-check">CHECK DRIVER</button></div>' +
+      '<details class="mc-adv"><summary>How it works</summary>' +
+        '<div class="set-about">CUA targets windows and accessibility elements, works in the background where supported, and reports evidence for each action. Foreground input can move focus when needed.</div>' +
+        '<p class="dim">Install downloads the verified Windows x64 driver from CUA’s official release. Reinstall and backend changes close current CUA sessions; start a new task afterward.</p>' +
+      '</details>' +
+      '<div id="cu-message" class="msg" role="status" aria-live="polite"></div>';
 
-       So the console opens with the question they CAN answer ("what are you trying to connect?") and each
-       answer is a real jump to the tab that handles it. Two of the answers leave this window entirely —
-       chat-FROM-Slack is CHANNELS and model providers are SETTINGS — because the honest answer to "how do
-       I connect Telegram" is a different window, and silence there is exactly what sends people hunting.
-       Nothing here gates anything: every tab remains one click away in the rail. */
-    const ROUTES = [
-      { glyph: '⊞', to: 'catalog', title: 'Connect a service you use',
-        blurb: 'Find services and platform APIs, including print-on-demand. See what they can do and follow their setup steps. <b>Start here.</b>' },
-      { glyph: '⧉', to: 'mcp', title: 'Advanced: add a custom connection',
-        blurb: 'You already have an MCP endpoint and want to point the station at it.' },
-      { glyph: '▤', to: 'toolsets', title: 'Switch a built-in on or off',
-        blurb: 'Web, files, terminal, memory — inspect the selected agent’s tools and where its access comes from.' },
-      // cross-window, and deliberately so: naming the wrong window is worse than naming none.
-      { glyph: '✉', term: 'messaging', title: 'Message your agent from Telegram or Slack',
-        blurb: 'Connect a chat account so you can give your agent work from there. Opens CHANNELS.' },
-      { glyph: '◈', term: 'settings', section: 'providers', title: 'Add an AI model provider',
-        blurb: 'Anthropic, OpenAI, OpenRouter keys and sign-ins live in SETTINGS › AI & MODELS.' }
-    ];
-    const secRouter =
-      '<details class="ab-router" id="ab-router">' +
-        '<summary class="ab-router-q"><span>＋ ADD AN ABILITY</span><small>Choose a service, server, channel or model provider</small></summary>' +
-        '<div class="ab-router-grid">' +
-          ROUTES.map((r, i) =>
-            '<button type="button" class="ab-route" style="--ci:' + i + '"' +
-              (r.to ? ' data-ab-to="' + esc(r.to) + '"' : '') +
-              (r.term ? ' data-ab-term="' + esc(r.term) + '"' : '') +
-              (r.section ? ' data-ab-section="' + esc(r.section) + '"' : '') + '>' +
-              '<span class="ab-route-glyph" aria-hidden="true">' + esc(r.glyph) + '</span>' +
-              '<span class="ab-route-main"><span class="ab-route-title">' + esc(r.title) + '</span>' +
-                '<span class="ab-route-blurb dim">' + r.blurb + '</span></span>' +
-              '<span class="ab-route-go" aria-hidden="true">' + (r.term ? '↗' : '›') + '</span>' +
-            '</button>').join('') +
-        '</div>' +
-      '</details>';
-
-    // FIRST OPEN LANDS ON THE CATALOG (first-hour walk 2026-09-28): a newcomer who came here to connect Gmail met
-    // "capability grants", "ASK mode" and REFRESH AUTHORITY first. With no remembered section yet, land on
-    // DISCOVER › CATALOG ("find a service by name"); every later open returns to the section last used. Tabs and
-    // sections are unchanged — only the first one shown.
+    // FIRST OPEN LANDS ON APPS (first-hour walk 2026-09-28): a newcomer who came here to connect Gmail met "capability
+    // grants", "ASK mode" and REFRESH AUTHORITY first. With no remembered section yet, land on APPS ("find an app by
+    // name"); every later open returns to the section last used.
     if (H.consoleSection && !H.consoleSection.connectors) H.consoleSection.connectors = 'catalog';
     const host = mountConsole(body, 'connectors', [
-      { id: 'toolsets', label: 'BUILT-IN ABILITIES', glyph: '▤', desc: 'The list shows what the agent you pick can use, but each switch turns a built-in ability on or off for every agent; CHECK WITH ME and LET IT WORK obey the switches, FULL POWER overrides them. Connected services still need working credentials.', build: frag(secToolsets) },
-      { id: 'computer', label: 'COMPUTER CONTROL', glyph: '▣', desc: 'Choose how agents interact with native desktop apps. Full Power or a paired remote-owner lease is required.', build: frag(
-        '<div class="set-about">CUA targets windows and accessibility elements, works in the background where supported, and reports evidence for each action. Foreground input can move focus when needed.</div>' +
-        '<div id="cu-status" class="set-about" role="status" aria-live="polite">Checking computer control…</div>' +
-        '<div class="mc-acts" role="group" aria-label="Computer control backend">' +
-        '<button type="button" class="bb sm" data-cu-backend="cua">CUA · ACCESSIBILITY</button>' +
-        '<button type="button" class="bb sm" data-cu-backend="win32">WINDOWS · CLASSIC</button>' +
-        '<button type="button" class="bb sm" data-cu-backend="off">OFF</button></div>' +
-        '<div class="mc-acts"><button type="button" class="bb sm" id="cu-install">INSTALL CUA</button>' +
-        '<button type="button" class="bb sm" id="cu-check">CHECK DRIVER</button></div>' +
-        '<p class="dim">Install downloads the verified Windows x64 driver from CUA’s official release. Reinstall and backend changes close current CUA sessions; start a new task afterward.</p>' +
-        '<div id="cu-message" class="msg" role="status" aria-live="polite"></div>') },
-      { id: 'catalog', label: 'CATALOG', glyph: '⊞', desc: 'Find a service by name or what you want to do. Choose it to see the setup required; YOUR SERVICES shows saved setups, not a live connection guarantee.', build: frag(secCatalog) },
-      { id: 'keys', label: 'SAVED API CONNECTIONS', glyph: '⊟', desc: 'The platform credentials your agents actually hold, plus a safe drop for a custom API the catalog does not list.', build: frag(secKeys) },
-      { id: 'mcp', label: 'CONNECTED SERVICES', glyph: '⧉', desc: 'Manage service access, check connection status, and reconnect when needed.', build: frag(secMcp) },
-      // (ONE DOOR EACH, 2026-10-01: the CREATE / ADVANCED router pane repeated the rail — custom MCP server → CONNECTED
-      // SERVICES, custom API key → SAVED API CONNECTIONS, skill package → SKILL EXCHANGE, hooks/plugins → EXTENSIONS)
-      { id: 'extensions', label: 'EXTENSIONS', glyph: '⌥', desc: 'Automate a step or extend StarNet with your own code.', build: frag(secExt) }
-    ].concat(lanes.reduce((acc, l) => acc.concat(l.sections), [])), {
+      { id: 'catalog', label: 'APPS', glyph: '⊞', desc: 'Connect the apps you use, like Gmail, Notion or Google Drive. Pick one to see how to set it up.', build: frag(secCatalog) },
+      { id: 'mcp', label: 'CONNECTED', glyph: '⧉', desc: 'Everything you have connected: services and API keys. Add your own here too.', build: frag(
+        '<div class="sec" id="ab-services"><span class="sec-l">SERVICES</span><span class="sec-r"></span><span class="sec-nd"></span></div>' + secMcp + secKeys) }
+    ].concat(lanes.reduce((acc, l) => acc.concat(l.sections), []), [   // SKILL MARKET, SKILLS
+      { id: 'toolsets', label: 'TOOLS', glyph: '▤', desc: 'The tools built into StarNet, like web, files and terminal. Each switch turns a tool on or off for every agent; CHECK WITH ME and LET IT WORK obey the switches, FULL POWER overrides them.', build: frag(secToolsets + secComputer) },
+      { id: 'extensions', label: 'EXTENSIONS', glyph: '⌥', desc: 'Advanced: run your own scripts and plugins inside StarNet.', build: frag(secExt) }
+    ]), {
       search: true,
-      groups: [
-        { id: 'installed', label: 'INSTALLED', sections: ['toolsets', 'computer', 'mcp', 'keys', 'agent'] },
-        { id: 'discover', label: 'DISCOVER', sections: ['catalog', 'market', 'library'] },
-        { id: 'advanced', label: 'CREATE / ADVANCED', sections: ['extensions', 'exchange'] }
-      ],
       searchLabel: 'Search abilities',
       searchPlaceholder: 'search abilities…',   // fits the rail's search box whole (the long hint was cut at 'search a platform,')
       searchEmptyText: 'No abilities match that search. Try another platform, tool, or skill.'
@@ -376,15 +351,7 @@
     lanes.forEach(l => { try { if (typeof l.wire === 'function') l.wire(); } catch (_) {} });
     if (typeof Tutorial !== 'undefined' && Tutorial.wirePlatformGuide) Tutorial.wirePlatformGuide(body);
 
-    /* Mount the front door ABOVE the panes, inside the scrolling content column: it is the first thing
-       read on every tab, and it scrolls away once you are working — permanent chrome for a question you
-       only ask once would be worse than no answer. It hides itself while the search box is active
-       (`.con-searching`), because then the Commander has already named the thing and the results ARE the
-       answer. */
-    const routerEl = document.createElement('div');
-    routerEl.innerHTML = secRouter;
-    const routerNode = routerEl.firstChild;
-    if (host && routerNode) host.insertBefore(routerNode, host.firstChild);
+    // a task waiting on a connection says so above every section, with the way back to that task
     const handoffEl = document.createElement('div');
     handoffEl.className = 'mc-hint'; handoffEl.setAttribute('aria-live', 'polite');
     if (host) host.insertBefore(handoffEl, host.firstChild);
@@ -426,7 +393,7 @@
       const to = btn.dataset.abTo;
       if (to) {
         const tab = body.querySelector('#con-tab-connectors-' + to);
-        if (tab) { tab.click(); routerNode.open = false; host.scrollTop = 0; }
+        if (tab) { tab.click(); host.scrollTop = 0; }
         return;
       }
       // cross-window jump: openTerm is idempotent (restores a minimized window rather than duplicating).
@@ -793,7 +760,9 @@
             (t.object ? '<button class="bb xs ts-place" type="button" data-ts-place="' + esc(t.object) + '">⚒ PLACE ONE</button>' : '') +
           '</span>'
         : '';
-      const consent = '<span class="ts-tag">' + (t.available ? esc(t.grantSource || 'granted') : 'not granted') + '</span>' + (t.consentGated ? '<span class="ts-tag">risky actions may ask</span>' : '');
+      // the sidecar names an unrestricted grant 'Full Access'; on screen that is the FULL POWER posture (ONE ACCESS words)
+      const source = t.grantSource === 'Full Access' ? 'FULL POWER' : t.grantSource;
+      const consent = '<span class="ts-tag">' + (t.available ? esc(source || 'granted') : 'not granted') + '</span>' + (t.consentGated ? '<span class="ts-tag">risky actions may ask</span>' : '');
       const status = '<span class="ts-availability' + (t.available ? ' available' : '') + '">' + availability + '</span>';
       const isJuke = t.id === 'jukebox';
       const all = (t.tools && t.tools.length) ? t.tools : [];
@@ -822,6 +791,29 @@
     // ORG P21: open on the same agent the skills lane in this console shows (sent from a dossier, or the dossier's own)
     const openOn = typeof H.skillsAgentId === 'function' ? H.skillsAgentId() : (agents[H.sel] && agents[H.sel].id);
     if (openOn && agents.some(a => a.id === openOn)) tsAgentEl.value = openOn; else if (agents[H.sel]) tsAgentEl.value = agents[H.sel].id;
+    /* THE ACCESS LINE (UX night 10-26, Andrew: "pretend these users are like 5"). It read "NOVA · ASK — standing grants
+       apply · Trusted project folders. Revoke standing grants in Settings → Permissions. Capability grants shown here;
+       the current task, service connection and operating system can still limit execution." Now it says what this agent
+       may do in the ONE ACCESS words the dossier uses, gated the same way (ORG P21): FULL POWER only when the live
+       authority is unrestricted, else the agent's saved asking posture, else its own mix. The sidecar's exact how-to-undo
+       rides the tip. */
+    function tsAccessLine(a) {
+      const agent = agents.find(x => x && x.id === a.agentId);
+      const P = agent && typeof H.agentPostureOf === 'function' ? H.agentPostureOf(agent) : null;
+      const who = '<b>' + esc(a.name) + '</b>';
+      let html;
+      if (a.unrestricted) {
+        const from = a.source === 'environment' ? 'StarNet was started in full-access mode'
+          : a.source === 'station' ? 'FULL POWER is on for every agent in SETTINGS › PERMISSIONS' : 'set in its dossier, CONFIG › ACCESS';
+        html = who + ' is on <b>FULL POWER</b>: it never asks first and can use your whole computer. The switches below do not limit it <span class="dim">(' + esc(from) + ')</span>.';
+      } else if (P && P.approval === 'ask') {
+        html = who + ' is on <b>' + esc(P.label) + '</b>: ' + esc(P.agentBlurb) + ' <span class="dim">Change it in its dossier, CONFIG › ACCESS.</span>';
+      } else {
+        html = who + ' asks before risky steps, with its own mix of reach. <span class="dim">Change it in its dossier, CONFIG › ACCESS.</span>';
+      }
+      tsAuthorityEl.innerHTML = html;
+      tsAuthorityEl.dataset.tip = a.approvalLabel + ' · ' + a.filesystemLabel + '. ' + a.revoke;
+    }
     let tsRequest = 0;
     const tsLabels = {};
     tsAgentEl.addEventListener('change', tsRefresh);
@@ -834,14 +826,14 @@
         if (request !== tsRequest || !body.isConnected) return;
         if (!j || j.error || !j.authority) throw new Error((j && j.error) || 'authority unavailable');
         const a = j.authority;
-        tsAuthorityEl.textContent = a.name + ' · ' + a.approvalLabel + ' · ' + a.filesystemLabel + '. ' + a.revoke + ' Capability grants shown here; the current task, service connection and operating system can still limit execution.';
+        tsAccessLine(a);
         const list = (j && j.toolsets) || [];
         list.forEach(t => { if (t && t.id) tsLabels[t.id] = t.label || t.id; });   // the toast names the ability, not its id
         tsListEl.innerHTML = '<div class="ability-readout" aria-label="Selected agent toolset availability">' +
           '<div><b>' + list.filter(t => t.available).length + '</b><span>AVAILABLE</span></div>' +
           '<div><b>' + list.filter(t => tsAvailability(t) === 'NEEDS PROP').length + '</b><span>NEED A PROP</span></div>' +
           '<div><b>' + list.filter(t => !t.available && tsAvailability(t) !== 'NEEDS PROP').length + '</b><span>UNAVAILABLE</span></div></div>' +
-          '<p class="ability-legend">AVAILABLE means this agent has the capability through equipment or access settings. Service connections and task permissions still apply. Each switch below applies to every agent.</p>' +
+          '<p class="ability-legend">AVAILABLE means this agent has the capability right now; a task or a service can still say no. Each switch below applies to every agent.</p>' +
           list.map(tsRowHTML).join('');
         if (body.querySelector('#sp-connect')) setupSpotify(body);   // wire Spotify now the sp-* markup is in the JUKEBOX row
       } catch (_) { if (request !== tsRequest) return; tsAuthorityEl.textContent = 'Effective authority unavailable.'; tsListEl.innerHTML = '<div class="mc-detail">Cannot read current capabilities. Reopen ABILITIES after reconnecting.</div>'; }
@@ -935,7 +927,7 @@
 
     function resetForm() {
       editing = null;
-      formH.textContent = 'ADD A CONNECTOR';
+      formH.textContent = 'Add a service by its address';
       addBtn.textContent = '+ ADD & CONNECT';
       cancelBtn.style.display = 'none';
       idInput.disabled = false;
@@ -949,7 +941,7 @@
     // populate the form from an existing connector for EDIT (secrets stay blank = keep-saved).
     function startEdit(c) {
       editing = c.id;
-      formH.textContent = 'EDIT CONNECTOR — ' + (c.label || c.id);
+      formH.textContent = 'Edit service — ' + (c.label || c.id);
       addBtn.textContent = '✓ SAVE & RECONNECT';
       cancelBtn.style.display = '';
       idInput.disabled = true;
@@ -975,6 +967,7 @@
         const adv = body.querySelector('#mc-form .mc-adv');
         if (adv) adv.open = hKeys.length > 0 || !!(c.timeoutMs && c.timeoutMs !== 30000);
       }
+      const addFold = body.querySelector('#mc-add-fold'); if (addFold) addFold.open = true;   // the form is folded by default
       formH.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       idInput.focus();
       sfx('click');
@@ -1047,6 +1040,8 @@
         const deferred = list.filter(c => c.releaseDeferred);
         const attention = list.filter(c => !c.releaseDeferred && (c.state === 'error' || c.authRequired)).length;
         overview.textContent = list.length + ' service' + (list.length === 1 ? '' : 's') + ' · ' + connected + ' connected' + (deferred.length ? ' · ' + deferred.length + ' deferred' : '') + (attention ? ' · ' + attention + ' need attention' : '');
+        // "0 services · 0 connected" over NOTHING CONNECTED YET said the same thing twice (UX night 10-26)
+        overview.hidden = !list.length && !storageError;
         // A release-wide explanation belongs once above the list, not in every saved service.
         notices.innerHTML = Array.from(new Set(deferred.map(c => c.detail).filter(Boolean))).map(note =>
           '<div class="mc-notice"><b>Service availability</b>' + esc(note) + '</div>').join('');
@@ -1081,15 +1076,15 @@
           listEl.querySelectorAll('.mc-inspect').forEach(el => { el.open = expanded.has(el.closest('.mc-row').dataset.id); });
         }
         else {
+          // the way in for almost everyone is an app from APPS; a service by its own address is the fold below
           listEl.innerHTML = '<div class="empty-state"><span class="es-glyph">⧉</span>' +
-            '<b>NO CONNECTORS YET</b><span>Attach an MCP server to give your agents external tools — GitHub, Slack, a database.</span>' +
-            '<button class="es-cta" id="mc-empty-cta" type="button">+ ADD A CONNECTOR</button></div>';
-          const cta = listEl.querySelector('#mc-empty-cta');
-          if (cta) cta.addEventListener('click', () => { sfx('click'); const idf = body.querySelector('#mc-id'); if (idf) idf.focus(); });
+            '<b>NOTHING CONNECTED YET</b><span>Connect an app like Gmail, Notion or GitHub from APPS.</span>' +
+            '<button class="es-cta" id="mc-empty-cta" type="button" data-ab-to="catalog">⊞ OPEN APPS</button></div>';
         }
         wireRemoveButtons();
       } catch (_) {
-        body.querySelector('#mc-overview').textContent = 'Service status unavailable';
+        const overview = body.querySelector('#mc-overview');
+        overview.textContent = 'Service status unavailable'; overview.hidden = false;
         body.querySelector('#mc-notices').textContent = '';
         listEl.innerHTML = '<div class="mc-detail">Could not read connections. Retry when the station is available.</div>';
       }
@@ -1690,14 +1685,14 @@
       if (act === 'manage') {
         const entry = ccEntry(id);
         if (!entry) return;
-        const tab = body.querySelector('#con-tab-connectors-' + (entry.platformApi ? 'keys' : 'mcp'));
+        const tab = body.querySelector('#con-tab-connectors-mcp');   // CONNECTED holds both services and API keys
         if (tab) tab.click();
-        if (entry.platformApi) { await kyRefresh(); await kyPlatformsRefresh(); }
+        if (entry.platformApi) { await kyRefresh(); await kyPlatformsRefresh(); const keysH = body.querySelector('#ab-keys'); if (keysH && host) host.scrollTop = Math.max(0, keysH.offsetTop - host.offsetTop - 8); }
         else {
           await refresh();
           const target = Array.from(listEl.querySelectorAll('.mc-row')).find(r => r.dataset.id === entry.id);
           if (target) ccFlash(target);
-          else { msgEl.classList.remove('ok'); msgEl.textContent = 'This saved connection is no longer listed. Return to CATALOG and refresh to check its setup.'; }
+          else { msgEl.classList.remove('ok'); msgEl.textContent = 'This saved connection is no longer listed. Go back to APPS and refresh to check its setup.'; }
         }
       }
       else if (act === 'add') { btn.disabled = true; await ccInstall(id); }
@@ -1757,8 +1752,9 @@
     // CATALOG owns discovery; KEYS owns the credential. A platform card lands on the real add form and
     // carries only public setup metadata from /api/servicekeys/catalog — never a secret or invented state.
     function ccPrefillPlatform(p) {
-      const tab = body.querySelector('#con-tab-connectors-keys');
+      const tab = body.querySelector('#con-tab-connectors-mcp');   // the key form lives in CONNECTED › API KEYS
       if (tab) tab.click();
+      const keyFold = body.querySelector('#ky-add-fold'); if (keyFold) keyFold.open = true;
       kyNameEl.value = p.name;
       kyKeyEl.value = '';
       kyDocsEl.value = p.docsUrl || '';
@@ -1773,41 +1769,43 @@
         : (p.authHint
           ? 'paste your ' + p.name + ' key — the agent will send it as  ' + p.authHint
           : 'paste your ' + p.name + ' key — the agent reads ' + (p.docsUrl || 'the docs') + ' for the right header');
-      if (host) host.scrollTop = host.scrollHeight;
+      if (host && keyFold) host.scrollTop = Math.max(0, keyFold.offsetTop - host.offsetTop - 8);
       kyKeyEl.focus();
       sfx('click');
     }
     // TOP: platforms whose credential is a saved key/token on a live connector config. Read-only here — each is
     // managed where it was added (its CATALOG card / MCP CONNECTORS row). hasToken/hasHeaders are the backend's honest flags;
     // we never see (or show) the value. OAuth connectors are keyless by design and stay off this list.
+    // the keyed-platform group (and the label that tells the two groups apart) shows only when it has something to say
+    function kyPlatShown(on) {
+      kyPlatEl.hidden = !on;
+      const head = body.querySelector('#ky-plat-head'); if (head) head.hidden = !on;
+      const mine = body.querySelector('#ky-mine-head'); if (mine) mine.hidden = !on;
+    }
     async function kyPlatformsRefresh() {
       try {
         const [cRes, gRes] = await Promise.all([readJSON('/api/connectors'), readJSON('/api/connectors/catalog')]);
         // The CONNECTORS read is what decides "you have none" — if it failed, say so instead of asserting zero.
         // The catalog is only display sugar (names); a failed catalog degrades labels, never the count.
-        if (!cRes.ok) { kyPlatEl.innerHTML = readFailLine(cRes, 'sidecar offline — start it to see connected platforms.'); return; }
+        if (!cRes.ok) { kyPlatShown(true); kyPlatEl.innerHTML = readFailLine(cRes, 'sidecar offline — start it to see connected platforms.'); return; }
         const cj = cRes.json, gj = gRes.json;
         const byId = {};
         for (const e of ((gj && gj.connectors) || [])) byId[e.id] = e;
         const keyed = ((cj && cj.connectors) || []).filter(c => (c.hasToken || c.hasHeaders) && !c.oauth);
         const n = body.querySelector('#ky-plat-n'); if (n) n.textContent = String(keyed.length);
-        if (!keyed.length) {
-          // The sentence named a destination and gave nothing to click — the same dead-end shape as the
-          // inert toolset row. `data-ab-to` is the front door's own jump contract, handled by the router.
-          kyPlatEl.innerHTML = '<div class="mc-detail">No keyed platform connected yet — add one from the CATALOG (the entries marked <b style="color:var(--gold)">API key</b>). ' +
-            '<button type="button" class="bb xs" data-ab-to="catalog">⊞ OPEN CATALOG</button></div>';
-          return;
-        }
+        // none: the group stays out of sight; the key list's own empty line already points at APPS
+        kyPlatShown(keyed.length > 0);
+        if (!keyed.length) { kyPlatEl.innerHTML = ''; return; }
         kyPlatEl.innerHTML = keyed.map((c, i) => {
           const cat = byId[c.id];
           const b = c.state === 'up' ? ['var(--ok)', '● connected'] : (c.state === 'cached' ? ['var(--gold)', '◐ idle · starts on use'] : (c.state === 'error' ? ['var(--bad)', '✕ error'] : ['var(--ph-dim)', '○ ' + esc(c.state || 'off')]));
           return '<div class="mc-row" style="--ci:' + i + '">' +
             '<div class="mc-top"><b>' + esc((cat && cat.name) || c.label || c.id) + '</b> <span class="dim">' + esc(c.id) + '</span>' +
               '<span class="mc-state" style="color:' + b[0] + '">' + b[1] + (c.toolCount ? ' · ' + c.toolCount + ' tool' + (c.toolCount === 1 ? '' : 's') : '') + '</span></div>' +
-            '<div class="mc-url dim"><span class="mc-tag">' + (c.hasHeaders && !c.hasToken ? 'header saved' : 'token saved') + '</span> managed in ' + (cat ? 'CATALOG' : 'CONNECTED SERVICES') + '</div>' +
+            '<div class="mc-url dim"><span class="mc-tag">' + (c.hasHeaders && !c.hasToken ? 'header saved' : 'token saved') + '</span> managed in ' + (cat ? 'APPS' : 'CONNECTED › SERVICES') + '</div>' +
           '</div>';
         }).join('');
-      } catch (_) { kyPlatEl.innerHTML = '<div class="mc-detail">sidecar offline — start it to see connected platforms.</div>'; }
+      } catch (_) { kyPlatShown(true); kyPlatEl.innerHTML = '<div class="mc-detail">sidecar offline — start it to see connected platforms.</div>'; }
     }
     // BOTTOM: the custom store. Checkbox = kill-switch (key stays saved, agents stop seeing it); ✕ deletes.
     // "read 4 min ago" from the sidecar's own read time (refReadAt) — never a client-side guess
@@ -1854,7 +1852,8 @@
       const list = (res.json && res.json.keys) || [];
       const n = body.querySelector('#ky-mine-n'); if (n) n.textContent = String(list.length);
       kyListEl.innerHTML = list.length ? list.map(kyRow).join('')
-        : '<div class="mc-detail">No API keys connected yet — choose a platform in CATALOG, or add a custom key below.</div>';
+        : '<div class="mc-detail">No API keys yet. Pick an app in APPS, or add your own key below. ' +
+          '<button type="button" class="bb xs" data-ab-to="catalog">⊞ OPEN APPS</button></div>';
     }
     body.querySelector('#ky-add').addEventListener('click', async () => {
       const name = (kyNameEl.value || '').trim(), key = (kyKeyEl.value || '').trim(), docsUrl = (kyDocsEl.value || '').trim();
@@ -1926,7 +1925,7 @@
     kyRefresh();
     // panes mount once and tab clicks only toggle visibility — re-poll both lists when the Commander
     // lands on KEYS, so a connector keyed on the CATALOG tab moments ago shows up without a window reopen.
-    const kyTab = body.querySelector('#con-tab-connectors-keys');
+    const kyTab = body.querySelector('#con-tab-connectors-mcp');   // CONNECTED shows the API keys too
     if (kyTab) kyTab.addEventListener('click', () => { kyPlatformsRefresh(); kyRefresh(); });
     const ccTab = body.querySelector('#con-tab-connectors-catalog');
     if (ccTab) ccTab.addEventListener('click', ccRefresh);
@@ -1946,8 +1945,12 @@
       try {
         const j = await Harness.api.get('/api/spotify/status');
         if (redirEl && j.redirectUri) redirEl.textContent = j.redirectUri;
+        // the setup fold holds RECONNECT / DISCONNECT once connected, so its name follows the state
+        const foldName = body.querySelector('#sp-setup-fold > summary');
+        if (foldName) foldName.textContent = j.connected ? 'Spotify connection' : 'Connect your Spotify';
         if (j.connected) {
-          statusEl.innerHTML = '<span style="color:var(--ok)">● connected</span>' + (j.scope ? ' <span class="dim">· ' + esc(j.scope) + '</span>' : '');
+          // the OAuth scope list is a developer detail: it rides the tip, the line says connected
+          statusEl.innerHTML = '<span style="color:var(--ok)"' + (j.scope ? ' data-tip="' + esc('Spotify access: ' + j.scope) + '"' : '') + '>● connected</span>';
           connectBtn.textContent = '↻ RECONNECT';
           disconnectBtn.style.display = '';
         } else {

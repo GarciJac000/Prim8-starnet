@@ -792,7 +792,7 @@ const Tutorial = (() => {
     const ids = connectOffers(goalTexts());
     const items = ids.map(id => ({ label: '⧉ ' + (CONNECT_LABEL[id] || id), value: id }))
       .concat([{ label: 'Show me how to connect platforms', value: 'guide' }, { label: 'not now', value: 'skip', skip: true, quiet: true }]);
-    say([seg('want to connect an app you already use? choose one below, or open the connection guide. you can find apps in BUILD › CONNECT › ABILITIES › CATALOG, and messaging platforms in BUILD › CONNECT › CHANNELS.', 44, 0)], () => {
+    say([seg('want to connect an app you already use? choose one below, or open the connection guide. you can find apps in BUILD › CONNECT › ABILITIES › APPS, and messaging platforms in BUILD › CONNECT › CHANNELS.', 44, 0)], () => {
       const row = Chat.choices(items, item => {
         if (!item || item.skip) return done();
         if (item.value === 'guide') { showPlatformConnections(); return; }
@@ -977,7 +977,7 @@ const Tutorial = (() => {
     tickBrief('build');
     watchConnectors(1);
     showCoach('connector', '#refit-palette',
-      'that’s a connector portal. connect the service in BUILD › CONNECT › ABILITIES › CATALOG first; placing a portal does not sign you in. the connection guide is in SYSTEM › FIELD MANUAL › CONNECT PLATFORMS.');
+      'that’s a connector portal. connect the service in BUILD › CONNECT › ABILITIES › APPS first; placing a portal does not sign you in. the connection guide is in SYSTEM › FIELD MANUAL › CONNECT PLATFORMS.');
   }
   function onLevelUp() {
     tickBrief('level');
@@ -1141,7 +1141,7 @@ const Tutorial = (() => {
     const apps = kind === 'apps';
     return '<details class="platform-guide" data-platform-guide="' + kind + '"' + (guidedPlatform === kind ? ' open' : '') + '>'
       + '<summary>' + (apps ? 'Connect a work app — step by step' : 'Chat from another platform — step by step') + '</summary>'
-      + '<p class="fm-note">Find this again: <b>BUILD › CONNECT › ' + (apps ? 'ABILITIES › CATALOG' : 'CHANNELS') + '</b>.</p>'
+      + '<p class="fm-note">Find this again: <b>BUILD › CONNECT › ' + (apps ? 'ABILITIES › APPS' : 'CHANNELS') + '</b>.</p>'
       + '<ol><li>' + (apps ? 'Use Search abilities above to find your app. Its card shows the setup it needs.' : 'Choose your platform in the list. Its setup guide explains where to get the details it needs.') + '</li>'
       + '<li>' + (apps ? 'Use the card’s action. SIGN IN opens account authorization; API key asks for a key from that service. Follow any setup instructions and review the access requested.' : 'Follow that platform’s setup instructions, then use its CONNECT action. Complete pairing if the platform asks for it.') + '</li>'
       + '<li>' + (apps ? 'Check the status beside the service. A saved key is not a tested connection. If setup fails, read the message there before retrying.' : 'Check the platform’s status, then send your agent a message there. Seeing the reply is your end-to-end check.') + '</li></ol>'
@@ -1164,7 +1164,7 @@ const Tutorial = (() => {
     if (tab === 'CONNECT PLATFORMS') {
       return '<p class="fm-lead">Bring the apps you already use into your station. What would you like to connect?</p>'
         + '<div class="fm-map">'
-        + fmEntry('WORK APPS', 'Let your agent work with your apps', 'Use your mail, calendar, documents and other services from COMMS. Browse the current catalog to see what is available.<br><b>BUILD › CONNECT › ABILITIES › CATALOG</b><div class="fm-actions"><button type="button" class="fm-action" data-platform-start="apps">SHOW ME WHERE TO CONNECT APPS ↗</button></div>')
+        + fmEntry('WORK APPS', 'Let your agent work with your apps', 'Use your mail, calendar, documents and other services from COMMS. Browse the current catalog to see what is available.<br><b>BUILD › CONNECT › ABILITIES › APPS</b><div class="fm-actions"><button type="button" class="fm-action" data-platform-start="apps">SHOW ME WHERE TO CONNECT APPS ↗</button></div>')
         + fmEntry('MESSAGING', 'Talk to your agent from another platform', 'Connect a messaging platform so you can chat with your agent there. Each platform has its own setup guide.<br><b>BUILD › CONNECT › CHANNELS</b><div class="fm-actions"><button type="button" class="fm-action" data-platform-start="messaging">SHOW ME WHERE TO CONNECT MESSAGING ↗</button></div>')
         + '</div><p class="fm-note">For example, using Slack as a work tool and chatting with your agent from Slack are different connections. Choose the path for what you want to do.</p>'
         + '<p class="fm-note">You can connect one now or return whenever you need it: <b>SYSTEM › FIELD MANUAL › CONNECT PLATFORMS</b>. Connecting accounts is optional.</p>'

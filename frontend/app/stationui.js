@@ -1531,6 +1531,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     let activeId = consoleSection[key];
     if (key === 'settings' && activeId === 'nightshift') activeId = 'autonomy';   // folded into AUTONOMY (ONE WORD: AUTONOMY)
     if (key === 'settings' && (activeId === 'models' || activeId === 'livevoice')) activeId = activeId === 'models' ? 'providers' : 'appearance';   // the same aliases openTerm applies (a remembered LIVE VOICE reopened on AI & MODELS)
+    const retired = SECTION_ALIAS[key] && SECTION_ALIAS[key][activeId];   // a remembered section that became a block (ONE FLAT LIST)
+    if (retired) activeId = retired[0];
     if (!sections.some(s => s.id === activeId)) activeId = sections[0] && sections[0].id;
 
     // ---- left: optional rail-top slot (e.g. the dossier roster) + optional search + the section rail (role=tablist) ----
@@ -2089,7 +2091,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       { lbl: 'ACCESS',    val: 'checking effective access…', dim: false, go: 'ag-approval-card',  tip: 'change it in CONFIG › ACCESS' },
       { lbl: 'PROFILE',   val: prof.label.toLowerCase(),  dim: false,               go: 'ag-execution-card', tip: 'change it in CONFIG › ACCESS' },
       { lbl: 'VOICE',     val: voice || 'station default', dim: !voice,             go: 'ag-voice',          tip: 'opens SETTINGS › LOOK & SOUND › VOICE FOR this agent' },
-      { lbl: 'SKILLS',    val: 'its own procedures',       dim: true,               go: 'ag-skills',         tip: 'opens ABILITIES › AGENT SKILLS for this agent' },
+      { lbl: 'SKILLS',    val: 'its own procedures',       dim: true,               go: 'ag-skills',         tip: 'opens ABILITIES › SKILLS › LEARNED SKILLS for this agent' },
       { lbl: 'AWAY WORK', val: (a && a.workshop) ? 'on'  : 'off', dim: !(a && a.workshop), go: 'ag-workshop-card',  tip: 'opens AUTOMATE › AWAY WORK' }
     ];
     return '<div class="ag-setup" role="group" aria-label="How this agent is set up">' +
@@ -3812,23 +3814,27 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     // guides an agent follows mid-task, not launchable jobs. The intro that restated the desc folded into it (UX night 10-25).
     const secLibrary =
       '<div id="sk-lib" class="sk-lib"><div class="sk-loading"><span class="loading pulse">loading the skill library…</span></div></div>';
-    const secAgent =
-      agentPicker +
+    const secAgent =   // the agent picker leads the whole SKILLS section now: it steers the library, these skills and the market
       '<p class="sk-note sk-lib-intro" id="sk-agent-intro">' + skillsIntro(a) + '</p>' +
       '<div id="sk-agent" class="sk-lib"><div class="sk-loading">loading agent skills…</div></div>';
+    // ONE FIELD, ONE BUTTON (UX night 10-26, Andrew: "pretend these users are like 5"): a link and INSPECT are the whole
+    // job, and what INSPECT finds shows right under them. An exported package file and skill registries ("taps") are
+    // power tools: folded under MORE WAYS, every id unchanged, so wireSkillExchange() is untouched.
     const secExchange =
-      '<p class="sk-note sk-lib-intro">Install a complete open skill package from a public HTTPS or GitHub <b>SKILL.md</b>. StarNet freezes the instructions and support files under one SHA-256 before review. Missing, oversized, unsafe, or partial packages are refused.</p>' +
-      '<div class="sk-exchange-form"><label for="sk-exchange-url">SKILL.MD SOURCE</label>' +
+      '<p class="sk-note sk-lib-intro">Paste a link to a skill’s <b>SKILL.md</b> file, for example on GitHub. StarNet checks the whole package and shows you what it does before anything installs; unsafe or broken packages are refused.</p>' +
+      '<div class="sk-exchange-form"><label for="sk-exchange-url">LINK TO A SKILL.md</label>' +
         '<div class="sk-exchange-row"><input id="sk-exchange-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/owner/repo/blob/main/SKILL.md">' +
-        '<button id="sk-exchange-inspect" class="consent-btn" type="button">INSPECT</button></div>' +
-        '<label class="consent-btn" for="sk-exchange-import">IMPORT EXPORTED PACKAGE</label><input id="sk-exchange-import" type="file" accept=".json,.starnet-skill.json,application/json" hidden></div>' +
-      '<div class="sk-exchange-form"><label for="sk-registry-url">REGISTRY / TEAM TAP</label>' +
-        '<div class="sk-exchange-row"><input id="sk-registry-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/skills/index.json">' +
-        '<input id="sk-registry-query" type="search" autocomplete="off" placeholder="search or browse all">' +
-        '<button id="sk-registry-search" class="consent-btn" type="button">BROWSE</button>' +
-        '<button id="sk-registry-discover" class="consent-btn" type="button">DISCOVER SITE</button>' +
-        '<button id="sk-registry-save" class="consent-btn" type="button">SAVE TAP</button></div><div id="sk-registry-sources"></div><div id="sk-registry-results"></div></div>' +
-      '<div id="sk-exchange-preview" class="sk-exchange-preview" role="status" aria-live="polite"><div class="sk-loading">Paste a source to inspect its instructions, provenance, and guard verdict.</div></div>';
+        '<button id="sk-exchange-inspect" class="consent-btn" type="button">INSPECT</button></div></div>' +
+      '<div id="sk-exchange-preview" class="sk-exchange-preview" role="status" aria-live="polite"><div class="sk-loading">Paste a link, then INSPECT. You see what the skill does, and whether it is safe, before anything installs.</div></div>' +
+      '<details class="mc-add-fold sk-more-ways"><summary>More ways to add a skill <span class="dim">(advanced)</span></summary>' +
+        '<div class="sk-exchange-form"><label class="consent-btn" for="sk-exchange-import">IMPORT EXPORTED PACKAGE</label><input id="sk-exchange-import" type="file" accept=".json,.starnet-skill.json,application/json" hidden></div>' +
+        '<div class="sk-exchange-form"><label for="sk-registry-url">REGISTRY / TEAM TAP</label>' +
+          '<div class="sk-exchange-row"><input id="sk-registry-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://example.com/skills/index.json">' +
+          '<input id="sk-registry-query" type="search" autocomplete="off" placeholder="search or browse all">' +
+          '<button id="sk-registry-search" class="consent-btn" type="button">BROWSE</button>' +
+          '<button id="sk-registry-discover" class="consent-btn" type="button">DISCOVER SITE</button>' +
+          '<button id="sk-registry-save" class="consent-btn" type="button">SAVE TAP</button></div><div id="sk-registry-sources"></div><div id="sk-registry-results"></div></div>' +
+      '</details>';
     /* Fill the LIVE VOICE section from the sidecar's real voice list and persist the pick.
        Truthful by construction: if the provider has no native voice endpoint we say so rather than
        offering choices that would do nothing, and the note about WHEN a change takes effect is shown
@@ -3850,11 +3856,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div id="skm-list" class="cc-list"><span class="loading pulse">loading the skill market…</span></div>';
 
     const frag = html => (el => { el.innerHTML = html; });
+    // ONE FLAT LIST (UX night 10-26, Andrew: "more like the settings menu where u can see all the different options"):
+    // SKILL EXCHANGE is SKILL MARKET's FROM A LINK block and AGENT SKILLS is the LEARNED block of SKILLS. Every element id
+    // is unchanged, so wire() below runs as before, and the retired section ids land here via SECTION_ALIAS.
+    const block = (id, label) => '<div class="sec" id="' + id + '"><span class="sec-l">' + label + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>';
     const sections = [
-      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'Browse StarNet Originals and credited community skills. Installing one adds it to your SKILL LIBRARY, switched on for the whole crew.', build: frag(secMarket) },
-      { id: 'library', label: 'SKILL LIBRARY', glyph: '▤', desc: 'The procedures your agents follow when a task matches, built into StarNet or installed from the market. Switch one on and agents use it when relevant, with the tools and services they already have.', build: frag(secLibrary) },
-      { id: 'agent', label: 'AGENT SKILLS', glyph: '✎', desc: 'Each agent keeps its own skill library. Pick whose to see.', build: frag(secAgent) },
-      { id: 'exchange', label: 'SKILL EXCHANGE', glyph: '⇩', desc: 'Inspect and install open SKILL.md procedures with provenance and guard review.', build: frag(secExchange) }
+      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'New skills for your crew, from StarNet and the community. Installing one switches it on for every agent.', build: frag(secMarket + block('ab-exchange', 'ADD FROM A LINK') + secExchange) },
+      { id: 'library', label: 'SKILLS', glyph: '▤', desc: 'What your crew knows how to do. Switch a skill on or off; agents use it when a task needs it, with the tools they already have.', build: frag(agentPicker + secLibrary + block('ab-agent-skills', 'LEARNED SKILLS') + secAgent) }
     ];
     function wire() {
       loadSkillMarket(agentId);
@@ -3929,7 +3937,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       action = btn('uninstall', 'REMOVE'); hint = 'Installed · v' + esc(e.installedVersion || e.version) + '.' + needs;
     } else if (e.status === 'bundled') {
       action = '<span class="cc-badge cc-official">BUILT IN</span>';
-      hint = 'Came with StarNet (v' + esc(e.builtInVersion || e.version) + '). Switch it on or off in SKILL LIBRARY.';
+      hint = 'Came with StarNet (v' + esc(e.builtInVersion || e.version) + '). Switch it on or off in SKILLS.';
     } else if (e.status === 'update') {
       action = btn('install', 'UPDATE');
       hint = e.builtIn && !e.delisted && e.installedVersion === e.builtInVersion
@@ -4373,9 +4381,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     if (!input || !button || !host || !Harness.skillExchangeInspect) return;
     const inspect = async () => {
       const url = String(input.value || '').trim();
-      if (!url) { host.innerHTML = '<div class="sk-loading">Enter a public HTTPS URL to a SKILL.md file.</div>'; return; }
+      if (!url) { host.innerHTML = '<div class="sk-loading">Paste a link first: a public https:// address of a SKILL.md file.</div>'; return; }
       button.classList.add('busy'); button.textContent = 'INSPECTING…';
-      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">fetching and scanning exact source bytes…</span></div>';
+      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">downloading the skill and checking it…</span></div>';
       const r = await Harness.skillExchangeInspect(url);
       button.classList.remove('busy'); button.textContent = 'INSPECT';
       if (r && r.ok && r.preview) renderSkillExchangePreview(host, r.preview, shownAgent());
@@ -4385,7 +4393,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); inspect(); } });
     if (importer && Harness.skillExchangeImport) importer.addEventListener('change', async () => {
       const file = importer.files && importer.files[0]; if (!file) return;
-      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">verifying exported package bytes…</span></div>';
+      host.innerHTML = '<div class="sk-loading"><span class="loading pulse">checking the package file…</span></div>';
       let envelope = ''; try { envelope = await file.text(); } catch (_) {}
       const r = envelope ? await Harness.skillExchangeImport(envelope) : { ok: false, error: 'That file could not be read.' };
       importer.value = '';
@@ -4640,7 +4648,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   function renderAgentSkills(host, skills, agentId, review) {
     review = review || {};
     if (!skills.length && !(review.candidates || []).length && !review.error) {
-      host.innerHTML = '<div class="sk-loading">No agent-created skills yet.</div>'; return;
+      // the agent by name, like the line above it (UX night 10-26)
+      const who = (present.find(x => x && x.id === agentId) || {}).name || 'This agent';
+      host.innerHTML = '<div class="sk-loading">' + esc(who) + ' has not learned any skills yet. Skills it writes or learns while working show up here.</div>'; return;
     }
     const active = skills.filter(s => s.state !== 'archived').length;
     const archived = skills.length - active;
@@ -7792,14 +7802,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<h4 class="ms-h">API KEYS</h4>' +
       '<div class="key-list">' + keysHtml() + '</div>' +
       '<p class="set-about">Credentials are saved locally and used to authenticate with the selected service. Saved keys stay masked. Desktop storage uses the OS keychain when available.</p>' +
-      // org P05: model keys live here; a SERVICE key lives in CONNECT › ABILITIES › SAVED API CONNECTIONS — one door, the
-      // places.js api-connections target (live walk 10-14: the door used to open CATALOG, so no key reached the place the
-      // sentence named). Gmail and Notion are SIGN IN catalog connectors (sidecar/mcp/catalog.js authType 'oauth') that
-      // SAVED API CONNECTIONS cannot connect, so the line says they connect from CATALOG — the neighbouring tab of the
-      // window this key opens. The key sits OUTSIDE the .set-about prose: that paragraph's 0.55 reading-dim greyed it into a
-      // disabled-looking key.
-      '<p class="set-about">A key for any other service goes in CONNECT › ABILITIES › SAVED API CONNECTIONS; Gmail, Notion and other sign-in services connect from CATALOG beside it.</p>' +
-      '<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ SAVED API CONNECTIONS</button></div>' +
+      // org P05: model keys live here; a SERVICE key lives in CONNECT › ABILITIES › CONNECTED › API KEYS — one door, the
+      // places.js api-connections target (live walk 10-14: the door used to open the catalog, so no key reached the place the
+      // sentence named). Gmail and Notion are SIGN IN catalog connectors (sidecar/mcp/catalog.js authType 'oauth') that an
+      // API key cannot connect, so the line says they connect from APPS — the neighbouring section of the window this key
+      // opens. The key sits OUTSIDE the .set-about prose: that paragraph's 0.55 reading-dim greyed it into a disabled-looking key.
+      '<p class="set-about">A key for any other service goes in CONNECT › ABILITIES › CONNECTED › API KEYS; Gmail, Notion and other sign-in services connect from APPS beside it.</p>' +
+      '<div class="mc-acts"><button type="button" class="bb sm" data-act="to-service-keys">▸ CONNECT › API KEYS</button></div>' +
       // STORE / MANAGED CREDITS — rendered ONLY when the sidecar reports a configured credits backend (/api/credits).
       // When credits aren't wired this stays an empty node (no dead card, no fake balance — the honesty law). wireCredits
       // fetches the real balance + history and the external purchase link; buying opens a browser tab, never an in-app form.
@@ -12123,6 +12132,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     get present() { return present; },
     get sel() { return sel; },
     skillsAgentId,   // ORG P21: the agent the ABILITIES skills lane shows — the BUILT-IN ABILITIES picker opens on the same one
+    agentPostureOf,  // a pure read (no state): the ONE ACCESS posture an agent's saved answer matches — TOOLS names it in those words
     get deskAgentId() { return deskAgentId; },
     get store() { return store; }
   };
@@ -12190,10 +12200,34 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     logbook:  { term: 'agents',     section: 'record', map: { runs: 'record', slag: 'record', insights: 'record' } },
     rewind:   { term: 'agents',     section: 'record', map: { restore: 'record' } }
   };
+  /* ONE FLAT LIST (UX night 10-26): CONNECT › ABILITIES lost its INSTALLED / DISCOVER / CREATE switch and four
+     sections became blocks of their neighbours. Their ids are named all over the app (places, error doors, the
+     dossier, SETTINGS), so each retired id still opens: on the section that absorbed it, scrolled to its block. */
+  const SECTION_ALIAS = {
+    connectors: { keys: ['mcp', '#ab-keys'], computer: ['toolsets', '#ab-computer'], agent: ['library', '#ab-agent-skills'], exchange: ['market', '#ab-exchange'] }
+  };
+  // a door to a merged block lands ON it: opens every fold on the way down, then scrolls (setTimeout, never rAF — a
+  // hidden or non-compositing tab never fires rAF). The window may still be swapping in, so it waits for the block;
+  // rows that load late above it (the services list) push it down, so it lands once more unless the Commander scrolled.
+  function revealInTerm(key, anchor) {
+    let tries = 0, landed = -1, pane = null;
+    const land = () => {
+      const w = open[key], el = w && w.querySelector(anchor);
+      if (!el) { if (++tries < 25) setTimeout(land, 60); return; }
+      for (let p = el.parentElement; p && p !== w; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+      pane = el.closest('.con-pane');
+      if (!pane) { try { el.scrollIntoView({ block: 'start' }); } catch (_) {} return; }
+      pane.scrollTop = Math.max(0, el.offsetTop - pane.offsetTop - 8); landed = pane.scrollTop;
+    };
+    setTimeout(land, 0);
+    setTimeout(() => { if (pane && pane.isConnected && pane.scrollTop === landed) land(); }, 700);
+  }
   function openTerm(key, section) {
     if (key === 'work') key = 'tasks'; // compatibility for old saved links; the station remains home
     const al = TERM_ALIAS[key];
     if (al) { section = (section && al.map[section]) || al.section; key = al.term; }
+    const sal = section && SECTION_ALIAS[key] && SECTION_ALIAS[key][section];
+    if (sal) { section = sal[0]; revealInTerm(key, sal[1]); }   // the scroll runs after this open/rerender below
     const def = BUILDERS[key]; if (!def) return;
     // the old NIGHT SHIFT settings section is part of AUTONOMY now (ONE WORD: AUTONOMY) — an old link still lands.
     if (key === 'settings' && section === 'nightshift') section = 'autonomy';
