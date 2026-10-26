@@ -281,6 +281,35 @@ module.exports = (async () => {
     await collect(makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://adopt.test:11434/v1', nativeOllama: true, maxTokens: 4096 }), { model: M, messages: [{ role: 'user', content: 'x'.repeat(68000) }], tools: TOOLS });
     A.eq(sizes, [32768], 'a spilling loaded window is not adopted when a smaller one holds the request');
   }
+  // Review F1 (0.14.1): a DENSE prompt (digit-heavy logs, CJK) beats the chars/4 estimate. On a CPU-only server (every
+  // model "spills") the step-down picked 32k, Ollama refused (it counts ~40k) and the window went back to 64k: two
+  // reloads and a lost KV cache on EVERY task turn. Once Ollama has refused a window, the step-down never goes below it.
+  {
+    const M = 'qwen3:4b-dense';
+    const cpu = { models: [{ name: M, size: 3e9, size_vram: 0, context_length: 65536 }] };
+    const sizes = [];
+    let loaded = false;
+    const fetch = async (url, init) => {
+      if (url.endsWith('/api/show')) return SHOW(262144, ['completion', 'tools']);
+      if (url.endsWith('/api/ps')) return new Response(JSON.stringify(loaded ? cpu : { models: [] }), { status: 200 });
+      if (url.endsWith('/api/chat')) {
+        const b = JSON.parse(init.body);
+        sizes.push(b.options.num_ctx); loaded = true;
+        const real = JSON.stringify(b.messages).length > 150000 ? 50000 : 40000;   // Ollama's own count, denser than the estimate
+        if (b.options.num_ctx < real + 4096) return new Response(JSON.stringify({ error: 'request (' + real + ' tokens) exceeds the available context size (' + b.options.num_ctx + ' tokens), try increasing it' }), { status: 400 });
+        return ndjson([{ message: { content: 'ok' }, done: true, done_reason: 'stop', prompt_eval_count: real, eval_count: 1 }]);
+      }
+      return new Response('{}', { status: 200 });
+    };
+    const mk = () => makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://dense.test:11434/v1', nativeOllama: true, maxTokens: 4096 });
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: 'x'.repeat(200000) }], tools: TOOLS });   // ~50k: holds 64k
+    sizes.length = 0;
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: '7'.repeat(68000) }], tools: TOOLS });   // estimate ~21k, real ~44k
+    A.eq(sizes, [32768, 65536], 'turn 1: the estimate steps down, Ollama refuses with its own count, the window resizes back up');
+    sizes.length = 0;
+    await collect(mk(), { model: M, messages: [{ role: 'user', content: '7'.repeat(68000) }], tools: TOOLS });
+    A.eq(sizes, [65536], 'turn 2: no second step-down — the window Ollama proved necessary is kept (no reload, KV cache intact)');
+  }
   // The connect ceiling (300 s for Ollama) has an env override; the default is unchanged.
   {
     A.eq(require('../sidecar/providers/registry.js').getProviderProfile('ollama').connectTimeoutMs, 300000, 'the Ollama default stays 300 s');

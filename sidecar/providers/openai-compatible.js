@@ -135,6 +135,17 @@
     const id = String(model || '');
     if (m && numCtx < (m.get(id) || 0)) m.set(id, numCtx);
   }
+  // The window Ollama's own exceed_context_size refusal proved a task needs, per model (endpoint -> model -> num_ctx).
+  // The step-down sizes from the chars/4 estimate, which a dense prompt (digit-heavy logs, CJK) beats: without this
+  // record every task turn stepped down, was refused and resized back up — two reloads and a lost KV cache a turn.
+  const ollamaProven = new Map();
+  function provenOllamaWindow(endpoint, model) { const m = ollamaProven.get(endpoint); return (m && m.get(String(model || ''))) || 0; }
+  function noteProvenOllamaWindow(endpoint, model, numCtx) {
+    let m = ollamaProven.get(endpoint);
+    if (!m) { m = new Map(); ollamaProven.set(endpoint, m); }
+    const id = String(model || '');
+    if (numCtx > (m.get(id) || 0)) m.set(id, numCtx);
+  }
   /* The native Ollama calls this PROCESS has open, per server (native root -> Set of { background }): open from the moment
      a stream starts until it ends. A local Ollama often serves one request at a time, and the host's own background calls
      (quest refresh at boot, post-task reflection) run with no Commander watching; a Commander turn's wait note says how
@@ -756,7 +767,8 @@
         if (!pinnedCtx) {
           const held = ollamaWindow(nativeBase, req.model);
           const task = !!(req.tools && req.tools.length);
-          const fits = task ? ollamaNative.pickNumCtx(need, { ceiling: ctxCeiling, modelMax }) : Infinity;
+          // ...never below a window Ollama has already refused to fit a task in (it counts tokens; the estimate guesses)
+          const fits = task ? Math.max(ollamaNative.pickNumCtx(need, { ceiling: ctxCeiling, modelMax }), provenOllamaWindow(nativeBase, req.model)) : Infinity;
           if (!held) {
             const ps = await ollamaStatus();
             const loaded = ollamaNative.loadedWindow(ps, req.model);
@@ -1049,7 +1061,7 @@
           const over = ollamaNative.exceedFrom(detail);
           if (over && !pinnedCtx) {
             const next = ollamaNative.pickNumCtx(over.promptTokens + (Number(body.max_tokens) || 0), { ceiling: ctxCeiling, modelMax: wire.modelMax, floor: wire.numCtx + 1 });
-            if (next > wire.numCtx) { wire.numCtx = next; attempt--; continue; }
+            if (next > wire.numCtx) { noteProvenOllamaWindow(nativeBase, body.model, next); wire.numCtx = next; attempt--; continue; }
           }
           // A model without a thinking mode refuses `think`; the request means the same without it.
           if (body.reasoning_effort !== undefined && /does not support thinking/i.test(String(detail))) {
