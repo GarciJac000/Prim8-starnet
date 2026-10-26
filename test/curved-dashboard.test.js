@@ -1,10 +1,11 @@
 'use strict';
 /* node test/curved-dashboard.test.js — the curved dashboard (Andrew 10-25: "bring back the more curved edges … we can
    still keep our style, just with the more curved edges without the sharp pointiness … it looks really inconsistent
-   with everything else"; a scanline raster was then picked and dropped 10-26 as hard to see on a monitor).
+   with everything else"; a scanline raster and the mesh were then dropped 10-26 — hard to see, and they moiré when zoomed
+   out — for the windows' own glass, plus one organization pass over the whole dashboard).
    SOURCE-LOCKED: one radius scale runs the dashboard (cards 10, keys 8, rows 6, chips 4) and is declared AFTER every
    older 2px rule it replaces, so the curve wins at equal specificity; tabs round only the corners that leave their rule;
-   the COMMS heading and dock rules lose their end ticks; the lit material stays the checker, not a raster; and
+   the COMMS heading and dock rules lose their end ticks; the lit material is the windows' glass, pattern-free; and
    what stays square on purpose (the lamps, the speech rails) is not rounded by the layer. */
 const A = require('./_assert.js');
 const fs = require('fs');
@@ -46,11 +47,26 @@ A.ok(/#bottombar > \.bb-group:is\(\[data-group="crew"\], \[data-group="system"\]
 A.ok(!/dg-lamp|ny-lamp|ws-dot|cp-dot|crew-prog|ctx-cells/.test(layer), 'the lamps and meters keep their square pixel cells');
 A.ok(!/\.body\b/.test(layer.replace(/\/\*[\s\S]*?\*\//g, '')), 'the speech rails are not rounded (COMMS has no bubbles)');
 
-/* ---- 5. the lit material stays the checker (a scanline raster was tried and dropped 10-26: hard to see on a monitor) ---- */
-const mesh = glass.slice(glass.indexOf('PIP-BOY MESH'), glass.indexOf('PIP-BOY TYPE SCALE'));
-A.ok(/Tried and dropped 10-26: a scanline raster/.test(mesh), 'the mesh section records why the raster went');
-A.ok(/--pg-dither: repeating-conic-gradient\(rgba\(var\(--ph-rgb\), \.3\) 0 25%, transparent 0 50%\) 0 0 \/ var\(--mesh-cell\) var\(--mesh-cell\);/.test(mesh), 'phosphor: the 2-screen-pixel checker at .30');
-A.ok(/--pg-dither-gold: repeating-conic-gradient\(rgba\(var\(--gold-rgb\), \.32\)/.test(mesh), 'gold: the same checker at .32');
-A.ok(!/repeating-linear-gradient\(180deg/.test(mesh) && !/--scan-px/.test(glass), 'no scanline raster anywhere in the dashboard\'s material');
+/* ---- 5. the lit material is the WINDOWS' glass (10-26): no pattern (a mesh / raster moirés when zoomed out), no corner light ---- */
+const mat = glass.slice(glass.indexOf("THE WINDOWS' GLASS ON THE DASHBOARD"), glass.indexOf('PIP-BOY TYPE SCALE'));
+A.ok(glass.indexOf("THE WINDOWS' GLASS ON THE DASHBOARD") > 0 && glass.indexOf('PIP-BOY MESH (') < 0, 'the mesh section is replaced by the windows\' glass');
+A.ok(/--pg-dither: linear-gradient\(120deg, rgba\(var\(--ph-rgb\), \.2\), rgba\(var\(--ph-rgb\), \.07\)\);/.test(mat), 'phosphor: the windows\' 120° tint .20 → .07');
+A.ok(/--pg-dither-gold: linear-gradient\(120deg, rgba\(var\(--gold-rgb\), \.22\), rgba\(var\(--gold-rgb\), \.07\)\);/.test(mat), 'gold: the same at .22 → .07');
+A.ok(!/repeating-(conic|linear)-gradient/.test(mat) && !/--mesh-cell|--scan-px/.test(glass), 'no repeating pattern in the dashboard\'s material (it beats against the device grid when zoomed out)');
+A.ok(!/165deg/.test(mat), 'no corner light in it (that read as the old glossy glow)');
+A.ok(/:is\(#crew \.crew-row:not\(\.selected\):not\(\.asking\), #left #workstreams \.ws-row:not\(\.sel\), #bottombar \.bb-group:not\(\.open\) > \.bb-grp, #chat-panel \.cmsg-empty \.cmsg-starter\) \{ box-shadow: none; \}/.test(mat), 'at rest nothing glows');
+A.ok(/\.crew-row\.selected:not\(\.asking\),[\s\S]*?\{\s*border-color: rgba\(var\(--ph-rgb\), \.5\); box-shadow: 0 0 12px rgba\(var\(--ph-rgb\), \.16\); --pg-glow: var\(--pg-lit-glow\);/.test(mat), 'a lit pane wears the window item\'s .5 frame, 12px halo and soft type bloom');
+A.ok(/\.crew-row\.asking,[\s\S]*?\{\s*border-color: rgba\(var\(--gold-rgb\), \.5\); box-shadow: 0 0 12px rgba\(var\(--gold-rgb\), \.16\);/.test(mat), 'a wait wears the same in gold');
+A.ok(!/!important/.test(mat), 'the glass wins by its selectors, not by !important');
+
+/* ---- 6. the dashboard pass (10-26) ---- */
+const pass = glass.slice(glass.indexOf('THE DASHBOARD PASS'));
+A.ok(glass.indexOf('THE DASHBOARD PASS') > 0 && !/!important/.test(pass), 'the pass exists and wins by its selectors');
+A.ok(/#crew :is\(\.crew-status, \.crew-step, \.crew-clock\) \{ --sn-type-meta: 14px;/.test(pass), 'the rail reads in two weights: status, step and clock on the quiet 14px line');
+A.ok(/#crew \.crew-portrait \{ width: 46px; height: 54px; \}/.test(pass) && /#crew \.crew-row \{ padding-top: 6px; padding-bottom: 6px;/.test(pass), 'the crew card is the 62px card ("go 62")');
+A.ok(/#left #workstreams \.ws-row\.attn > \.ws-meta \{ display: none; \}/.test(pass), 'a waiting session row no longer doubles its wait with a chip');
+A.ok(/\.ny-item:not\(:has\(> \.ny-keys\)\) \{ grid-template-columns: 34px minmax\(0, 1fr\) 14px; \}/.test(pass), 'a keyless NEEDS YOU row keeps only the caret\'s width');
+A.ok(/#comms-presence\.paused:not\(\.resolved\) \{ border: 0;[^}]*box-shadow: inset 3px 0 0 rgba\(var\(--gold-rgb\), \.8\);/.test(pass), 'COMMS: the waiting line is a gold rail, not a second framed box');
+A.ok(!/\.crew-hide \{/.test(pass), 'the CREW keys keep the + key\'s own box (Andrew 10-23)');
 
 A.report('curved-dashboard.test');
