@@ -32,8 +32,19 @@ const RAMPS = {
 };
 const ramp = (R, t) => { const x = Math.max(0, Math.min(1, t)) * (R.length - 1), i = Math.floor(x), f = x - i, a = R[i], b = R[Math.min(R.length - 1, i + 1)]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
 const PALETTE = [];
-for (const R of Object.values(RAMPS)) for (let i = 0; i < 24; i++) PALETTE.push(ramp(R, i / 23).map(Math.round));
-let LUT = null;   // 32×32×32 → palette index, built once
+const fillPalette = () => { PALETTE.length = 0; for (const R of Object.values(RAMPS)) for (let i = 0; i < 24; i++) PALETTE.push(ramp(R, i / 23).map(Math.round)); };
+fillPalette();
+let LUT = null;   // 32×32×32 → palette index, built once (again after a theme change)
+// the accent: what lit screens and the working rim glow in — red unless the terminal's /theme picks another
+let ACCENT_RIM = [255, 70, 84], ACCENT_GEN = 0;
+function setAccent(rampSteps, rim, trim) {
+  RAMPS.red.splice(0, RAMPS.red.length, ...rampSteps.map(c => c.slice()));
+  if (rim) ACCENT_RIM = rim.slice();
+  if (trim && !USER_LOOK.trim) LOOK.trim = trim.slice();   // the wall's trim line takes the accent too
+  fillPalette();
+  LUT = null;
+  ACCENT_GEN++;
+}
 function nearest(r, g, b) {
   if (!LUT) {
     LUT = new Uint8Array(32 * 32 * 32);
@@ -50,13 +61,14 @@ function nearest(r, g, b) {
 /* THE LOOK: dark pure ASCII, so the feed sits IN the panel rather than on it — lit characters on black (no picture under
    them), only real light (screens, LEDs) on the red ramp, everything else in deep warm greys, the agent a little brighter
    than its room, and the whole fading into the panel's own black at its edges. Overridable (STARNET_FEED_LOOK as JSON) for tuning. */
+const USER_LOOK = (() => { try { return JSON.parse(process.env.STARNET_FEED_LOOK || '{}') || {}; } catch (_) { return {}; } })();
 const LOOK = Object.assign({
   wall: [15, 11, 12], trim: [60, 15, 21], floorLine: [18, 13, 14],
   redStrict: 2.0, redGamma: 1.15, redMax: 0.75,
   greyFloor: 0.04, bgScale: 0.55, bgGamma: 1.05, agentFloor: 0.16, agentScale: 0.9, agentGamma: 0.55,
   under: 0, skip: 0.14, liftBase: 96, liftSpan: 80, liftMax: 1.45,   // under 0: nothing but the lit characters on black
   vigX: 0.2, vigY: 0.24, rimK: 0.6
-}, (() => { try { return JSON.parse(process.env.STARNET_FEED_LOOK || '{}'); } catch (_) { return {}; } })());
+}, USER_LOOK);
 
 // ---- glyphs ------------------------------------------------------------------------------------------------------
 const CW = G.cw, CH = G.ch;
@@ -105,6 +117,7 @@ function makeCamFeed() {
   const sims = new Map();       // agent id -> its walk
   const scaled = new Map();     // path@zoom -> { w, h, px }
   const frames = new Map();     // render key -> { key, sixel } (recent)
+  let gen = ACCENT_GEN;
 
   const spritePath = (set, name) => '/assets/sprites/' + set + '/' + name + '.png';
   const furnPath = n => '/assets/furniture/' + n + '.png';
@@ -193,6 +206,7 @@ function makeCamFeed() {
     const camX = Math.round(s.camX * k), camY = Math.round(s.camY * k);
     const ox = Math.round(W / 2 - camX), oy = Math.round(H / 2 - camY);
     const rk = [p.path, Math.round(s.x), Math.round(s.y), camX, camY, rimKey, W, H].join('|');
+    if (gen !== ACCENT_GEN) { frames.clear(); gen = ACCENT_GEN; }   // a /theme change redraws every frame
     if (frames.has(rk)) return frames.get(rk);
 
     // ---- compose the room ----
@@ -237,7 +251,7 @@ function makeCamFeed() {
       }
     }
     // ---- StarNet palette + the agent's rim (none while idle) ----
-    const RIM = rimKey === 'i' ? null : ({ w: [255, 70, 84], n: [255, 180, 58], n2: [150, 96, 20], s: [70, 52, 56], d: [93, 255, 168] }[rimKey]).map(v => v * LOOK.rimK);
+    const RIM = rimKey === 'i' ? null : ({ w: ACCENT_RIM, n: [255, 180, 58], n2: [150, 96, 20], s: [70, 52, 56], d: [93, 255, 168] }[rimKey]).map(v => v * LOOK.rimK);
     const col = new Float32Array(W * H * 3), light = new Float32Array(W * H);
     for (let i = 0; i < W * H; i++) {
       const r = buf[i * 4], g = buf[i * 4 + 1], b = buf[i * 4 + 2];
@@ -327,4 +341,4 @@ function setFor(agentId, skin, skins) {
   return skins[skin] || skins[''] || '';
 }
 
-module.exports = { makeCamFeed, parseSkins, setFor, PALETTE, POSES, FURNITURE };
+module.exports = { makeCamFeed, parseSkins, setFor, setAccent, PALETTE, POSES, FURNITURE };

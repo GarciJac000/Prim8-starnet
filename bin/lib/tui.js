@@ -122,6 +122,7 @@ const HELP = [
   ['/away', 'work it builds on its own away shift'],
   ['/flow [run name text]', 'list workflows · send one job down one'],
   ['/version', 'the CLI and the station'],
+  ['/theme [name]', 'colors: red amber green blue purple white'],
   ['/help  ctrl+c', 'this list · quit']
 ];
 
@@ -953,7 +954,7 @@ function drawCard(g, lines, y0, x0, cw, blink, hit) {
 
 // ---- styles → ANSI ------------------------------------------------------------------------------------------
 // level 0: no color (NO_COLOR) — bold/inverse only · level 2: 256 colors · level 3: 24-bit
-const PALETTE = {
+const PALETTE = {   // (the accent entries are retinted in place by /theme — theme.js)
   fg: ['#d9d2d4', 252], hi: ['#ffffff', 231], dim: ['#7f666b', 95], rule: ['#7a1c28', 88], lbl: ['#ff4757', 203],
   ph: ['#ff3b4e', 203], am: ['#ffb43a', 214], ok: ['#5dffa8', 85], bad: ['#ff6b3d', 202],
   logo: ['#ff2e3e', 196], logohi: ['#ffb0b8', 217], brand: ['#ff2e3e', 196],   // the wordmark's neon red, and the prompt's ▸
@@ -1014,4 +1015,4 @@ function colorLevel(env, isTTY) {
   return 2;
 }
 
-module.exports = { render, toAnsi, toPlain, sliceSegs, colorLevel, clean, width, wrap, trunc, makeGrid, HELP, cardLines, trustLines, wakeCardLines, menuLines, pickerView, stateWords, PAGES, slashMatches, slashMenu, slashCommandOf };
+module.exports = { PALETTE, BG, render, toAnsi, toPlain, sliceSegs, colorLevel, clean, width, wrap, trunc, makeGrid, HELP, cardLines, trustLines, wakeCardLines, menuLines, pickerView, stateWords, PAGES, slashMatches, slashMenu, slashCommandOf };
