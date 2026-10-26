@@ -2382,9 +2382,12 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           '<button class="bb sm" data-access-manage>MANAGE ABILITIES</button> <button class="bb sm" data-access-settings>STATION PERMISSIONS</button> <button class="bb sm" data-access-refresh>REFRESH ACCESS</button>';
         // BRIEF's compact line: how many toolsets are ready, which ones, and the approval mode — one jump to the full grid
         const ready = view.toolsets.filter(x => x.available);
-        const compactHtml = '<p class="ag-can-do"><b>' + ready.length + ' of ' + view.toolsets.length + ' toolsets ready</b>'
+        // in the words TOOLS and the ACCESS tile use (UX night 10-26): "7 of 8 tools ready · CHECK WITH ME", never the
+        // sidecar's "ASK — standing grants apply"
+        const postureWord = authority.unrestricted ? 'FULL POWER' : (askingPosture() === 'custom' ? 'custom access' : askingPosture());
+        const compactHtml = '<p class="ag-can-do"><b>' + ready.length + ' of ' + view.toolsets.length + ' tools ready</b>'
           + (ready.length ? ' · ' + ready.slice(0, 6).map(x => esc(x.label)).join(', ') + (ready.length > 6 ? ' +' + (ready.length - 6) : '') : '')
-          + ' · ' + esc(authority.approvalLabel) + '</p><button class="bb sm" data-access-full>SEE FULL ACCESS</button>';
+          + ' · ' + esc(postureWord) + '</p><button class="bb sm" data-access-full>SEE FULL ACCESS</button>';
         targets.forEach(target => {
           if (typeof target.hasAttribute === 'function' && target.hasAttribute('data-access-compact')) {
             target.innerHTML = compactHtml;
@@ -5820,9 +5823,34 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     return '<span class="prov-logo' + (id === 'starnet' ? ' prov-logo-starnet' : '') + '" aria-hidden="true" style="--provider-icon:url(&quot;' + esc(new URL('assets/brand/' + asset, document.baseURI).href) + '&quot;)"></span>';
   }
 
+  /* AI & MODELS IN FOUR PLAIN GROUPS (UX night 10-26, Andrew: "pretend these users are like 5"). Nineteen cards stood in
+     one column, each led by an API address ("generativelanguage.googleapis.com/v1beta"). They are the same cards, every
+     one still drawn (the visibleProviders law) and in PROVIDERS order inside its group, under the one question a newcomer
+     can answer: do you have StarNet credits, a subscription, an API key, or your own model server? A card leads with
+     what you need; its address rides the tip. The group with no id list takes every provider the others do not name. */
+  const PROVIDER_GROUPS = [
+    { id: 'credits', label: 'STARNET CREDITS', note: 'link this station once, nothing to paste', ids: ['starnet'] },
+    { id: 'subscription', label: 'A SUBSCRIPTION YOU HAVE', note: 'sign in, no API key', ids: ['codex', 'grok', 'kimi', 'claude-cli'] },
+    { id: 'key', label: 'AN API KEY', note: 'paste a key from the service’s website' },
+    { id: 'own', label: 'YOUR OWN MODELS', note: 'on this computer, or a server you run', ids: ['ollama', 'custom'] }
+  ];
+  const providerGroupOf = id => PROVIDER_GROUPS.find(g => g.ids && g.ids.indexOf(id) >= 0) || PROVIDER_GROUPS.find(g => !g.ids);
+  function groupedProviders() {
+    const shown = visibleProviders();
+    return PROVIDER_GROUPS.reduce((out, g) => out.concat(shown.filter(p => providerGroupOf(p.id) === g)), []);
+  }
+  function providerGroupHead(cards, i) {
+    const g = providerGroupOf(cards[i].id);
+    if (i > 0 && providerGroupOf(cards[i - 1].id) === g) return '';
+    return '<div class="set-sub prov-group" data-group="' + esc(g.id) + '"><span class="set-sub-k">' + esc(g.label) + '</span><span class="set-sub-d">' + esc(g.note) + '</span></div>';
+  }
+  // what the card says under its name: the subscription for a sign-in provider ("ChatGPT subscription"), else the blurb
+  const providerNeed = p => /^OAuth · /.test(p.endpoint) ? p.endpoint.slice('OAuth · '.length) : p.blurb;
   function providersHtml() {
     const active = activeProv();
-    return visibleProviders().map((p, pi) => {
+    const cards = groupedProviders();
+    return cards.map((p, pi) => providerGroupHead(cards, pi) + providerCardHtml(p, pi)).join('');
+    function providerCardHtml(p, pi) {
       // The credits provider has its own card: no key to paste, no sign-in, and a status line that
       // states the BALANCE, because a paid provider reading "connected" at $0.00 would be a lie of
       // exactly the kind this panel exists to avoid.
@@ -5891,7 +5919,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           providerLogoHtml(p.id) +
           '<span class="prov-main">' +
             '<span class="prov-name">' + esc(p.name) + (runnable ? '<span class="prov-badge">ACTIVE</span>' : '') + '</span>' +
-            '<span class="prov-ep">' + esc(p.endpoint) + ' · ' + esc(p.blurb) + '</span>' +
+            '<span class="prov-ep" data-tip="' + esc(p.endpoint + ' · ' + p.blurb) + '">' + esc(providerNeed(p)) + '</span>' +
           '</span>' +
         '</button>' +
           '<span class="prov-stat"><span class="prov-stat-t">' + stat + statWhy + (credentialSaved && !isOAuthProvider(p.id) ? '<i>' + n + (n === 1 ? ' key' : ' keys') + '</i>' : '') + '</span></span>' +   // org P03: the reason sits right under the verdict it explains, above the key count
@@ -5920,7 +5948,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
             '</div>'
           : '') +
         '</div>';
-    }).join('');
+    }
   }
   // The STARNET MANAGED card. Same shape as every other provider row so it reads as one of them, but its
   // action routes to the STORE rather than owning a second copy of the pairing flow.
@@ -5938,7 +5966,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
         providerLogoHtml(p.id) +
         '<span class="prov-main">' +
           '<span class="prov-name">' + esc(p.name) + (runnable ? '<span class="prov-badge">ACTIVE</span>' : '') + '</span>' +
-          '<span class="prov-ep">' + esc(p.endpoint) + ' · ' + esc(p.blurb) + '</span>' +
+          '<span class="prov-ep" data-tip="' + esc(p.endpoint) + '">' + esc(providerNeed(p)) + '</span>' +
         '</span>' +
       '</button>' +
         '<span class="prov-stat"><span class="prov-stat-t">' + stat + '</span></span>' +
@@ -7540,9 +7568,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // saved overrides. Precedence (env > saved > default) is enforced + reported by the sidecar; the UI just shows
   // whether a field is env-locked (read-only + a note) or a saved override.
   const ADV_FIELDS = [
-    { key: 'maxIters', label: 'MAX ITERATIONS', hint: 'optional tool-turn ceiling for one run. 0 = unlimited (default).', min: 0, max: 200, step: 1 },
-    { key: 'maxConcurrentAgents', label: 'MAX CONCURRENT AGENTS', hint: 'optional simultaneous-agent ceiling. 0 = unlimited (default).', min: 0, max: 32, step: 1 },
-    { key: 'consentTimeoutMs', label: 'CONSENT TIMEOUT (MS)', hint: 'how long a permission prompt waits for your answer before auto-denying (so a run never hangs).', min: 5000, max: 600000, step: 1000 },
+    { key: 'maxIters', label: 'MAX ITERATIONS', hint: 'the most tool steps one run may take. 0 = no limit (default).', min: 0, max: 200, step: 1 },
+    { key: 'maxConcurrentAgents', label: 'MAX CONCURRENT AGENTS', hint: 'the most agents working at the same time. 0 = no limit (default).', min: 0, max: 32, step: 1 },
+    { key: 'consentTimeoutMs', label: 'CONSENT TIMEOUT (MS)', hint: 'how long an approval card waits for your answer before it says no for you (so a run never hangs).', min: 5000, max: 600000, step: 1000 },
     { key: 'cronTickMs', label: 'ROUTINE TICK (MS)', hint: 'how often the scheduler checks for due routines.', min: 5000, max: 600000, step: 1000 },
     { key: 'maxSubscriptionTokens', label: 'CLAUDE CODE TOKEN CEILING', hint: 'tokens one run may use on a Claude subscription sign-in (cache re-reads count 1/10). 0 = no ceiling. Applies from the next run.', min: 0, max: 100000000, step: 100000 },
     // issue #135: the ceiling on a model StarNet can't price (a custom provider's model) was env-only. Both token ceilings
@@ -7801,7 +7829,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div class="prov-list">' + providersHtml() + '</div>' +
       '<h4 class="ms-h">API KEYS</h4>' +
       '<div class="key-list">' + keysHtml() + '</div>' +
-      '<p class="set-about">Credentials are saved locally and used to authenticate with the selected service. Saved keys stay masked. Desktop storage uses the OS keychain when available.</p>' +
+      '<p class="set-about">Your keys stay on this computer, always masked; the desktop app keeps them in the system keychain when it can.</p>' +
       // org P05: model keys live here; a SERVICE key lives in CONNECT › ABILITIES › CONNECTED › API KEYS — one door, the
       // places.js api-connections target (live walk 10-14: the door used to open the catalog, so no key reached the place the
       // sentence named). Gmail and Notion are SIGN IN catalog connectors (sidecar/mcp/catalog.js authType 'oauth') that an
@@ -7981,11 +8009,12 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // sets what the loop tries NEXT if that model fails mid-run. Persisted server-side + applied live to every run
       // path (browser, cron, channels); env SKYNET_FALLBACK_MODELS is the default until you save one here.
       '<h4 class="ms-h">FALLBACK MODELS <span class="dim">— tried in order if your primary model fails</span></h4>' +
-      '<p class="set-about">Choose your primary model in COMMS. If it fails mid-run because of availability, authentication, billing, or rate limits, StarNet tries this list from top to bottom. Saved models use your OpenRouter connection, or your StarNet connection when StarNet is the primary provider. <b>An empty list disables fallback.</b> Model changes appear in COMMS and the logbook.</p>' +
+      // plain first (UX night 10-26): what it is for, then the one rule; which connection runs a backup stays said
+      '<p class="set-about">If your model stops partway (it is down, out of credit, or busy), StarNet tries these models, top to bottom. You pick your main model in COMMS. <b>An empty list means no backup.</b> Backups run on your OpenRouter key, or on StarNet credits when StarNet is your provider; COMMS and the logbook say when one takes over.</p>' +
       '<div class="mc-form" id="fbc-form">' +
         '<div id="fbc-list" class="mc-list-fb"><div class="dim">reading chain…</div></div>' +
         '<div class="set-row"><select id="fbc-add" class="fbc-sel"><option value="">＋ add a model from the catalog…</option></select></div>' +
-        '<div class="mc-hint">Order is the retry order — the loop walks it top-to-bottom. Up to <span id="fbc-max">8</span> models. Unknown ids are allowed (the catalog can be stale) but flagged.</div>' +
+        '<div class="mc-hint">Up to <span id="fbc-max">8</span> models. A model id the catalog does not know still saves, marked unknown.</div>' +
         '<div class="mc-acts">' +
           '<button class="bb sm" id="fbc-save">SAVE CHAIN</button>' +
           '<button class="bb xs" id="fbc-reset" title="clear the saved chain so it follows the environment default again" style="display:none">RESET TO DEFAULT</button>' +
@@ -7997,18 +8026,18 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // at "(station default)" a tier inherits the model dock's primary, so this is purely opt-in. Saved per-machine
       // (localStorage) and read live by the summon path (app.resolveTierModel) — no rerun/rebuild needed.
       '<h4 class="ms-h">New agent defaults <span class="dim">— model choice by class tier</span></h4>' +
-      '<p class="set-about">Choose the model used when recruiting each class tier. <b>Station default</b> follows your primary model in COMMS. Existing agents keep their model; you can change an individual agent in its dossier.</p>' +
+      '<p class="set-about">The model a NEW agent starts with, by its class tier. <b>(station default)</b> uses your main model from COMMS. Agents you already have keep theirs; change one in its dossier.</p>' +
       '<div class="mc-form" id="tm-form">' +
         '<div class="set-row"><label for="tm-reasoning">◆◆◆ DEEP</label><select id="tm-reasoning" class="fbc-sel" data-tier="reasoning"><option value="">(station default)</option></select></div>' +
         '<div class="set-row"><label for="tm-balanced">◆◆ BALANCED</label><select id="tm-balanced" class="fbc-sel" data-tier="balanced"><option value="">(station default)</option></select></div>' +
         '<div class="set-row"><label for="tm-fast">◆ FAST</label><select id="tm-fast" class="fbc-sel" data-tier="fast"><option value="">(station default)</option></select></div>' +
-        '<div class="mc-hint">A pin applies to the next agent you summon of that tier. Empty = follow the model dock. This never overrides a model you set on a specific agent.</div>' +
+        '<div class="mc-hint">A pick here never changes a model you set on one agent.</div>' +
       '</div>' +
       '<div id="tm-msg" class="msg"></div>' +
       // VOICE CHAT MODEL (Hermes parity auxiliary.voice_chat) — the model a SPOKEN reply runs on. Server-persisted
       // (/api/voice/chat-model) and read by the sidecar per voice turn; only that turn moves (sidecar/voice-chat-route.js).
       '<h4 class="ms-h">Voice chat model <span class="dim">— answers spoken replies</span></h4>' +
-      '<p class="set-about">With the speaker on, spoken replies and Telegram voice notes can use a faster model. Only that reply moves: typed messages and the agent’s saved model stay as they are. If the voice model can’t answer, the agent’s own model does.</p>' +
+      '<p class="set-about">A faster model just for spoken replies (with the speaker on, or to a Telegram voice note). Typed chat keeps the agent’s own model, and so does any spoken reply this model can’t give.</p>' +
       '<div class="mc-form" id="vcm-form">' +
         '<div class="set-row"><label for="vcm-model">MODEL</label><select id="vcm-model" class="fbc-sel"><option value="">(same as the agent)</option></select></div>' +
         '<div class="set-row"><label for="vcm-effort">REASONING</label><select id="vcm-effort" class="fbc-sel">' +
@@ -8150,7 +8179,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // ADVANCED — env-only runtime knobs, now editable + persisted server-side (P1-9). PRECEDENCE is spelled out
       // in the card: an explicit environment variable ALWAYS wins over a value saved here (a deploy stays in control).
       '<h4 class="ms-h">Runtime limits <span class="dim">— optional ceilings and timeouts</span></h4>' +
-      '<p class="set-about">StarNet does not limit agent concurrency or run iterations by default. Set a positive value only when you want a ceiling. Saved here on this machine and read by the sidecar at boot. <b>An environment variable always overrides a value saved here</b>. Blank a field to clear the override.</p>' +
+      '<p class="set-about">Optional. StarNet sets no limits by default: fill in a number only when you want one, and blank a field to remove it. Most take effect after a restart; each line says when it differs. <b>An environment variable always overrides a value saved here</b>.</p>' +
       '<div class="mc-form" id="adv-form"><div class="dim" id="adv-loading">reading runtime settings…</div></div>' +
       '<div id="adv-msg" class="msg"></div>' +
       // DATA / STATION BACKUP — export the whole station config to one JSON file, import it back, reset a section.
@@ -8184,8 +8213,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       // fail-open pressure: per-tag swallowed-error counts since boot, from report.swallowed. Painted in wireDiagnostics().
       '<div id="diag-swallowed" class="dim" style="margin-top:6px;font-size:11px">swallowed errors: reading…</div>' +
       '<h4 class="ms-h">LIVE DOCTOR <span class="dim">— opt-in runtime proof</span></h4>' +
-      '<p class="set-about">Runs one tiny response through the selected model, a harmless sentinel through the effective execution profile, an initialize/list round-trip for each enabled MCP server, and safe authentication/status checks for messaging channels. It sends no channel messages and exports no secrets.</p>' +
-      '<label class="set-check"><input type="checkbox" id="diag-live-consent"> I understand this performs real network and execution probes and may spend one tiny model response.</label>' +
+      // plain first (UX night 10-26); every probe it runs is still named
+      '<p class="set-about">Checks, for real, that StarNet works: one tiny reply from your model, one harmless test command, a hello to each connected service, and a status check of each chat channel. It sends no chat messages and shares no secrets.</p>' +
+      '<label class="set-check"><input type="checkbox" id="diag-live-consent"> I understand this makes real requests and may spend one tiny model reply.</label>' +
       '<div class="set-save"><button class="bb sm" id="diag-live-run">RUN LIVE DOCTOR</button><button class="bb sm" id="diag-live-copy" hidden>⧉ COPY RECEIPT</button></div>' +
       '<div id="diag-live-msg" class="msg"></div>' +
       '<pre id="diag-live-out" class="diag-pre" tabindex="0" hidden style="white-space:pre-wrap;overflow:auto;max-height:40vh"></pre>' +
@@ -8320,7 +8350,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     let paintBackdropSwatches = () => {};
 
     const sections = [
-      { id: 'providers', label: 'AI & MODELS', glyph: '⌁', desc: 'Connect an AI service, manage its saved keys, and choose fallback models and agent defaults.', build: frag(secProviders + secModels) },
+      { id: 'providers', label: 'AI & MODELS', glyph: '⌁', desc: 'The AI your agents think with. Connect one below: StarNet credits, a subscription you have, an API key, or your own models. Everything under API KEYS is optional.', build: frag(secProviders + secModels) },
       // ONE WORD: AUTONOMY — the dial and what it did while you were away are one section (the old NIGHT SHIFT
       // section folded in; openTerm maps its id here so an old deep link still lands).
       { id: 'autonomy', label: 'AUTONOMY', glyph: '◈', desc: 'Choose when agents work on their own, where that work goes, and see what they did while you were away.', build: frag(secAutonomy + secAwayActivity) },
