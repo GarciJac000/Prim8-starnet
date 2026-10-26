@@ -68,5 +68,10 @@ A.ok(/#left #workstreams \.ws-row\.attn > \.ws-meta \{ display: none; \}/.test(p
 A.ok(/\.ny-item:not\(:has\(> \.ny-keys\)\) \{ grid-template-columns: 34px minmax\(0, 1fr\) 14px; \}/.test(pass), 'a keyless NEEDS YOU row keeps only the caret\'s width');
 A.ok(/#comms-presence\.paused:not\(\.resolved\) \{ border: 0;[^}]*box-shadow: inset 3px 0 0 rgba\(var\(--gold-rgb\), \.8\);/.test(pass), 'COMMS: the waiting line is a gold rail, not a second framed box');
 A.ok(!/\.crew-hide \{/.test(pass), 'the CREW keys keep the + key\'s own box (Andrew 10-23)');
+// the CREW panel keeps its older square row as a flat glass block (Andrew 10-26: "square + glass flat"), declared after the curve
+const sq = pass.slice(pass.indexOf('the CREW panel keeps its older SQUARE row'));
+A.ok(pass.indexOf('the CREW panel keeps its older SQUARE row') > 0 && glass.indexOf('THE CURVED DASHBOARD') < glass.indexOf('the CREW panel keeps its older SQUARE row'), 'the square crew rule comes after the curved layer it overrides');
+A.ok(/#crew \.crew-row \{ border-radius: 2px;/.test(sq) && /#crew \.crew-portrait \{ border-radius: 2px; \}/.test(sq), 'crew rows and portraits are square (2px)');
+A.ok(/#crew \.crew-row\.selected:not\(\.asking\),\s*body\.glass-demo:not\(\.hud-mode\) #screen-game #crew \.crew-row\.asking \{ border-color: transparent; box-shadow: none; \}/.test(sq), 'a lit crew row is a flat glass block: no frame, no halo');
 
 A.report('curved-dashboard.test');
