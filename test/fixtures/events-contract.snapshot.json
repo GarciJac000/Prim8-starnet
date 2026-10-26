@@ -338,6 +338,28 @@
       "specId"
     ]
   },
+  "crew.tool_step": {
+    "required": [
+      "agentId",
+      "callId",
+      "name",
+      "parentRunId",
+      "phase",
+      "runId"
+    ],
+    "properties": [
+      "agentId",
+      "argsSummary",
+      "callId",
+      "isError",
+      "ms",
+      "name",
+      "ok",
+      "parentRunId",
+      "phase",
+      "runId"
+    ]
+  },
   "cron.fire": {
     "required": [
       "jobId",

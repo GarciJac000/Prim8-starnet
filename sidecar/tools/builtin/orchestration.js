@@ -67,11 +67,33 @@
   // 'deliverable' forwards too (2026-07-07 escape): a worker's saved image/file was INVISIBLE — no COMMS card,
   // no crate, no notify — because the event died here. The payload already carries the OWNING agentId and its
   // jail-relative path, and the frontend card opens /api/file?agent=<owner>, so forwarding is the whole fix.
-  // agent.tool_call / agent.tool_result forward too (SUMMON LINES, 2026-10-19): the floor's activity plate, the
-  // CREW card's step and the DELEGATED row's live step all read a worker's own tool events BY its agentId/runId,
-  // and none of them ever arrived — a worker read "thinking" for its whole run. The lead's COMMS stays clean
-  // because harness.js hands a tool event to the chat callbacks only when its runId is the LEAD's own run.
-  const FORWARD = { 'agent.run.start': 1, 'agent.run.end': 1, 'agent.run.error': 1, 'agent.cost': 1, 'deliverable': 1, 'agent.tool_call': 1, 'agent.tool_result': 1 };
+  const FORWARD = { 'agent.run.start': 1, 'agent.run.end': 1, 'agent.run.error': 1, 'agent.cost': 1, 'deliverable': 1 };
+  /* A worker's TOOL STEPS reach the lead's stream too (SUMMON LINES, 2026-10-19) — the floor's activity tag, the CREW
+     card's step and the DELEGATED row read them — but ONLY as the additive crew.tool_step event (2026-10-26 fix), never
+     under agent.tool_call/tool_result: every lead-side sink (CLI tracker + receipt, /api/observe, Telegram/routine/
+     line-hop reply buffers, phone remote, ACP, /v1) keys on those names and took a worker's step for the lead's own
+     (doubled dashboard rows, wiped replies, miscounted receipts). Those sinks ignore an unknown name; the page's
+     harness translates crew.tool_step back for the floor. */
+  function makeChildEmit(ctx) {
+    const names = new Map();   // callId -> tool name, so a result step carries the name its call had
+    return (name, payload) => {
+      if (!ctx || typeof ctx.emit !== 'function') return;
+      if (FORWARD[name]) { try { ctx.emit(name, payload); } catch (_) {} return; }
+      if (name !== 'agent.tool_call' && name !== 'agent.tool_result') return;
+      const p = payload || {}, callId = String(p.callId == null ? '' : p.callId);
+      const step = { agentId: String(p.agentId || ''), runId: String(p.runId || ''), parentRunId: String(ctx.runId || ''), callId, phase: name === 'agent.tool_call' ? 'call' : 'result' };
+      if (step.phase === 'call') {
+        step.name = String(p.name || ''); if (callId) names.set(callId, step.name);
+        if (typeof p.argsSummary === 'string') step.argsSummary = p.argsSummary;
+      } else {
+        step.name = names.get(callId) || ''; names.delete(callId);
+        if (typeof p.ok === 'boolean') step.ok = p.ok;
+        if (typeof p.isError === 'boolean') step.isError = p.isError;
+        if (typeof p.ms === 'number' && isFinite(p.ms)) step.ms = p.ms;
+      }
+      try { ctx.emit('crew.tool_step', step); } catch (_) {}
+    };
+  }
   // a delegated worker's added kit, on top of the autonomous full office (compute/web/files/memory/studio/jukebox):
   // the WORKBENCH (terminal). Paired with the SHARED lead consent broker, writes follow the lead's APPROVAL posture.
   // Commands do NOT in ASK mode: a worker runs surface:'autonomous', so the run authority withholds shell.exec /
@@ -845,8 +867,8 @@
         }));
         const overflowNote = overflow.length ? ' — ' + overflow.length + ' NOT dispatched (max ' + maxWorkers + ' per call; dispatch the rest in a follow-up call)' : '';
 
-        // forward lifecycle/cost/tool steps from children onto the lead's bus (see FORWARD; never tokens).
-        const childEmit = (name, payload) => { if (FORWARD[name] && ctx && typeof ctx.emit === 'function') { try { ctx.emit(name, payload); } catch (_) {} } };
+        // forward lifecycle/cost from children onto the lead's bus, and their tool steps as crew.tool_step (see makeChildEmit; never tokens)
+        const childEmit = makeChildEmit(ctx);
 
         // validate every target up front: a real, live, OTHER worker (never self, never an unknown agentId).
         const jobs = reqs.map(w => {
@@ -1226,9 +1248,9 @@
         }));
         const overflowNote = overflow.length ? ' — ' + overflow.length + ' NOT spawned (max ' + maxWorkers + ' per call; spawn the rest in a follow-up call)' : '';
 
-        // forward ONLY lifecycle/cost onto the lead's bus so the floor materializes/pops the Meeseeks live; the
-        // durable record (via h.emit) keeps the full watch tail for team.subagents/interrupt/resume.
-        const childEmit = (name, payload) => { if (FORWARD[name] && ctx && typeof ctx.emit === 'function') { try { ctx.emit(name, payload); } catch (_) {} } };
+        // forward lifecycle/cost onto the lead's bus so the floor materializes/pops the Meeseeks live (tool steps only as
+        // crew.tool_step — see makeChildEmit); the durable record (via h.emit) keeps the full watch tail for team.subagents.
+        const childEmit = makeChildEmit(ctx);
         // this call's timeout pauses while the run's spend pool holds a foreground clone's call (poolHoldClock), and every
         // clone's stall clock (its handle h) stops while its own call is held
         const family = args.background ? null : poolHoldClock(ctx);

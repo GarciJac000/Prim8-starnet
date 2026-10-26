@@ -377,7 +377,9 @@ function makeRunTracker() {
     st.events++;
     switch (ev.name) {
       case 'agent.run.start':
-        st.started = true; st.runId = String(p.runId || st.runId); if (p.model) st.model = String(p.model);
+        // the LEAD's run is the first run.start: a delegated worker's run.start rides this stream too, and must never
+        // become the run Ctrl-C / --timeout cancels or the receipt reports
+        st.started = true; if (!st.runId) st.runId = String(p.runId || ''); if (p.model && !st.model) st.model = String(p.model);
         break;
       case 'agent.token':
         if (typeof p.delta === 'string' && p.delta) { st.text += p.delta; actions.push({ kind: 'text', delta: p.delta }); }
