@@ -15120,14 +15120,23 @@ function saveServiceKeyFromChat(input) {
     unattendedReason: catalog && catalog.unattendedReason
   }, Date.now(), { reservedEnv: SERVICEKEYS_RESERVED_ENV });
   if (r.error) return { ok: false, error: r.error };
+  const before = serviceKeys;
   serviceKeys = r.list.map(applyServiceKeyCatalogPolicy);
   const record = serviceKeys.find(row => row.id === r.record.id) || r.record;
-  serviceKeyRefs.drop(record.id);   // a pasted key replaces a 1Password reference: forget the value read for it
   applyServiceKeysEnv();
-  const saved = saveServiceKeys();  // verified read-back; false = live for this session, said so in the tool result
+  // ALL OR NOTHING (never destroy the last copy): a saved key is scrubbed out of the chat, the task brief and the
+  // transcript, so a key that is live but NOT proven on disk would leave no copy anywhere after a restart. Unlike the
+  // panel (where the Commander sees "not durable" and still holds the key), the chat path reverts and says so.
+  if (!saveServiceKeys()) {
+    serviceKeys = before;
+    applyServiceKeysEnv();
+    if (!saveServiceKeys()) console.warn('[servicekeys] chat save reverted in memory; the store on disk could not be re-verified');
+    return { ok: false, error: 'the key could not be saved to disk, so nothing was changed — the key is still in the Commander\'s message. Ask them to add it in TOOLSETS & CONNECTORS → KEYS.' };
+  }
+  serviceKeyRefs.drop(record.id);   // a pasted key replaced a 1Password reference: forget the value read for it
   // the task brief captured the message, key and all, before the save: name it there too (async, failure noted)
   taskBriefStore.scrubText(t => KeyTools.nameSavedKeys(t, liveServiceKeys())).catch(e => failNote('servicekeys.chat.brief-scrub', e));
-  return { ok: true, record: brief(record), existed: !!prev, sameValue: false, saved };
+  return { ok: true, record: brief(record), existed: !!prev, sameValue: false, saved: true };
 }
 /* POST /api/servicekeys/scrub { texts:[...] } -> { texts } — each text with every saved service key's value replaced by
    its placeholder (keys.keyPlaceholder). COMMS calls it on `servicekey.saved` so the Commander's bubble and the desk

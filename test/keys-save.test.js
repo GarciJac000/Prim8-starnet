@@ -16,6 +16,8 @@ const { makeWebTools } = require('../sidecar/tools/builtin/web.js');
 const { redact, setKnownSecretSource } = require('../sidecar/context.js');
 
 const PASTE = '9c2f41d7a8e04b6f93a1c5d27e8b0f4a6d3c19e2';   // shapeless, like a Saleshandy key: redact() alone misses it
+// the error message a rejected run() threw, or '' if it resolved (a resolved refusal is the bug this guards)
+const thrown = async (p) => { try { await p; return ''; } catch (e) { return String((e && e.message) || e); } };
 const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
 
 (async () => {
@@ -69,8 +71,9 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     const okSave = (input) => { saves.push(input); return { ok: true, record: { name: 'Saleshandy', envVar: 'SALESHANDY_API_KEY', autonomous: false, unattendedSupported: true }, existed: false, sameValue: false, saved: true }; };
 
     const stranger = KT.makeKeyTools({ ownerTexts: () => null, save: okSave }).saveTool;
-    const refused = await stranger.run({ service: 'Saleshandy' }, ctx);
-    A.ok(refused.isError && /was not started by them/.test(refused.content), 'a run the Commander did not start saves nothing: ' + refused.content);
+    // refusals THROW (the registry's error contract — a returned { isError } would reach the page as a success)
+    const refused = await thrown(stranger.run({ service: 'Saleshandy' }, ctx));
+    A.ok(/was not started by them/.test(refused), 'a run the Commander did not start saves nothing: ' + refused);
     A.eq(saves.length, 0, '...and never reaches the store');
 
     const t = KT.makeKeyTools({ ownerTexts: () => ['here is my saleshandy api key ' + PASTE], save: okSave, tainted: () => false }).saveTool;
@@ -92,12 +95,18 @@ const OTHER = 'b7e1c0a9d4f2e6b8a3c5d7f9e1a2b4c6';
     await tainted.run({ service: 'Saleshandy' }, ctx);
     A.eq(saves[1].refuseReplace, true, 'a tainted run asks the store to refuse a replace');
 
-    A.ok((await t.run({}, ctx)).isError, 'service is required');
-    A.ok(/at least 3/.test((await t.run({ service: 'X', starts_with: 'ab' }, ctx)).content), 'a 2-char hint is refused');
+    A.ok(/service is required/.test(await thrown(t.run({}, ctx))), 'service is required');
+    A.ok(/at least 3/.test(await thrown(t.run({ service: 'X', starts_with: 'ab' }, ctx))), 'a 2-char hint is refused');
+    A.ok(/paste the key into this chat again/.test(await thrown(KT.makeKeyTools({ ownerTexts: () => ['no key here'], save: okSave }).saveTool.run({ service: 'X' }, ctx))), 'no key found is refused');
 
-    const failing = KT.makeKeyTools({ ownerTexts: () => ['key ' + PASTE], save: () => ({ ok: false, error: 'OpenAI would be saved as OPENAI_API_KEY, which is reserved' }) }).saveTool;
-    const fr = await failing.run({ service: 'OpenAI' }, ctx);
-    A.ok(fr.isError && /reserved/.test(fr.content), 'a store refusal is passed through: ' + fr.content);
+    let releasedOnFail = false;
+    const failing = KT.makeKeyTools({ ownerTexts: () => ['key ' + PASTE], save: () => ({ ok: false, error: 'OpenAI would be saved as OPENAI_API_KEY, which is reserved' }), onSaved: () => { releasedOnFail = true; } }).saveTool;
+    const fr = await thrown(failing.run({ service: 'OpenAI' }, ctx));
+    A.ok(/could not save the key: .*reserved/.test(fr), 'a store refusal is passed through: ' + fr);
+    A.ok(!releasedOnFail, 'a failed save never releases the transcript hold (the paste is kept, not scrubbed)');
+    let releasedOnOk = '';
+    await KT.makeKeyTools({ ownerTexts: () => ['key ' + PASTE], save: okSave, onSaved: v => { releasedOnOk = v; } }).saveTool.run({ service: 'Saleshandy' }, ctx);
+    A.eq(releasedOnOk, 'SALESHANDY_API_KEY', 'a successful save releases it, naming the key');
   }
 
   // ---- D. the whole chain: paste -> KEYS -> web_request ${NAME} sends the exact value -> placeholder -> redaction ----

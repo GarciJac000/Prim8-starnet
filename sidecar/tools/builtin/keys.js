@@ -128,26 +128,26 @@
           docs_url: { type: 'string', description: 'Optional: the service\'s API reference URL, kept with the key.' }
         }
       },
+      // every refusal THROWS: the registry turns a throw into the error result (a returned isError is read as success)
       run: async (args) => {
         args = args || {};
         const service = str(args.service).slice(0, 64);
-        if (!service) return { isError: true, content: 'service is required — the name of the platform the key is for, e.g. "Saleshandy".', summary: 'no service' };
+        if (!service) throw new Error('service is required — the name of the platform the key is for, e.g. "Saleshandy".');
         let texts = null;
         try { texts = typeof d.ownerTexts === 'function' ? d.ownerTexts() : null; } catch (_) { texts = null; }
         if (!Array.isArray(texts)) {
-          return { isError: true, summary: 'not the Commander\'s run',
-            content: 'keys.save only takes a key the Commander typed into this conversation, and this run was not started by them '
-              + '(a routine, a group member, a forwarded message or a delegated worker). Ask the Commander to paste it in their own chat with you, or add it in TOOLSETS & CONNECTORS → KEYS.' };
+          throw new Error('keys.save only takes a key the Commander typed into this conversation, and this run was not started by them '
+            + '(a routine, a group member, a forwarded message or a delegated worker). Ask the Commander to paste it in their own chat with you, or add it in TOOLSETS & CONNECTORS → KEYS.');
         }
         const hint = str(args.starts_with);
-        if (hint && hint.length < HINT_MIN) return { isError: true, content: 'starts_with needs at least ' + HINT_MIN + ' characters.', summary: 'hint too short' };
+        if (hint && hint.length < HINT_MIN) throw new Error('starts_with needs at least ' + HINT_MIN + ' characters.');
         const picked = pickKey(texts, hint);
-        if (picked.error) return { isError: true, content: picked.error, summary: 'no key found' };
+        if (picked.error) throw new Error(picked.error);
         const docsUrl = /^https:\/\/\S+$/i.test(str(args.docs_url)) ? str(args.docs_url).slice(0, 512) : '';
         let r;
         try { r = d.save({ name: service, key: picked.key, docsUrl: docsUrl, refuseReplace: !!(typeof d.tainted === 'function' && d.tainted()) }); }
         catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
-        if (!r || !r.record) return { isError: true, content: 'could not save the key: ' + String((r && r.error) || 'unknown error'), summary: 'not saved' };
+        if (!r || !r.record) throw new Error('could not save the key: ' + String((r && r.error) || 'unknown error'));
         const rec = r.record;
         const envVar = String(rec.envVar);
         if (typeof d.onSaved === 'function') d.onSaved(envVar);   // the run's transcript hold lets go (the host flips a flag)

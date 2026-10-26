@@ -20,6 +20,7 @@ const { bootToken } = require('./_httpToken.js');
 const root = path.resolve(__dirname, '..');
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'starnet-keys-save-'));
 const PASTE = '9c2f41d7a8e04b6f93a1c5d27e8b0f4a6d3c19e2';
+const PASTE_LOST = 'f1e2d3c4b5a6978877665544332211aabbccddee';   // the key whose save the disk refuses
 let child, base, headers;
 const seen = [];   // every chat request body the provider received
 function sse(res, delta, finish) {
@@ -68,6 +69,21 @@ async function run(text) {
   try {
     await boot();
     A.ok((await api('/api/roster', { agents: [{ agentId: 'agent', name: 'Hero', model: 'test/model', provider: 'openrouter' }] })).body.ok, 'roster saved');
+
+    // 0. NEVER DESTROY THE LAST COPY: a KEYS write that cannot be proven on disk changes nothing — no key, no scrub, and
+    //    the paste survives in the transcript (the Commander's only copy besides their own memory)
+    const blocker = path.join(workspace, 'connectors', 'servicekeys.json');
+    fs.mkdirSync(blocker, { recursive: true });   // a directory where the store's file must go: every write fails
+    const r0 = await run('my saleshandy key is ' + PASTE_LOST + ' please');
+    const failed = r0.events.find(e => e.name === 'agent.tool_result' && e.payload.callId === 'ks_1');
+    A.ok(failed && !failed.payload.ok && failed.payload.isError, 'an unproven save is an error, never an ok: ' + JSON.stringify(failed && failed.payload));
+    const failMsg = r0.requests[r0.requests.length - 1].messages.find(m => m && m.role === 'tool' && m.tool_call_id === 'ks_1');
+    A.ok(failMsg && /could not be saved to disk, so nothing was changed/.test(String(failMsg.content)), 'the model is told nothing changed: ' + String(failMsg && failMsg.content).slice(0, 200));
+    A.eq(((await api('/api/servicekeys')).body.keys || []).length, 0, 'KEYS holds nothing after an unproven save (reverted in memory)');
+    A.eq((await api('/api/servicekeys/scrub', { texts: ['k ' + PASTE_LOST] })).body.texts, ['k ' + PASTE_LOST], 'the page scrub has nothing to swap');
+    const lostRows = fs.readdirSync(path.join(workspace, 'transcript-history-v2')).filter(f => /\.jsonl$/.test(f)).map(f => fs.readFileSync(path.join(workspace, 'transcript-history-v2', f), 'utf8')).join('');
+    A.ok(lostRows.indexOf(PASTE_LOST) >= 0, 'the paste is still in the transcript: the last copy was kept');
+    fs.rmSync(blocker, { recursive: true, force: true });
 
     // 1-3. the paste run
     const r1 = await run('hey here is my saleshandy api key ' + PASTE + ' — send my email campaign');
