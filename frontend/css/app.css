@@ -4924,16 +4924,19 @@ select.fbc-sel:focus { border-color: var(--ph); box-shadow: inset 0 2px 5px rgba
    set `.hidden = true` on 28 of 37 cards and every one of them stayed painted. It read as working only
    because the first category happens to be entirely one tier. Restate the rule at class specificity. */
 .cc-group[hidden], .cc-card[hidden] { display: none; }
-/* CATEGORY FOLDS (UX night 10-25): every category line is its own fold — Popular open, the rest one line each with its
-   count, so the catalog reads as an index instead of a wall. The ＋ / − mark is the ADD AN ABILITY router's and the
-   dossier config groups'; the whole line is the target. */
-details.cc-group > summary { list-style: none; cursor: pointer; }
-details.cc-group > summary::-webkit-details-marker { display: none; }
-details.cc-group > summary .sec-nd { display: none; }
-details.cc-group > summary::after { content: '＋'; flex: 0 0 auto; color: var(--ph-dim); }
-details.cc-group[open] > summary::after { content: '−'; }
-details.cc-group > summary:hover .sec-l, details.cc-group > summary:hover::after { color: var(--ph-bright); }
-details.cc-group > summary:focus-visible { outline: 1px solid var(--ph-bright); outline-offset: 3px; }
+/* CATEGORY FOLDS (UX night 10-25): every category line is its own fold — the catalog's Popular open, the rest one line
+   each with its count, so CATALOG / SKILL MARKET / SKILL LIBRARY read as an index instead of a wall. The ＋ / − mark is
+   the ADD AN ABILITY router's and the dossier config groups'; the whole line is the target. */
+:is(details.cc-group, details.sk-fold) > summary { list-style: none; cursor: pointer; }
+:is(details.cc-group, details.sk-fold) > summary::-webkit-details-marker { display: none; }
+:is(details.cc-group, details.sk-fold) > summary .sec-nd { display: none; }
+:is(details.cc-group, details.sk-fold) > summary::after { content: '＋'; flex: 0 0 auto; color: var(--ph-dim); }
+:is(details.cc-group, details.sk-fold)[open] > summary::after { content: '−'; }
+:is(details.cc-group, details.sk-fold) > summary:hover :is(.sec-l, .sec-tag), :is(details.cc-group, details.sk-fold) > summary:hover::after { color: var(--ph-bright); }
+:is(details.cc-group, details.sk-fold) > summary:focus-visible { outline: 1px solid var(--ph-bright); outline-offset: 3px; }
+.skm-shelf { display: flex; flex-direction: column; gap: 14px; }
+.skm-shelf[hidden] { display: none; }
+.skm-shelf > .mc-hint { margin: -8px 0 0; }
 .cc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(224px, 1fr)); gap: 8px; }
 .cc-card { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--ph-dim); border-radius: var(--r-sm);
   padding: 9px 11px; box-shadow: var(--raise);
@@ -5680,6 +5683,8 @@ details.cc-group > summary:focus-visible { outline: 1px solid var(--ph-bright); 
 .con-searching .cc-service:not(:has(.cc-card.con-hit:not([hidden]))) { display:none; }
 .con-searching .cc-alternatives:not(:has(.cc-card.con-hit:not([hidden]))) { display:none; }
 .con-searching .cc-group > .sec .sec-tag { display:none; }
+.con-searching .skm-shelf:not(:has(.cc-card.con-hit:not([hidden]))) { display:none; }
+.con-searching .skm-shelf > .sec .sec-tag { display:none; }
 .con-searching .sk-state-sec, .con-searching .sk-lib-sum { display:none; }
 .cc-alternatives { margin-top:5px; padding:8px; border:1px solid var(--ph-dim); }
 .cc-alternatives:not(:has(.cc-card:not([hidden]))) { display:none; }

@@ -3806,10 +3806,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       ? '<label class="mc-hint" for="sk-agent-pick">Skills of</label><select id="sk-agent-pick" class="ab-agent-pick" aria-label="Show the skills of agent">' +
         present.map(x => '<option value="' + esc(x.id) + '"' + (x.id === agentId ? ' selected' : '') + '>' + esc(x.name || x.id) + '</option>').join('') + '</select>'
       : '';
+    // "recipes" here collided with the ❒ RECIPES dock feature (audit finding 2) — these are PROCEDURES: how-to
+    // guides an agent follows mid-task, not launchable jobs. The intro that restated the desc folded into it (UX night 10-25).
     const secLibrary =
-      // "recipes" here collided with the ❒ RECIPES dock feature (audit finding 2) — these are PROCEDURES: how-to
-      // guides an agent follows mid-task, not launchable jobs.
-      '<p class="sk-note sk-lib-intro">Enable skills for the whole station. Agents use them when relevant, with the tools and service access they already have.</p>' +
       '<div id="sk-lib" class="sk-lib"><div class="sk-loading"><span class="loading pulse">loading the skill library…</span></div></div>';
     const secAgent =
       agentPicker +
@@ -3835,8 +3834,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
 
     // SKILL MARKET (2026-09-29): the curated StarNet catalog, browsed as the same glass card grid the connectors
     // CATALOG uses. The catalog is fetched when this section loads, never in the background.
+    // the second intro paragraph restated the desc and the shelves' own notes; its one new fact moved into the desc
     const secMarket =
-      '<p class="set-about"><b>Add skills to your whole crew.</b> StarNet Originals are written by StarNet for your station; community picks are credited to their authors. Installing adds the skill to your SKILL LIBRARY and switches it on.</p>' +
       '<div class="cc-filters" id="skm-filters" role="group" aria-label="Filter the skill market">' +
         '<button type="button" class="cc-filter active" data-skm-filter="all" aria-pressed="true">ALL</button>' +
         '<button type="button" class="cc-filter" data-skm-filter="originals" aria-pressed="false">STARNET ORIGINALS</button>' +
@@ -3850,8 +3849,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
 
     const frag = html => (el => { el.innerHTML = html; });
     const sections = [
-      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'Browse StarNet Originals and credited community skills, and install one for the whole crew in one click.', build: frag(secMarket) },
-      { id: 'library', label: 'SKILL LIBRARY', glyph: '▤', desc: 'The procedures your agents follow when a task matches: the ones built into StarNet and the ones you installed from the market.', build: frag(secLibrary) },
+      { id: 'market', label: 'SKILL MARKET', glyph: '▦', desc: 'Browse StarNet Originals and credited community skills. Installing one adds it to your SKILL LIBRARY, switched on for the whole crew.', build: frag(secMarket) },
+      { id: 'library', label: 'SKILL LIBRARY', glyph: '▤', desc: 'The procedures your agents follow when a task matches, built into StarNet or installed from the market. Switch one on and agents use it when relevant, with the tools and services they already have.', build: frag(secLibrary) },
       { id: 'agent', label: 'AGENT SKILLS', glyph: '✎', desc: 'Each agent keeps its own skill library. Pick whose to see.', build: frag(secAgent) },
       { id: 'exchange', label: 'SKILL EXCHANGE', glyph: '⇩', desc: 'Inspect and install open SKILL.md procedures with provenance and guard review.', build: frag(secExchange) }
     ];
@@ -3884,6 +3883,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // names an object the Commander can't find
   const skmGear = g => SK_OBJ_NAME[g] || String(g).toUpperCase();
   let skmFilter = 'all';
+  // CATEGORY FOLDS (UX night 10-25): each shelf lists its categories as one-line folds (102 cards were one ~20,000px
+  // scroll). A fold the Commander opens stays open across the market's re-renders (an install repaints every card).
+  const skmFoldOpen = new Set();
   const skmBusy = new Map();   // slug -> 'install' | 'uninstall' while a request is in flight (survives re-renders)
   let skmResult = null;        // { slug, text, ok } — the last install/remove result, shown on that card
   let skmFocus = '';           // slug whose action button takes focus after the next render
@@ -3970,6 +3972,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
   // ones with a newer version waiting. A pulled or tampered skill shows under INSTALLED with its warning.
   function skmApplyFilter(list) {
     if (!list || list.dataset.skmOk !== '1') return;   // a failed/refused load has no cards: no filter claims about it
+    const searching = !!list.closest('.con-searching');   // while searching, the console search owns the folds
     list.querySelectorAll('.cc-group').forEach(g => {
       let vis = 0;
       g.querySelectorAll('.cc-card').forEach(c => {
@@ -3981,6 +3984,13 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       });
       g.hidden = vis === 0;
       const tag = g.querySelector('.sec-tag'); if (tag) tag.textContent = String(vis);
+      // INSTALLED / UPDATES are already the short list: their categories show their cards; ALL is the index again
+      if (!searching && g.matches('details')) g.open = (skmFilter === 'installed' || skmFilter === 'update') || skmFoldOpen.has(g.dataset.fold);
+    });
+    list.querySelectorAll('.skm-shelf').forEach(s => {
+      const n = s.querySelectorAll('.cc-card:not([hidden])').length;
+      s.hidden = n === 0;
+      const tag = s.querySelector(':scope > .sec .sec-tag'); if (tag) tag.textContent = String(n);
     });
     let none = list.querySelector('.cc-nores');
     const shown = list.querySelectorAll('.cc-card:not([hidden])').length;
@@ -4009,11 +4019,18 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       return;
     }
     const shelves = [['originals', 'StarNet Originals', 'Written by StarNet for your station\'s gear and tools.'], ['community', 'Community picks', 'Open skills by other authors, adapted for StarNet and credited.']];
+    // Originals still lead (DECISIONS: the Skill Market); inside a shelf, its categories in A-Z order, one fold each
     const html = shelves.map(([id, label, note]) => {
       const rows = d.entries.filter(e => e.shelf === id);
       if (!rows.length) return '';
-      return '<div class="cc-group"><div class="sec"><span class="sec-l">' + esc(label) + '</span><span class="sec-tag">' + rows.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
-        '<p class="mc-hint">' + esc(note) + '</p><div class="cc-grid">' + rows.map(skmCard).join('') + '</div></div>';
+      const cats = [...new Set(rows.map(e => String(e.category || 'Other')))].sort((a, b) => a.localeCompare(b));
+      return '<div class="skm-shelf" data-shelf="' + esc(id) + '"><div class="sec"><span class="sec-l">' + esc(label) + '</span><span class="sec-tag">' + rows.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' +
+        '<p class="mc-hint">' + esc(note) + '</p>' + cats.map(cat => {
+          const inCat = rows.filter(e => String(e.category || 'Other') === cat), key = id + '/' + cat;
+          return '<details class="cc-group" data-fold="' + esc(key) + '"' + (skmFoldOpen.has(key) ? ' open' : '') + '>' +
+            '<summary class="sec"><span class="sec-l">' + esc(cat) + '</span><span class="sec-tag">' + inCat.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></summary>' +
+            '<div class="cc-grid">' + inCat.map(skmCard).join('') + '</div></details>';
+        }).join('') + '</div>';
     }).join('');
     const pulled = d.entries.filter(e => e.status === 'pulled');
     const banner = pulled.length
@@ -4053,6 +4070,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       skmApplyFilter($('#skm-list'));
     });
     host.addEventListener('click', async ev => {
+      // the Commander's own fold choice (the click lands before the fold toggles)
+      const head = ev.target.closest('summary'), fold = head && head.parentElement;
+      if (fold && fold.matches('details.cc-group') && fold.dataset.fold) { if (fold.open) skmFoldOpen.delete(fold.dataset.fold); else skmFoldOpen.add(fold.dataset.fold); return; }
       const place = ev.target.closest('[data-place]');
       const shownId = host.dataset.agent || agentId;
       if (place) { sfx('click'); placeGearForSkill(place.dataset.place, (typeof App !== 'undefined' && App.agentName) ? App.agentName(shownId) : ''); return; }
@@ -4195,6 +4215,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     return { ready: ready, needsGear: needsGear, off: off };
   }
 
+  let skLibOffOpen = false;   // the TURNED OFF fold, as the Commander last left it
   function renderSkillLibrary(host, skills, agentId, placed) {
     if (!skills.length) { host.innerHTML = '<div class="sk-loading">No skills in the library yet.</div>'; return; }
     const placedSet = {}; (placed || []).forEach(p => placedSet[p] = true);
@@ -4244,13 +4265,16 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
           '</div>' +
         '</div>';
     };
-    const section = (label, list) => list.length
-      ? '<div class="sec sk-state-sec"><span class="sec-l">' + label + '</span><span class="sec-tag">' + list.length + '</span><span class="sec-r"></span><span class="sec-nd"></span></div>' + list.map(card).join('')
-      : '';
+    const head = (label, list) => '<span class="sec-l">' + label + '</span><span class="sec-tag">' + list.length + '</span><span class="sec-r"></span><span class="sec-nd"></span>';
+    const section = (label, list) => list.length ? '<div class="sec sk-state-sec">' + head(label, list) + '</div>' + list.map(card).join('') : '';
     html += section('READY TO USE', groups.ready);
     html += section('NEEDS GEAR', groups.needsGear);
-    html += section('TURNED OFF', groups.off);
+    // TURNED OFF is one line (UX night 10-25): the library opened on 5 skills in use and then a wall of the 69 that are
+    // not. Opened, it stays open while the Commander switches skills on (every switch repaints the library).
+    if (groups.off.length) html += '<details class="sk-fold"' + (skLibOffOpen ? ' open' : '') + '><summary class="sec sk-state-sec">' + head('TURNED OFF', groups.off) + '</summary>' + groups.off.map(card).join('') + '</details>';
     host.innerHTML = html;
+    const offFold = host.querySelector('details.sk-fold');
+    if (offFold) offFold.querySelector('summary').addEventListener('click', () => { skLibOffOpen = !offFold.open; });
     host.querySelectorAll('[data-toggle]').forEach(btn => btn.addEventListener('click', () => {
       const slug = btn.dataset.toggle, next = btn.dataset.enabled !== 'true';
       btn.classList.add('busy');
