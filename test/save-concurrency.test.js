@@ -40,8 +40,31 @@ try {
   assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['a', 'c'], 'window-c\'s save stands');
   assert.equal(save(win('window-c', 600, { _saveRevision: R + 6, workstreams: [{ id: 'c-late' }] })).revision, R + 7);
   store = makeSaveStore(deps);
-  assert.equal(save(win('window-c', 700, { _saveRevision: R + 6 })).conflict, true, 'after a restart the store cannot vouch for the head: preserved, never accepted');
-  assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['c-late']);
+  // …and AFTER A RESTART (support reports 10-15…10-25: one window, the station "went back"). The station file's own wrapper
+  // names the window and revision this store wrote, so the in-process memo dying no longer turns that window's newer save
+  // into a conflict that freezes the station file for the rest of the session.
+  assert.equal(save(win('window-c', 700, { _saveRevision: R + 6, workstreams: [{ id: 'c-late' }, { id: 'c-after-restart' }] })).revision, R + 8, 'after a restart the store still proves the head is window-c\'s own write: its newer save lands');
+  assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['c-late', 'c-after-restart']);
+  store = makeSaveStore(deps);
+  assert.equal(save(win('window-c', 650, { _saveRevision: R + 6 })).conflict, true, 'after a restart a delayed OLDER request from that window still never replaces its newer save');
+  assert.equal(save(win('window-d', 900, { _saveRevision: R + 6 })).conflict, true, 'after a restart another window on an old revision is still a conflict');
+  assert.equal(save(win('window-c', 900, { _saveRevision: R + 6, agent: { id: 'agent', createdAt: 77 } })).conflict, true, 'a copy of another station (another founding) is never taken as that window\'s own work');
+  assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['c-late', 'c-after-restart']);
+  // an outside edit that moved the doc's revision is not this store's write: after a restart it proves nothing
+  const file = path.join(root, 'agent.save.json');
+  const outside = JSON.parse(fs.readFileSync(file, 'utf8'));
+  outside.doc._saveRevision = R + 20; outside.doc.workstreams = [{ id: 'outside' }];
+  fs.writeFileSync(file, JSON.stringify(outside));
+  store = makeSaveStore(deps);
+  assert.equal(save(win('window-c', 800, { _saveRevision: R + 8 })).conflict, true, 'an outside edit of the station file is never overwritten by the window that wrote before it');
+  assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['outside']);
+  // a station file from before 0.14.1 names no writer in its wrapper: after a restart it proves nothing either
+  const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+  legacy.doc._saveRevision = R + 8; legacy.doc.workstreams = [{ id: 'legacy' }]; delete legacy.revision; delete legacy.client;
+  fs.writeFileSync(file, JSON.stringify(legacy));
+  store = makeSaveStore(deps);
+  assert.equal(save(win('window-c', 900, { _saveRevision: R + 7 })).conflict, true, 'a pre-0.14.1 station file cannot vouch for its writer after a restart: preserved, never accepted');
+  assert.deepEqual(store.load('agent').workstreams.map(w => w.id), ['legacy']);
   // conflict snapshots are bounded (audit 2026-09-25 #18): the newest N per agent survive, the rest are pruned
   const small = makeSaveStore({ ...deps, conflictKeep: 3 });
   const conflictsFor = id => fs.readdirSync(root).filter(n => n.indexOf(id + '.save-conflict-') === 0);

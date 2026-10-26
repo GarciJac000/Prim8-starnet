@@ -15,7 +15,8 @@ const repo = path.join(__dirname, '..');
 const read = rel => fs.readFileSync(path.join(repo, rel), 'utf8');
 const indexSrc = read('sidecar/index.js');
 const handlers = ['function crewLooksOf(save)', 'function seedSaveMemos(agentId, doc)', 'function serveSaveLoad(req, res)', 'async function handleSaveWrite(req, res)',
-  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)']
+  'function serveSaveConflicts(req, res)', 'async function handleSaveConflictRestore(req, res)',
+  'function keepStationGrowth(doc, station)', 'function keepTerminalApprovals(doc, station)', 'async function handleSaveAdopt(req, res)']
   .map(h => { const b = fnBody(indexSrc, h); A.ok(b.startsWith(h) && b.length < 6000, 'kit: sliced exactly ' + h); return b; });
 const cloudsaveSrc = read('frontend/app/cloudsave.js');
 const ui = read('frontend/app/stationui.js');
@@ -52,12 +53,12 @@ function sidecar(root, o) {
   const store = makeSaveStore({ fs: o.fs || fs, pathMod: path, root, clock: { now: () => Date.now() } });
   let latestRatingAt = 0;
   const sandbox = { saveStore: store, workspaceDegraded: false, growthRatings: { latestTs: () => latestRatingAt }, readBody: async req => req.body, failNote: () => {},
-    observeDeletedSessions: () => [], Date: o.Date || Date,
+    observeDeletedSessions: () => [], Date: o.Date || Date, Buffer,
     require: m => { if (m === './save-restore.js') return require('../sidecar/save-restore.js'); throw new Error('unexpected require ' + m); },
     publicWorkspaceLineage: () => ({ version: 1 }), URL };
   if (o.tombstones) sandbox.sessionTombstones = o.tombstones;
   const api = vm.runInNewContext("let _remoteLooksMemo = { stamp: '', looks: null };\nlet _stationEpochMemo = { stamp: '', epoch: 1 };\n" + handlers.join('\n') +
-    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore })', sandbox);
+    '\n({ serveSaveLoad, handleSaveWrite, serveSaveConflicts, handleSaveConflictRestore, handleSaveAdopt })', sandbox);
   async function call(fn, req) {
     let code = 0, text = '';
     await fn(req, { writeHead: c => { code = c; }, end: b => { text = b; } });
@@ -71,6 +72,7 @@ function sidecar(root, o) {
       const u = String(url);
       if (u.indexOf('/api/save/conflicts/restore') === 0) return call(api.handleSaveConflictRestore, { body: opts.body });
       if (u.indexOf('/api/save/conflicts') === 0) return call(api.serveSaveConflicts, { url: u });
+      if (u.indexOf('/api/save/adopt') === 0) return call(api.handleSaveAdopt, { body: opts.body });   // a reopening window's unprovable save, merged
       return (opts && opts.method === 'POST') ? call(api.handleSaveWrite, { body: opts.body }) : call(api.serveSaveLoad, { url: u });
     }
   };

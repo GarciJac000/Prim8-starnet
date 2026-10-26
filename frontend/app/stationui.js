@@ -10095,7 +10095,9 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       offer = list.find(c => c && c.file && Number(c.restorable) > 0) || null;
       if (!list.more) break;
     }
-    if (!offer || document.getElementById('save-conflict-notice') || document.getElementById('save-preserved-notice')) return;
+    // a live conflict is offered on its own banner (Restore this window's sessions), even before that banner is drawn
+    const live = (() => { try { const h = CloudSave.health && CloudSave.health(); return !!(h && h.conflict); } catch (_) { return false; } })();
+    if (!offer || live || document.getElementById('save-conflict-notice') || document.getElementById('save-preserved-notice')) return;
     const n = Number(offer.restorable);
     const when = offer.savedAt ? new Date(offer.savedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'earlier';
     const banner = document.createElement('div'); banner.id = 'save-preserved-notice'; banner.setAttribute('role', 'alert');
