@@ -24,9 +24,42 @@ const { makeEnvironmentManager, runProcess } = require('../sidecar/environment.j
 const WIN = process.platform === 'win32';
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-function alive(pid) {
+function alive(pid, platform = process.platform, readStat = p => fs.readFileSync(p, 'utf8')) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
-  try { process.kill(pid, 0); return true; } catch (e) { return !!(e && e.code === 'EPERM'); }
+  try { process.kill(pid, 0); } catch (e) { return !!(e && e.code === 'EPERM'); }
+  if (platform === 'linux') {
+    try {
+      // kill(pid, 0) also succeeds for unreaped zombies. They cannot execute or hold
+      // pipes open; a container's PID 1 may leave their /proc entries around indefinitely.
+      // comm may contain spaces and parentheses, so state follows the LAST closing paren.
+      const stat = readStat('/proc/' + pid + '/stat');
+      const end = stat.lastIndexOf(')');
+      const state = end >= 0 && /^\s+([A-Za-z])(?:\s|$)/.exec(stat.slice(end + 1));
+      if (state && (state[1] === 'Z' || state[1] === 'X')) return false;
+    } catch (_) { /* unknown state is not evidence of termination */ }
+  }
+  return true;
+}
+
+function livenessCases() {
+  const pid = process.pid;
+  for (const state of ['Z', 'X']) {
+    A.eq(alive(pid, 'linux', () => pid + ' (worker ) with spaces) ' + state + ' 1 20 20'), false,
+      'Linux ' + state + ' is terminated even while signal-zero succeeds');
+  }
+  for (const state of ['R', 'S', 'D', 'T', 't', 'I']) {
+    A.eq(alive(pid, 'linux', () => pid + ' (worker) ' + state + ' 1 20 20'), true,
+      'Linux ' + state + ' remains a live process');
+  }
+  A.eq(alive(pid, 'linux', () => { throw new Error('unreadable proc'); }), true, 'unreadable Linux state stays alive');
+  A.eq(alive(pid, 'linux', () => 'malformed stat'), true, 'malformed Linux state stays alive');
+  for (const platform of ['darwin', 'win32']) {
+    let read = false;
+    A.eq(alive(pid, platform, () => { read = true; return pid + ' (worker) Z 1'; }), true, platform + ' keeps signal-zero semantics');
+    A.eq(read, false, platform + ' never reads Linux proc state');
+  }
+  A.eq(alive(-1), false, 'invalid PIDs are not live');
+  A.eq(alive(pid), true, 'the real running test process remains live');
 }
 
 async function waitFor(read, timeoutMs) {
@@ -199,6 +232,7 @@ let reported = false;
 process.on('exit', () => { if (!reported) { console.log('FAIL: shell.process-tree.test never finished (a foreground call did not settle)'); process.exitCode = 1; } });
 
 (async () => {
+  livenessCases();
   await posixWiringCases();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-shell-tree-'));
   try {
