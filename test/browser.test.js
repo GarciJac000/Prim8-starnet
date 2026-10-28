@@ -11,6 +11,22 @@ const { resolveTools } = require('../sidecar/capability/resolve.js');
 const { makeCapCtx } = require('../sidecar/capability/capGate.js');
 const { makeBrowserTools, _internals: T } = require('../sidecar/tools/builtin/browser.js');
 
+// Fake browser drivers do not replace the session's DNS resolver. Supply a deterministic
+// public answer so navigation/redirect/login guards still execute without external DNS.
+const fixtureLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+const makeFixtureBrowserTools = deps => makeBrowserTools({ lookup: fixtureLookup, ...deps });
+const makeFixtureBrowserSession = deps => T.makeBrowserSession({ lookup: fixtureLookup, ...deps });
+
+// Regression guard: none of these contract fixtures may fall back to nodeLookup.
+// Restore the seam even on failure; explicit DNS-security tests below inject their own answers.
+const dns = require('node:dns');
+const originalLookup = dns.promises.lookup;
+const liveDnsAttempts = [];
+dns.promises.lookup = async host => {
+  liveDnsAttempts.push(host);
+  throw new Error('browser contract fixture attempted live DNS: ' + host);
+};
+
 const call = (name, args) => ({ id: 'c_' + name, name, args: args || {}, argsRaw: JSON.stringify(args || {}), parseError: null });
 async function rejects(p, re, msg) {
   try { await p; A.ok(false, msg + ' - did not reject'); }
@@ -120,7 +136,7 @@ function fakeDriver() {
   }
 
   const driver = fakeDriver();
-  const B = makeBrowserTools({ driver, lookup: null, vision: async ({ question }) => 'vision answer: ' + question });
+  const B = makeFixtureBrowserTools({ driver, lookup: null, vision: async ({ question }) => 'vision answer: ' + question });
   const names = B.tools.map(t => t.name).sort();
   A.eq(names, [
     'browser.attach', 'browser.back', 'browser.click', 'browser.console', 'browser.detach', 'browser.dialog', 'browser.drag',
@@ -149,7 +165,7 @@ function fakeDriver() {
     A.eq(driver.log.states[0], '#hud', 'local game state inspection routes through the bounded CDP state reader');
 
     const ownedDriver = fakeDriver();
-    const owned = makeBrowserTools({ driver: ownedDriver, requireOwnedServer: true, ownsLocalUrl: async o => o.serverId === 'bg_1' });
+    const owned = makeFixtureBrowserTools({ driver: ownedDriver, requireOwnedServer: true, ownsLocalUrl: async o => o.serverId === 'bg_1' });
     const ownedNav = owned.tools.find(t => t.name === 'browser.test_navigate');
     A.ok(ownedNav.schema.required.includes('serverId'), 'production local navigation requires an owned background-server handle');
     await rejects(ownedNav.run({ url: 'http://127.0.0.1:5173/', serverId: 'bg_other' }, { agentId: 'ag' }), /not proven to belong/i, 'unowned localhost service is refused');
@@ -204,7 +220,7 @@ function fakeDriver() {
   // registry/capability integration
   {
     const reg = makeRegistry();
-    makeBrowserTools({ driver: fakeDriver() }).register(reg);
+    makeFixtureBrowserTools({ driver: fakeDriver() }).register(reg);
     const station = { agents: { ag: { id: 'ag', room: 'r' } }, rooms: { r: { id: 'r', objects: [{ objectType: 'computer' }, { objectType: 'dish' }] } } };
     const resolved = resolveTools('ag', station);
     A.ok(resolved.tools.indexOf('browser.navigate') >= 0 && resolved.tools.indexOf('browser.click') >= 0, 'dish grants browser tools');
@@ -220,7 +236,7 @@ function fakeDriver() {
   // Chromium-missing degrades as a clean tool error through dispatch
   {
     const reg = makeRegistry();
-    makeBrowserTools({ existsSync: () => false, WebSocketImpl: null }).register(reg);
+    makeFixtureBrowserTools({ existsSync: () => false, WebSocketImpl: null }).register(reg);
     const r = await reg.dispatch(call('browser.navigate', { url: 'https://example.com' }));
     A.eq(r.isError, true, 'missing Chromium returns tool error');
     A.ok(/browser unavailable/.test(r.content), 'missing Chromium error is explicit');
@@ -228,12 +244,12 @@ function fakeDriver() {
 
   // browser.vision: with a vision dep the answer flows through; with NONE it is honestly unavailable
   {
-    const withVision = makeBrowserTools({ driver: fakeDriver(), vision: async ({ question }) => 'I see: ' + question });
+    const withVision = makeFixtureBrowserTools({ driver: fakeDriver(), vision: async ({ question }) => 'I see: ' + question });
     const ok = await withVision.tools.find(t => t.name === 'browser.vision').run({ question: 'what page?' }, {});
     A.eq(ok.summary, 'vision', 'wired vision reports success summary');
     A.ok(/I see: what page\?/.test(ok.content), 'wired vision answer flows through');
 
-    const noVision = makeBrowserTools({ driver: fakeDriver() });   // no vision dep
+    const noVision = makeFixtureBrowserTools({ driver: fakeDriver() });   // no vision dep
     const un = await noVision.tools.find(t => t.name === 'browser.vision').run({ question: 'what page?' }, {});
     A.eq(un.summary, 'vision unavailable', 'missing vision provider yields an honest unavailable summary, not a success stub');
     // 2026-07-22: the unavailable message must NEVER solicit an API key from the user (that wording primed
@@ -248,7 +264,7 @@ function fakeDriver() {
   //      screen; a visible window exists ONLY while the Commander asked to watch) ----
   {
     const made = [];   // capture every driver launch + its mode via the makeDriver seam
-    const mkSession = (env, extra) => T.makeBrowserSession(Object.assign({
+    const mkSession = (env, extra) => makeFixtureBrowserSession(Object.assign({
       env: env || {},
       makeDriver: (d) => { const drv = fakeDriver(); drv.headed = !!d.headed; drv.visible = () => !!d.headed; drv.close = () => { drv.closed = true; }; made.push(drv); return drv; }
     }, extra || {}));
@@ -286,7 +302,7 @@ function fakeDriver() {
     // while Chrome still owns the profile lock even though close() eventually succeeds.
     let modeCloseSettled = true;
     const asyncMade = [];
-    const asyncSession = T.makeBrowserSession({
+    const asyncSession = makeFixtureBrowserSession({
       makeDriver: (d) => {
         const drv = fakeDriver();
         drv.headed = !!d.headed;
@@ -311,7 +327,7 @@ function fakeDriver() {
   // constructed attended host may opt in, but runOnce never does for tasks/autonomy/tests.
   {
     const made = [];
-    const B2 = makeBrowserTools({
+    const B2 = makeFixtureBrowserTools({
       makeDriver: (d) => { const drv = fakeDriver(); drv.headed = !!d.headed; drv.visible = () => !!d.headed; drv.close = () => {}; made.push(drv); return drv; }
     });
     const nav = B2.tools.find(t => t.name === 'browser.navigate');
@@ -322,7 +338,7 @@ function fakeDriver() {
     await rejects(nav.run({ url: 'https://example.com', visible: true }, {}), /visible.*disabled|headless-only/i, 'forged visible:true is refused by host policy');
     A.eq(made.map(d => d.headed), [false], 'ordinary task browsing never creates a headed driver');
 
-    const attended = makeBrowserTools({
+    const attended = makeFixtureBrowserTools({
       allowVisible: true,
       makeDriver: (d) => { const drv = fakeDriver(); drv.headed = !!d.headed; drv.visible = () => !!d.headed; drv.close = () => {}; made.push(drv); return drv; }
     });
@@ -715,7 +731,7 @@ function fakeDriver() {
   // page content), and the viewport was pinned to the --window-size launch flag.
   {
     const d = fakeDriver();
-    const X = makeBrowserTools({ driver: d });
+    const X = makeFixtureBrowserTools({ driver: d });
     const tool = n => X.tools.find(t => t.name === n);
     const snap = await X.session.snapshot();
     const [btn, box] = snap;
@@ -753,7 +769,7 @@ function fakeDriver() {
 
     // A driver that predates these says so plainly rather than throwing a raw TypeError.
     const old = fakeDriver(); delete old.hover;
-    await rejects(makeBrowserTools({ driver: old }).session.hover('b1'), /unknown browser ref|unavailable in this driver/, 'a driver without hover reports it honestly');
+    await rejects(makeFixtureBrowserTools({ driver: old }).session.hover('b1'), /unknown browser ref|unavailable in this driver/, 'a driver without hover reports it honestly');
   }
 
   // ---- TABS: adopted page targets ------------------------------------------------------------
@@ -979,7 +995,7 @@ function fakeDriver() {
     // snapshot's refs still work.
     const presses = sent => sent.filter(m => m.method === 'Input.dispatchMouseEvent' && m.params && m.params.type === 'mousePressed');
     const inputs = sent => sent.filter(m => /^Input\./.test(m.method)).length;
-    const sessionOn = R => T.makeBrowserSession({ makeDriver: () => R.d, lookup: null });
+    const sessionOn = R => makeFixtureBrowserSession({ makeDriver: () => R.d, lookup: null });
     {
       const R = openerRig(9367);
       const s = sessionOn(R);
@@ -1237,7 +1253,7 @@ function fakeDriver() {
   {
     let failHeaded = 0;
     const made = [];
-    const mk = extra => T.makeBrowserSession(Object.assign({
+    const mk = extra => makeFixtureBrowserSession(Object.assign({
       lookup: null, env: {},   // never inherit a headless pin from the shell: the relaunches below need a headed request
       makeDriver: d => {
         if (d.headed && failHeaded > 0) { failHeaded--; throw new Error('no window could be opened'); }
@@ -1416,7 +1432,7 @@ function fakeDriver() {
         close: async () => {}, usingPersistentProfile: () => false, snapshot: async () => [], tabs: async () => [] };
       built.push(drv); return drv;
     };
-    const B = makeBrowserTools({ makeDriver: make, lookup: null });
+    const B = makeFixtureBrowserTools({ makeDriver: make, lookup: null });
     await B.session.navigate('https://example.com/');
     built[0].failNext = 'dead';
     A.eq(await B.session.navigate('https://example.org/'), 'https://example.org/', 'a navigate whose only tab was closed lands anyway');
@@ -1435,14 +1451,14 @@ function fakeDriver() {
     const ephemeral = fakeDriver();
     ephemeral.evalPublic = async e => ({ ok: true, value: 'ran:' + e });
     ephemeral.usingPersistentProfile = () => false;
-    const E = makeBrowserTools({ driver: ephemeral });
+    const E = makeFixtureBrowserTools({ driver: ephemeral });
     const out = await E.tools.find(t => t.name === 'browser.eval').run({ expression: '1+1' }, {});
     A.ok(/ran:1\+1/.test(out.content), 'eval RUNS on the ephemeral profile — there are no credentials to steal there');
 
     const signedIn = fakeDriver();
     signedIn.evalPublic = async () => { throw new Error('should never reach the driver'); };
     signedIn.usingPersistentProfile = () => true;
-    const S2 = makeBrowserTools({ driver: signedIn });
+    const S2 = makeFixtureBrowserTools({ driver: signedIn });
     await rejects(S2.tools.find(t => t.name === 'browser.eval').run({ expression: 'document.cookie' }, {}),
       /refused|signed-in station profile/i, 'eval is REFUSED while the signed-in station profile is live');
     await rejects(S2.session.evalPublic('document.cookie'), /cookies and storage/i,
@@ -1462,7 +1478,7 @@ function fakeDriver() {
     // The click's NEW-TAB note points at browser.tab_select / browser.tabs, both DEFERRED: the result reveals them.
     const popper = fakeDriver();
     popper.click = async () => 'clicked\nThis click opened a NEW tab (index 1). You are still on tab 0; use browser.tab_select 1 to read it (browser.tabs lists every tab).';
-    const P = makeBrowserTools({ driver: popper });
+    const P = makeFixtureBrowserTools({ driver: popper });
     const popReg = makeRegistry();
     P.register(popReg);
     const popSnap = await popReg.dispatch(call('browser.snapshot', {}));
@@ -1482,7 +1498,7 @@ function fakeDriver() {
     insp.inspect = async () => ({ ok: true, tag: 'button', role: '', text: 'Buy', disabled: true, checked: null,
       box: { x: 1, y: 2, w: 3, h: 4 }, styles: { display: 'none' }, attrs: { id: 'buy' }, data: { sku: 'X1' },
       shadow: [{ tag: 'input', type: 'text', text: '' }] });
-    const I = makeBrowserTools({ driver: insp });
+    const I = makeFixtureBrowserTools({ driver: insp });
     const ins = await I.tools.find(t => t.name === 'browser.inspect').run({ ref: (await I.session.snapshot())[0].ref }, {});
     A.ok(/display=none/.test(ins.content), 'inspect reports computed style — the concrete thing the eval gate cost');
     A.ok(/sku=X1/.test(ins.content), 'inspect reports data-* attributes');
@@ -1594,7 +1610,7 @@ function fakeDriver() {
 
       const d = fakeDriver();
       d.upload = async (node, abs, expected) => { d.log.uploaded = [node.text, abs]; return { status: 'selected', files: expected, retained: true, events: ['change'], evidence: 'FileList readback' }; };
-      const U = makeBrowserTools({ driver: d, fsp, pathMod: path, root: ws });
+      const U = makeFixtureBrowserTools({ driver: d, fsp, pathMod: path, root: ws });
       const snap = await U.session.snapshot();
       const ref = snap[0].ref;
       const up = U.tools.find(t => t.name === 'browser.upload');
@@ -1635,7 +1651,7 @@ function fakeDriver() {
       const fsp = require('node:fs/promises');
       const emitted = [];
       const ctx = { agentId: 'ag', room: 'lab', emit: (name, payload) => emitted.push([name, payload]) };
-      const S = makeBrowserTools({ driver: fakeDriver(), fsp, pathMod: path, root: ws });
+      const S = makeFixtureBrowserTools({ driver: fakeDriver(), fsp, pathMod: path, root: ws });
 
       const out = await S.tools.find(t => t.name === 'browser.screenshot').run({}, ctx);
       const rel = (out.content.match(/shots\/shot-[a-f0-9]+\.png/) || [])[0];
@@ -1654,13 +1670,13 @@ function fakeDriver() {
       A.eq((again.content.match(/shots\/shot-[a-f0-9]+\.png/) || [])[0], rel, 'an unchanged capture is idempotent (content-addressed)');
 
       // vision now PERSISTS the frame it analyzed, so the model's reading can be checked against pixels.
-      const V = makeBrowserTools({ driver: fakeDriver(), fsp, pathMod: path, root: ws, vision: async () => 'a login form' });
+      const V = makeFixtureBrowserTools({ driver: fakeDriver(), fsp, pathMod: path, root: ws, vision: async () => 'a login form' });
       const vout = await V.tools.find(t => t.name === 'browser.vision').run({ question: 'what is this?' }, ctx);
       A.ok(/a login form/.test(vout.content), 'vision still answers the question');
       A.ok(/Screenshot saved to shots\//.test(vout.content), 'vision saves the frame it analyzed instead of dropping it');
 
       // No workspace wired: say so honestly rather than naming a file that does not exist.
-      const N = makeBrowserTools({ driver: fakeDriver() });
+      const N = makeFixtureBrowserTools({ driver: fakeDriver() });
       const nout = await N.tools.find(t => t.name === 'browser.screenshot').run({}, ctx);
       A.ok(/no workspace to save into/.test(nout.content), 'a run without a workspace admits the image was discarded');
       A.ok(!/shots\//.test(nout.content), 'and never invents a saved path');
@@ -1755,12 +1771,12 @@ function fakeDriver() {
     {
       const statusDriver = fakeDriver();
       statusDriver.lastResponse = () => ({ status: 403, statusText: 'Forbidden', failure: null });
-      const B403 = makeBrowserTools({ driver: statusDriver });
+      const B403 = makeFixtureBrowserTools({ driver: statusDriver });
       const out = await B403.tools.find(t => t.name === 'browser.navigate').run({ url: 'https://example.com' }, {});
       A.ok(/HTTP 403/.test(out.content), 'browser.navigate tells the agent the page was a 403');
       A.ok(/error response, not the content/.test(out.content), 'and warns that the body is the error page');
       // A driver with no network visibility must not invent a status.
-      const plain = await makeBrowserTools({ driver: fakeDriver() }).tools.find(t => t.name === 'browser.navigate').run({ url: 'https://example.com' }, {});
+      const plain = await makeFixtureBrowserTools({ driver: fakeDriver() }).tools.find(t => t.name === 'browser.navigate').run({ url: 'https://example.com' }, {});
       A.ok(!/HTTP/.test(plain.content), 'a driver without network visibility claims no status (truthful telemetry)');
     }
 
@@ -1769,7 +1785,7 @@ function fakeDriver() {
       const wallDriver = fakeDriver();
       wallDriver.challengeStatus = async () => ({ challenged: true, signal: 'title', title: 'Just a moment...' });
       wallDriver.lastResponse = () => ({ status: 200, statusText: 'OK', failure: null });
-      const wall = makeBrowserTools({ driver: wallDriver });
+      const wall = makeFixtureBrowserTools({ driver: wallDriver });
       const nav = await wall.tools.find(t => t.name === 'browser.navigate').run({ url: 'https://example.com/challenge' }, {});
       A.ok(/^verification wall(?: 200)?$/.test(nav.summary), 'browser.navigate reports a challenge as its own outcome');
       A.ok(/not page content/i.test(nav.content), 'navigation refuses to treat a challenge as content');
@@ -1802,7 +1818,7 @@ function fakeDriver() {
     // 1. UNATTENDED RUNS REFUSE: no attendedLogin dep (cron/hub/night-shift) -> honest error, no window.
     {
       const seam = mkSeam();
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver });
       await rejects(B2.tools.find(t => t.name === 'browser.login').run({ url: 'https://erank.com/login' }, {}),
         /watched COMMS session|unattended/i, 'browser.login refuses without the attended channel');
       A.eq(seam.made.length, 0, 'an unattended login attempt never launches any browser');
@@ -1811,7 +1827,7 @@ function fakeDriver() {
     // 2. ENV-PINNED HEADLESS REFUSES before any consent ask or window.
     {
       const seam = mkSeam();
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, env: { STARNET_BROWSER_HEADLESS: '1' }, attendedLogin: { prompt: async () => 'once' } });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, env: { STARNET_BROWSER_HEADLESS: '1' }, attendedLogin: { prompt: async () => 'once' } });
       await rejects(B2.tools.find(t => t.name === 'browser.login').run({ url: 'https://erank.com' }, {}),
         /pins the browser headless/i, 'env headless pin refuses a login window');
       A.eq(seam.made.length, 0, 'env-pinned headless never launches a headed browser');
@@ -1821,7 +1837,7 @@ function fakeDriver() {
     {
       let prompts = 0;
       const seam = mkSeam();
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, attendedLogin: { prompt: async () => { prompts++; return 'once'; } } });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, attendedLogin: { prompt: async () => { prompts++; return 'once'; } } });
       await rejects(B2.tools.find(t => t.name === 'browser.login').run({ url: 'http://192.168.0.5/router' }, {}),
         /private\/loopback\/intranet/i, 'login URL rides the same SSRF guard as navigate');
       A.eq(prompts, 0, 'a refused URL never generates a consent ask');
@@ -1831,7 +1847,7 @@ function fakeDriver() {
     {
       const seam = mkSeam();
       const asked = [];
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, attendedLogin: { prompt: async f => { asked.push(f.tool); return 'deny'; } } });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, attendedLogin: { prompt: async f => { asked.push(f.tool); return 'deny'; } } });
       const out = await B2.tools.find(t => t.name === 'browser.login').run({ url: 'https://erank.com/login' }, {});
       A.eq(asked, ['browser.login'], 'a declined open ask never proceeds to the done-wait');
       A.ok(/declined/i.test(out.content), 'declined login reports honestly');
@@ -1844,7 +1860,7 @@ function fakeDriver() {
       const seam = mkSeam();
       const lease = mkLease();
       const asked = [];
-      const B2 = makeBrowserTools({
+      const B2 = makeFixtureBrowserTools({
         makeDriver: seam.makeDriver, forceHeadless: true, syntheticInputOnly: true,
         persistentProfile: lease.profile,
         attendedLogin: { prompt: async f => { asked.push({ tool: f.tool, host: f.argsSummary, fresh: f.fresh }); return 'once'; } }
@@ -1873,7 +1889,7 @@ function fakeDriver() {
     {
       let closeSettled = true;
       const made = [];
-      const B2 = makeBrowserTools({
+      const B2 = makeFixtureBrowserTools({
         persistentProfile: mkLease().profile,
         attendedLogin: { prompt: async () => 'once' },
         makeDriver: (d) => {
@@ -1901,7 +1917,7 @@ function fakeDriver() {
     // surface the failure instead of reporting a successful login with two same-profile drivers alive.
     {
       const made = [];
-      const B2 = makeBrowserTools({
+      const B2 = makeFixtureBrowserTools({
         persistentProfile: mkLease().profile,
         attendedLogin: { prompt: async () => 'once' },
         makeDriver: (d) => {
@@ -1925,7 +1941,7 @@ function fakeDriver() {
     {
       const seam = mkSeam();
       const lease = mkLease(); lease.ok = false;
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, persistentProfile: lease.profile, attendedLogin: { prompt: async () => 'once' } });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, persistentProfile: lease.profile, attendedLogin: { prompt: async () => 'once' } });
       await rejects(B2.tools.find(t => t.name === 'browser.login').run({ url: 'https://erank.com' }, {}),
         /in use by another agent run/i, 'a held profile lease refuses the login honestly');
       A.eq(seam.made.length, 0, 'lease contention never opens a window');
@@ -1934,7 +1950,7 @@ function fakeDriver() {
     // 8. HEADLESS-ONLY BINARY: window impossible -> restore headless posture, honest error.
     {
       const made = [];
-      const B2 = makeBrowserTools({
+      const B2 = makeFixtureBrowserTools({
         makeDriver: (d) => { const drv = fakeDriver(); drv.headed = !!d.headed; drv.visible = () => false; drv.close = () => {}; made.push(drv); return drv; },
         attendedLogin: { prompt: async () => 'once' }
       });
@@ -1948,7 +1964,7 @@ function fakeDriver() {
     {
       const seam = mkSeam();
       let n = 0;
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, persistentProfile: mkLease().profile, attendedLogin: { prompt: async () => (++n === 1 ? 'once' : 'deny') } });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, persistentProfile: mkLease().profile, attendedLogin: { prompt: async () => (++n === 1 ? 'once' : 'deny') } });
       const out = await B2.tools.find(t => t.name === 'browser.login').run({ url: 'https://erank.com' }, {});
       A.ok(/without a Done confirmation/i.test(out.content), 'a cancelled done-wait reports unconfirmed honestly');
       A.eq(seam.made[seam.made.length - 1].headed, false, 'cancelled login still restores headless mode');
@@ -1959,7 +1975,7 @@ function fakeDriver() {
     {
       const seam = mkSeam();
       const lease = mkLease();
-      const B2 = makeBrowserTools({ makeDriver: seam.makeDriver, forceHeadless: true, profileDir: '/ephemeral', persistentProfile: lease.profile });
+      const B2 = makeFixtureBrowserTools({ makeDriver: seam.makeDriver, forceHeadless: true, profileDir: '/ephemeral', persistentProfile: lease.profile });
       await B2.session.navigate('https://example.com');
       A.eq(seam.made[0].profileDir, '/station-profile', 'a plain research run browses on the station profile (saved logins apply)');
       A.eq(seam.made[0].headed, false, 'the persistent profile never changes the headless posture');
@@ -1967,14 +1983,14 @@ function fakeDriver() {
 
       const seam2 = mkSeam();
       const held = mkLease(); held.ok = false;
-      const B3 = makeBrowserTools({ makeDriver: seam2.makeDriver, forceHeadless: true, profileDir: '/ephemeral', persistentProfile: held.profile });
+      const B3 = makeFixtureBrowserTools({ makeDriver: seam2.makeDriver, forceHeadless: true, profileDir: '/ephemeral', persistentProfile: held.profile });
         await rejects(B3.session.navigate('https://example.com'), /in use by another agent run/, 'a held lease cannot silently replace saved logins');
         A.eq(seam2.made.length, 0, 'contention does not launch an unsigned browser');
     }
 
     // 11. browser.login carries a long tool timeout (it wraps two human-paced consent waits).
     {
-      const B2 = makeBrowserTools({ driver: fakeDriver() });
+      const B2 = makeFixtureBrowserTools({ driver: fakeDriver() });
       const t = B2.tools.find(x => x.name === 'browser.login');
       A.ok(t.timeoutMs >= 30 * 60 * 1000, 'login tool timeout outlives the fail-closed consent timers');
       A.eq(t.requiresConsent, false, 'login runs its OWN two-phase consent (no double prompt)');
@@ -2039,10 +2055,10 @@ function fakeDriver() {
      timeout fired first it would abort run() mid-flight and the stopLoading recovery above would never
      happen — re-creating the exact wedge. Locked here because the two numbers live in different places. */
   {
-    const navTool = makeBrowserTools({ existsSync: () => false, WebSocketImpl: null }).tools
+    const navTool = makeFixtureBrowserTools({ existsSync: () => false, WebSocketImpl: null }).tools
       .find(t => t.name === 'browser.navigate');
     A.ok(navTool.timeoutMs >= 45000, 'browser.navigate gets a larger tool budget than other browser tools');
-    const others = makeBrowserTools({ existsSync: () => false, WebSocketImpl: null }).tools
+    const others = makeFixtureBrowserTools({ existsSync: () => false, WebSocketImpl: null }).tools
       .filter(t => t.name !== 'browser.navigate' && t.name !== 'browser.login' && t.name !== 'browser.need_human');   // login + STEP-IN are human waits, not browsing
     A.ok(others.every(t => t.timeoutMs < navTool.timeoutMs), 'and it is the longest of the ordinary browser tools');
   }
@@ -2073,7 +2089,35 @@ function fakeDriver() {
     let noLookup = true;
     try { await assertResolvedSafe(new URL('http://public-name.example/'), null); } catch (e) { noLookup = false; }
     A.ok(noLookup, 'with no resolver wired the guard is inert (rigs/tests keep the old behaviour)');
+
+    // Fixture defaults must not mask an explicitly injected resolver or skip the session's guard.
+    const lookedUp = [];
+    const publicDriver = fakeDriver();
+    const publicSession = makeFixtureBrowserSession({ driver: publicDriver, lookup: async host => {
+      lookedUp.push(host);
+      return fixtureLookup(host);
+    } });
+    await publicSession.navigate('https://example.com/');
+    A.eq(lookedUp, ['example.com', 'example.com'], 'deterministic DNS still validates requested and final URLs');
+
+    for (const [answer, reason] of [
+      [[{ address: '127.0.0.1' }], /private address/],
+      [[{ address: '93.184.216.34' }, { address: '192.168.1.10' }], /private address/],
+      [[], /no verified DNS address/]
+    ]) {
+      const blockedDriver = fakeDriver();
+      const session = makeFixtureBrowserSession({ driver: blockedDriver, lookup: async () => answer });
+      await rejects(session.navigate('https://example.com/'), reason, 'injected unsafe DNS answer fails closed');
+      A.eq(blockedDriver.log.navigated, [], 'refused DNS never reaches the driver');
+    }
+    const failedDriver = fakeDriver();
+    const failedSession = makeFixtureBrowserSession({ driver: failedDriver, lookup: async () => {
+      throw new Error('fixture DNS unavailable');
+    } });
+    await rejects(failedSession.navigate('https://example.com/'), /fixture DNS unavailable/, 'resolver failure is not replaced with a public fixture answer');
+    A.eq(failedDriver.log.navigated, [], 'resolver failure prevents navigation');
   }
 
+  A.eq(liveDnsAttempts, [], 'browser contract fixtures never invoke the live DNS resolver');
   A.report('browser.test');
-})();
+})().finally(() => { dns.promises.lookup = originalLookup; });

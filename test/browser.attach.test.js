@@ -184,12 +184,17 @@ function fakeDriver() {
 
   // ---- 8. THE ATTACHED STATE IS STICKY — no silent fallback to a station browser ----
   {
-    const B = makeBrowserTools({ driver: fakeDriver(), fetchImpl: devtoolsFetch() });
+    const resolved = [];
+    const B = makeBrowserTools({ driver: fakeDriver(), fetchImpl: devtoolsFetch(), lookup: async host => {
+      resolved.push(host);
+      return [{ address: '93.184.216.34', family: 4 }];
+    } });
     await B.session.attach(9222);
     /* A headless request would ordinarily relaunch the driver. Honouring it here would rebuild WITHOUT
        attachPort — the agent would keep clicking, in a different browser, signed into nothing, and the
        transcript would not say so. */
     await B.session.navigate('https://example.com');
+    A.eq(resolved, ['example.com', 'example.com'], 'attached navigation validates requested and final URLs through fixture DNS');
     A.eq(B.session.attachedToUser(), true, 'still attached after a navigation');
     A.eq(B.session.evalAllowed().ok, false, 'and the eval door is still shut');
   }
