@@ -6,6 +6,13 @@
 
 const A = require('./_assert.js');
 const { makeBrowserTools } = require('../sidecar/tools/builtin/browser.js');
+const dns = require('node:dns');
+const originalLookup = dns.promises.lookup;
+const liveDnsAttempts = [];
+dns.promises.lookup = async host => {
+  liveDnsAttempts.push(host);
+  throw new Error('desktop login fixture attempted live DNS: ' + host);
+};
 
 function makeLease(dir) {
   const state = { acquired: 0, released: 0 };
@@ -40,6 +47,11 @@ function makeDriverSeam() {
 
 function desktopBrowser(seam, lease, prompts) {
   return makeBrowserTools({
+    // The driver is simulated; keep DNS deterministic while retaining URL/address guards.
+    lookup: async host => {
+      if (host !== 'www.linkedin.com') throw new Error('unexpected fixture hostname: ' + host);
+      return [{ address: '93.184.216.34', family: 4 }];
+    },
     // This models the packaged desktop host after src-tauri starts the sidecar: there is
     // deliberately no desktop-wide STARNET_BROWSER_HEADLESS pin.
     env: { STARNET_DESKTOP_SHELL: '1', STARNET_USER_CONTROL_MODE: 'preserve' },
@@ -98,5 +110,7 @@ function desktopBrowser(seam, lease, prompts) {
   A.ok(lease.state.released >= 1 && lease.state.acquired >= 2, 'the persistent profile lease survives clean run handoff');
   await secondRun.session.close();
 
+  A.eq(liveDnsAttempts, [], 'the simulated desktop login journey never invokes live DNS');
   A.report('browser.desktop-login-journey.test');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().catch(error => { console.error(error); process.exitCode = 1; })
+  .finally(() => { dns.promises.lookup = originalLookup; });
